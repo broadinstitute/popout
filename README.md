@@ -1,16 +1,16 @@
 # popout
 
-**GPU-accelerated self-bootstrapping local ancestry inference.**
+**GPU-accelerated local ancestry inference at biobank scale — no reference panel required.**
 
-No reference panel required. Feed it phased WGS from a large cohort and ancestry structure falls out of the joint distribution.
+Feed it phased WGS from a large cohort and ancestry structure falls out of the joint distribution.
 
 ## How it works
 
 With 500K+ samples, the data *is* the reference panel. The pipeline:
 
-1. **SEED** — Randomized SVD on a SNP subset projects all haplotypes into PCA space. K-means assigns initial (global) ancestry labels. Number of ancestries auto-detected from the eigenvalue gap.
+1. **SEED** — Randomized SVD on a SNP subset projects all haplotypes into PCA space. GMM assigns soft ancestry labels. Number of ancestries auto-detected from the eigenvalue gap.
 
-2. **INIT** — Allele frequencies per ancestry computed from hard labels. This is a single GEMM on GPU: `(A × H) @ (H × T)`.
+2. **INIT** — Allele frequencies per ancestry computed from soft GMM assignments via weighted GEMM. Window-based refinement handles admixed haplotypes.
 
 3. **EM ITERATE** — Forward-backward HMM with A states (not K reference haplotypes — just A ancestries). State space is tiny: 8 floats per haplotype. All haplotypes run simultaneously on GPU. M-step updates allele frequencies, ancestry proportions μ, and generations since admixture T. Converges in 2-3 iterations with large samples.
 
@@ -27,28 +27,49 @@ With 500K+ samples, the data *is* the reference panel. The pipeline:
 ## Usage
 
 ```bash
+# From PGEN (recommended for biobank-scale data)
+popout --pgen /path/to/per_chrom_pgens/ \
+       --map plink.GRCh38.map \
+       --out results/cohort \
+       --thin-cm 0.02
+
+# From VCF
 popout --vcf cohort.phased.vcf.gz \
        --map plink.GRCh38.map \
        --out results/cohort \
-       --n-ancestries 6 \
-       --n-em-iter 3
+       --n-ancestries 6
 
-# Auto-detect number of ancestries:
-popout --vcf cohort.phased.vcf.gz \
-       --map plink.GRCh38.map \
-       --out results/cohort
+# Generate QC report from a completed run
+popout report --stats results/cohort.summary.json --out report/
 ```
+
+### Preparing PGEN input from VCF
+
+```bash
+for chr in {1..22}; do
+  plink2 --vcf chr${chr}.phased.vcf.gz --make-pgen phased-list --out pgen_dir/chr${chr}
+done
+```
+
+The `phased-list` flag preserves phase information. Point `--pgen` at the directory.
 
 ## Installation
 
 ```bash
 # GPU (recommended)
-pip install jax[cuda12] pysam
-pip install -e .
+pip install -e ".[dev]"
 
 # CPU (slow but works)
-pip install jax pysam
-pip install -e .
+pip install -e ".[dev]" --no-deps
+pip install jax numpy pysam Pgenlib matplotlib pytest
+```
+
+### Docker
+
+```bash
+docker build -t popout .
+docker run --gpus all -v /data:/data popout \
+    --pgen /data/pgens/ --map /data/map.txt --out /data/results
 ```
 
 ## Output files
@@ -56,18 +77,48 @@ pip install -e .
 | File | Description |
 |------|-------------|
 | `{prefix}.global.tsv` | Per-sample global ancestry proportions |
-| `{prefix}.model` | Fitted model parameters (mu, T, mismatch rates) |
+| `{prefix}.tracts.tsv.gz` | Local ancestry tracts (BED-like intervals per haplotype) |
+| `{prefix}.model` | Fitted model parameters (n_ancestries, mu, T) |
+| `{prefix}.stats.jsonl` | Timestamped runtime metrics (for live monitoring) |
+| `{prefix}.summary.json` | Aggregated QC stats (consumed by `popout report`) |
+
+### Tract format
+
+```
+#chrom  start_bp   end_bp     sample    haplotype  ancestry  n_sites
+chr1    100000     5200000    SAMPLE_0  0          0         45
+chr1    5250000    12800000   SAMPLE_0  0          2         62
+```
+
+## Monitoring
+
+```bash
+# Live monitoring with Weights & Biases
+popout --pgen data/ --map map.txt --out results --monitor wandb
+
+# Live monitoring with TensorBoard
+popout --pgen data/ --map map.txt --out results --monitor tensorboard
+
+# Disable stats files entirely
+popout --pgen data/ --map map.txt --out results --no-stats
+```
 
 ## Architecture
 
 ```
-vcf_io.py      pysam VCF reading + genetic map loading
-spectral.py    Randomized SVD + k-means for seed labels
+pgen_io.py     PGEN reader (biobank-scale, chunked, with site thinning)
+vcf_io.py      VCF/BCF reader (pysam, for smaller datasets)
+gmap.py        Genetic map loading and chromosome normalization
+spectral.py    Randomized SVD + GMM for seed labels
 hmm.py         Forward-backward HMM in JAX (GPU workhorse)
 em.py          EM loop: seed → init → iterate → decode
-output.py      VCF/TSV output writers
+output.py      Tract TSV, global ancestry TSV, model file writers
+stats.py       Runtime metrics collection (JSONL + W&B/TensorBoard)
+report.py      QC report generation (matplotlib plots from summary JSON)
 cli.py         Command-line interface
-datatypes.py   Core data structures
+datatypes.py   Core data structures (ChromData, AncestryModel, etc.)
+simulate.py    Simulated admixed data + accuracy evaluation
+demo.py        Standalone demo on simulated data
 ```
 
 ## Performance estimates
@@ -81,21 +132,19 @@ datatypes.py   Core data structures
 | 500K    | A100   | ~15 minutes          |
 | 500K    | 8×A100 | ~3 minutes           |
 
-## Limitations (first draft)
+## Limitations
 
 - No haplotype-window emission model yet (single-site only). This limits accuracy for closely related ancestries (e.g., CHB vs JPT).
-- No checkpointed backward pass — stores full `(H, T, A)` posteriors. For 1M haplotypes × 500K WGS sites, this exceeds GPU memory. Works fine for array data (~20K sites) or with `--batch-size` tuning.
+- No checkpointed backward pass — stores full `(H, T, A)` posteriors. For WGS use `--thin-cm 0.02` to reduce to array-like density.
 - No multi-GPU support yet. Use `--chromosomes` to manually partition across GPUs.
-- VCF output is slow for large cohorts; global ancestry TSV is the primary output.
 
 ## What's next
 
 - [ ] Haplotype-window emissions (8-SNP pattern histograms per ancestry)
-- [ ] Checkpointed backward pass for WGS-scale site counts
+- [ ] Checkpointed backward pass for full WGS-scale site counts
 - [ ] `jax.pmap` multi-GPU parallelism
-- [ ] Streaming VCF reader (don't load full chromosome into RAM)
-- [ ] Benchmark against FLARE on simulated data
 - [ ] Rare-ancestry detection (clusters with <1% of samples)
+- [ ] Benchmark against FLARE on simulated data
 
 ## References
 
