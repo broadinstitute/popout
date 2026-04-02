@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "popout"
+version = "0.1.0"
+description = "GPU-accelerated self-bootstrapping local ancestry inference"
+requires-python = ">=3.10"
+dependencies = [
+    "jax[cuda12]>=0.4.20",
+    "jaxlib>=0.4.20",
+    "pysam>=0.22.0",
+    "numpy>=1.24",
+    "Pgenlib>=0.90.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "matplotlib"]
+
+[project.scripts]
+popout = "popout.cli:main"

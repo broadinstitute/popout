@@ -1,0 +1,279 @@
+"""Write ancestry results to output files.
+
+Produces:
+  - Ancestry tract BED/TSV (compact interval-based local ancestry)
+  - Global ancestry proportions TSV
+  - Model parameters file
+  - (Optional) Ancestry VCF with AN1/AN2 FORMAT fields (FLARE-compatible)
+"""
+
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import numpy as np
+import pysam
+
+from .datatypes import AncestryResult, ChromData
+
+log = logging.getLogger(__name__)
+
+
+def write_ancestry_vcf(
+    results: list[AncestryResult],
+    chrom_data_list: list[ChromData],
+    vcf_in_path: str,
+    vcf_out_path: str,
+    write_probs: bool = False,
+) -> None:
+    """Write ancestry calls to a VCF file.
+
+    Mimics FLARE output format: AN1/AN2 FORMAT fields for the most probable
+    ancestry on each haplotype.  Optionally writes ANP1/ANP2 posterior
+    probability fields.
+    """
+    vcf_in = pysam.VariantFile(vcf_in_path)
+    n_samples = len(vcf_in.header.samples)
+
+    # Build new header
+    new_header = vcf_in.header.copy()
+    new_header.add_meta("FORMAT", items=[
+        ("ID", "AN1"), ("Number", "1"), ("Type", "Integer"),
+        ("Description", "Most probable ancestry for haplotype 1"),
+    ])
+    new_header.add_meta("FORMAT", items=[
+        ("ID", "AN2"), ("Number", "1"), ("Type", "Integer"),
+        ("Description", "Most probable ancestry for haplotype 2"),
+    ])
+    if write_probs:
+        new_header.add_meta("FORMAT", items=[
+            ("ID", "ANP1"), ("Number", "."), ("Type", "Float"),
+            ("Description", "Ancestry posterior probabilities for haplotype 1"),
+        ])
+        new_header.add_meta("FORMAT", items=[
+            ("ID", "ANP2"), ("Number", "."), ("Type", "Float"),
+            ("Description", "Ancestry posterior probabilities for haplotype 2"),
+        ])
+
+    # Add ancestry labels
+    for r in results:
+        for a in range(r.model.n_ancestries):
+            new_header.add_meta(
+                "ANCESTRY",
+                f"<ID={a},Description=\"Ancestry {a}\">"
+            )
+
+    vcf_out = pysam.VariantFile(vcf_out_path, "wz", header=new_header)
+
+    for result, cdata in zip(results, chrom_data_list):
+        calls = result.calls  # (n_haps, n_sites)
+        n_sites = cdata.n_sites
+
+        # Build a lookup from pos_bp to site index
+        pos_to_idx = {int(bp): i for i, bp in enumerate(cdata.pos_bp)}
+
+        for rec in vcf_in.fetch(cdata.chrom):
+            if rec.pos not in pos_to_idx:
+                continue
+            site_idx = pos_to_idx[rec.pos]
+
+            new_rec = vcf_out.new_record()
+            new_rec.contig = rec.contig
+            new_rec.pos = rec.pos
+            new_rec.id = rec.id
+            new_rec.alleles = rec.alleles
+            new_rec.qual = rec.qual
+
+            for si, sample_name in enumerate(vcf_in.header.samples):
+                hap1_idx = 2 * si
+                hap2_idx = 2 * si + 1
+                new_rec.samples[sample_name]["AN1"] = int(calls[hap1_idx, site_idx])
+                new_rec.samples[sample_name]["AN2"] = int(calls[hap2_idx, site_idx])
+                if write_probs:
+                    p1 = result.posteriors[hap1_idx, site_idx, :]
+                    p2 = result.posteriors[hap2_idx, site_idx, :]
+                    new_rec.samples[sample_name]["ANP1"] = tuple(
+                        round(float(x), 4) for x in p1
+                    )
+                    new_rec.samples[sample_name]["ANP2"] = tuple(
+                        round(float(x), 4) for x in p2
+                    )
+
+            vcf_out.write(new_rec)
+
+    vcf_out.close()
+    vcf_in.close()
+    log.info("Wrote ancestry VCF to %s", vcf_out_path)
+
+
+def write_ancestry_tracts(
+    results: list[AncestryResult],
+    chrom_data_list: list[ChromData],
+    n_samples: int,
+    sample_names: list[str],
+    out_path: str,
+    write_posteriors: bool = False,
+    stats=None,
+) -> None:
+    """Write local ancestry as tract intervals (BED-like TSV).
+
+    Converts per-site hard ancestry calls into contiguous tracts where
+    ancestry is constant.  One row per tract per haplotype.  This is
+    orders of magnitude more compact than per-site output for large
+    cohorts.
+
+    Output columns:
+        chrom, start_bp, end_bp, sample, haplotype (0/1), ancestry,
+        n_sites, [mean_posterior if --probs]
+
+    Compatible with downstream analysis in R/pandas and similar to
+    RFMix .msp.tsv format.
+
+    Parameters
+    ----------
+    results : list of AncestryResult, one per chromosome
+    chrom_data_list : list of ChromData, matching results
+    n_samples : number of diploid samples
+    sample_names : sample IDs
+    out_path : output file path
+    write_posteriors : if True, include mean posterior per tract
+    """
+    import gzip
+
+    compress = out_path.endswith(".gz")
+    opener = gzip.open if compress else open
+
+    n_haps = 2 * n_samples
+    n_tracts = 0
+    # Accumulate tract lengths per ancestry for stats
+    tract_lengths_by_anc: dict[int, list[int]] = {}
+    confidence_sum = 0.0
+    confidence_count = 0
+
+    with opener(out_path, "wt") as f:
+        # Header
+        cols = ["#chrom", "start_bp", "end_bp", "sample", "haplotype",
+                "ancestry", "n_sites"]
+        if write_posteriors:
+            cols.append("mean_posterior")
+        f.write("\t".join(cols) + "\n")
+
+        for result, cdata in zip(results, chrom_data_list):
+            calls = np.array(result.calls)  # (n_haps, n_sites) int8
+            pos_bp = cdata.pos_bp           # (n_sites,) int64
+            chrom = cdata.chrom
+            n_sites = cdata.n_sites
+
+            if n_sites == 0:
+                continue
+
+            posteriors = None
+            if write_posteriors:
+                posteriors = np.array(result.posteriors)  # (n_haps, n_sites, A)
+
+            # Vectorized switch detection per haplotype:
+            # find where ancestry changes between consecutive sites
+            for hi in range(n_haps):
+                si = hi // 2
+                hap = hi % 2
+                sample = sample_names[si]
+                hap_calls = calls[hi]  # (n_sites,)
+
+                # Find switch points via numpy
+                switches = np.where(hap_calls[1:] != hap_calls[:-1])[0] + 1
+                starts = np.concatenate([[0], switches])
+                ends = np.concatenate([switches - 1, [n_sites - 1]])
+
+                for k in range(len(starts)):
+                    s, e = int(starts[k]), int(ends[k])
+                    anc = int(hap_calls[s])
+                    n_sites_tract = e - s + 1
+                    line = f"{chrom}\t{pos_bp[s]}\t{pos_bp[e]}\t{sample}\t{hap}\t{anc}\t{n_sites_tract}"
+                    if write_posteriors and posteriors is not None:
+                        mean_post = float(posteriors[hi, s:e + 1, anc].mean())
+                        line += f"\t{mean_post:.4f}"
+                    f.write(line + "\n")
+                    n_tracts += 1
+                    # Accumulate for stats
+                    tract_lengths_by_anc.setdefault(anc, []).append(n_sites_tract)
+
+            # Posterior confidence: mean of max posterior per site
+            if posteriors is not None:
+                max_post = np.array(result.posteriors).max(axis=2)  # (n_haps, n_sites)
+                confidence_sum += float(max_post.sum())
+                confidence_count += max_post.size
+
+    log.info("Wrote %d ancestry tracts to %s", n_tracts, out_path)
+
+    # Emit stats
+    if stats is not None:
+        stats.emit("output/n_tracts", n_tracts)
+        tract_summary = {}
+        for anc, lengths in sorted(tract_lengths_by_anc.items()):
+            arr = np.array(lengths)
+            tract_summary[str(anc)] = {
+                "count": len(arr),
+                "mean_sites": round(float(arr.mean()), 1),
+                "median_sites": int(np.median(arr)),
+                "p5_sites": int(np.percentile(arr, 5)),
+                "p95_sites": int(np.percentile(arr, 95)),
+            }
+        stats.emit("output/tract_stats_by_ancestry", tract_summary)
+        if confidence_count > 0:
+            stats.emit("output/mean_posterior_confidence",
+                       round(confidence_sum / confidence_count, 4))
+
+
+def write_global_ancestry(
+    results: list[AncestryResult],
+    n_samples: int,
+    sample_names: list[str],
+    out_path: str,
+    stats=None,
+) -> None:
+    """Write per-sample global ancestry proportions to TSV.
+
+    Global ancestry = mean posterior across all sites and chromosomes.
+    """
+    A = results[0].model.n_ancestries
+
+    # Accumulate posteriors across chromosomes
+    # posteriors are (n_haps, n_sites, A) — need per-sample (diploid) averages
+    sample_sums = np.zeros((n_samples, A))
+    total_sites = 0
+
+    for result in results:
+        gamma = np.array(result.posteriors)  # (n_haps, T, A)
+        T = gamma.shape[1]
+        # Sum over sites per haplotype: (n_haps, A)
+        hap_sums = gamma.sum(axis=1)
+        # Average paired haplotypes: even indices = hap1, odd = hap2
+        sample_sums += (hap_sums[0::2] + hap_sums[1::2]) / 2
+        total_sites += T
+
+    sample_props = sample_sums / total_sites
+
+    with open(out_path, "w") as f:
+        header = "sample\t" + "\t".join(f"ancestry_{a}" for a in range(A))
+        f.write(header + "\n")
+        for si, name in enumerate(sample_names):
+            vals = "\t".join(f"{v:.4f}" for v in sample_props[si])
+            f.write(f"{name}\t{vals}\n")
+
+    log.info("Wrote global ancestry to %s", out_path)
+
+    if stats is not None:
+        mean_props = sample_props.mean(axis=0).tolist()
+        stats.emit("output/genome_wide_ancestry_proportions", mean_props)
+
+
+def write_model(result: AncestryResult, out_path: str) -> None:
+    """Write model parameters to a human-readable file."""
+    model = result.model
+    with open(out_path, "w") as f:
+        f.write(f"n_ancestries\t{model.n_ancestries}\n")
+        f.write(f"gen_since_admix\t{model.gen_since_admix:.2f}\n")
+        f.write(f"mu\t{','.join(f'{x:.4f}' for x in np.array(model.mu))}\n")
+        f.write(f"mismatch\t{','.join(f'{x:.6f}' for x in np.array(model.mismatch))}\n")
+    log.info("Wrote model to %s", out_path)
