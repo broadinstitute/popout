@@ -23,9 +23,16 @@ def normalise_chrom(chrom: str) -> str:
 
 
 def load_genetic_map(path: str | Path) -> dict[str, GeneticMap]:
-    """Load a HapMap-format recombination map.
+    """Load a genetic recombination map.
 
-    Expected columns (whitespace-delimited, header line):
+    Auto-detects two formats:
+
+    **PLINK .map** (4 columns, no header)::
+
+        chr  id  cM  bp
+
+    **HapMap** (4 columns, with header)::
+
         chr  position(bp)  rate(cM/Mb)  Map(cM)
 
     Returns a dict keyed by chromosome name (without 'chr' prefix).
@@ -37,11 +44,36 @@ def load_genetic_map(path: str | Path) -> dict[str, GeneticMap]:
     cm_buf: list[float] = []
 
     with open(path) as fh:
-        header = fh.readline()
-        for line in fh:
+        first_line = fh.readline()
+        parts = first_line.split()
+
+        # Detect format: PLINK .map has no header (first field is a chrom name/number)
+        # HapMap has a header line (first field is typically "chr" or "Chromosome")
+        is_plink = len(parts) == 4 and parts[1] == "." or _is_chrom_name(parts[0])
+
+        if is_plink:
+            # Re-process first line (it's data, not a header)
+            lines = [first_line] + fh.readlines()
+        else:
+            # Skip header
+            lines = fh.readlines()
+
+        for line in lines:
             parts = line.split()
-            chrom, bp, _rate, cm = parts[0], int(parts[1]), parts[2], float(parts[3])
-            chrom = normalise_chrom(chrom)
+            if len(parts) < 4:
+                continue
+
+            if is_plink:
+                # PLINK format: chr, id, cM, bp
+                chrom = normalise_chrom(parts[0])
+                cm = float(parts[2])
+                bp = int(parts[3])
+            else:
+                # HapMap format: chr, bp, rate, cM
+                chrom = normalise_chrom(parts[0])
+                bp = int(parts[1])
+                cm = float(parts[3])
+
             if chrom != current_chrom:
                 if current_chrom is not None:
                     maps[current_chrom] = GeneticMap(
@@ -52,6 +84,7 @@ def load_genetic_map(path: str | Path) -> dict[str, GeneticMap]:
                 bp_buf, cm_buf = [], []
             bp_buf.append(bp)
             cm_buf.append(cm)
+
         if current_chrom is not None:
             maps[current_chrom] = GeneticMap(
                 np.array(bp_buf, dtype=np.int64),
@@ -59,6 +92,12 @@ def load_genetic_map(path: str | Path) -> dict[str, GeneticMap]:
             )
     log.info("Loaded genetic map for %d chromosomes from %s", len(maps), path)
     return maps
+
+
+def _is_chrom_name(s: str) -> bool:
+    """Check if a string looks like a chromosome name (1-22, X, Y, or chr-prefixed)."""
+    s = normalise_chrom(s)
+    return s.isdigit() or s in ("X", "Y", "M", "MT")
 
 
 def load_genetic_map_per_chrom(directory: str | Path) -> dict[str, GeneticMap]:

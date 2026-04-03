@@ -23,11 +23,15 @@ from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> None:
-    # Dispatch 'report' subcommand before parsing main args
+    # Dispatch subcommands before parsing main args
     raw_args = argv if argv is not None else sys.argv[1:]
     if raw_args and raw_args[0] == "report":
         from .report import report_main
         report_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "fetch-map":
+        from .fetch_map import fetch_map_main
+        fetch_map_main(raw_args[1:])
         return
 
     parser = argparse.ArgumentParser(
@@ -48,8 +52,13 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     parser.add_argument(
-        "--map", required=True,
-        help="HapMap-format genetic map (single file or directory of per-chrom files)",
+        "--map", default=None,
+        help="HapMap-format genetic map (single file or directory of per-chrom files). "
+             "If omitted, auto-downloads from Beagle project based on --genome.",
+    )
+    parser.add_argument(
+        "--genome", choices=["GRCh38", "GRCh37", "GRCh36"], default="GRCh38",
+        help="Reference genome build for auto-downloading genetic map (default: GRCh38)",
     )
     parser.add_argument(
         "--out", required=True,
@@ -138,8 +147,10 @@ def main(argv: list[str] | None = None) -> None:
 
     # --- Load genetic map ---
     from .gmap import load_genetic_map, load_genetic_map_per_chrom
+    from .fetch_map import resolve_map_dir
 
-    map_path = Path(args.map)
+    map_resolved = resolve_map_dir(genome=args.genome, map_arg=args.map)
+    map_path = Path(map_resolved)
     if map_path.is_dir():
         gmap = load_genetic_map_per_chrom(map_path)
     else:
