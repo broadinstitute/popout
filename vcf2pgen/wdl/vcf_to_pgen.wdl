@@ -14,9 +14,9 @@ task vcf_to_pgen_task {
     # plink2 flags
     String extra_args = ""
 
-    # Runtime
-    Int    cpu          = 4
-    String memory       = "16 GB"
+    # Runtime — tuned for 500K-sample WGS chromosomes
+    Int    cpu          = 8
+    String memory       = "32 GB"
     Int    disk_size_gb = ceil(size(vcf, "GB") * 3) + 100
     String docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/vcf2pgen:0.1.0"
   }
@@ -55,8 +55,8 @@ workflow vcf_to_pgen {
     Array[File] vcfs
 
     String extra_args   = ""
-    Int    cpu          = 4
-    String memory       = "16 GB"
+    Int    cpu          = 8
+    String memory       = "32 GB"
     String docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/vcf2pgen:0.1.0"
   }
 
