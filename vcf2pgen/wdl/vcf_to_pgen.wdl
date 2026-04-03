@@ -26,7 +26,7 @@ task vcf_to_pgen_task {
 
     plink2 \
       --vcf ~{vcf} \
-      --make-pgen phased-list \
+      --make-pgen \
       --out ~{output_prefix} \
       --threads ~{cpu} \
       ~{extra_args}
