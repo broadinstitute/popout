@@ -1,0 +1,7 @@
+version: 1.2
+
+workflows:
+  - name: vcf-to-pgen
+    subclass: WDL
+    primaryDescriptorPath: /vcf2pgen/wdl/vcf_to_pgen.wdl
+    topic: Convert phased VCF files to PGEN format for popout
