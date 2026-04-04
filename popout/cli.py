@@ -142,6 +142,29 @@ def main(argv: list[str] | None = None) -> None:
         help="Verbose logging",
     )
 
+    # --- Panel export ---
+    panel_group = parser.add_argument_group("Panel export")
+    panel_group.add_argument(
+        "--export-panel", action="store_true",
+        help="Export reference panel outputs alongside standard results",
+    )
+    panel_group.add_argument(
+        "--panel-threshold", type=float, default=0.95,
+        help="Minimum posterior for whole-haplotype extraction (default: 0.95)",
+    )
+    panel_group.add_argument(
+        "--panel-segment-threshold", type=float, default=0.99,
+        help="Minimum posterior for segment extraction (default: 0.99)",
+    )
+    panel_group.add_argument(
+        "--panel-min-segment-cm", type=float, default=1.0,
+        help="Minimum segment length in cM (default: 1.0)",
+    )
+    panel_group.add_argument(
+        "--panel-max-per-ancestry", type=int, default=None,
+        help="Maximum haplotypes per ancestry in panel (default: all passing)",
+    )
+
     args = parser.parse_args(argv)
 
     # --- Logging ---
@@ -279,6 +302,21 @@ def main(argv: list[str] | None = None) -> None:
         write_posteriors=args.probs,
         stats=stats,
     )
+
+    # --- Optional panel export ---
+    if args.export_panel:
+        from .panel import PanelConfig, export_panel
+
+        panel_cfg = PanelConfig(
+            whole_hap_threshold=args.panel_threshold,
+            segment_threshold=args.panel_segment_threshold,
+            min_segment_cm=args.panel_min_segment_cm,
+            max_per_ancestry=args.panel_max_per_ancestry,
+        )
+        export_panel(
+            results, chrom_data_list, n_samples, sample_names,
+            out_prefix, panel_cfg, stats=stats,
+        )
 
     t_total = time.perf_counter() - t0
     log.info("Total wall clock: %.1f seconds", t_total)
