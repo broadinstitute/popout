@@ -90,6 +90,12 @@ def main(argv: list[str] | None = None) -> None:
              "(default: no thinning)",
     )
     parser.add_argument(
+        "--method",
+        choices=["hmm", "cnn", "cnn-crf"],
+        default="hmm",
+        help="Refinement backend: hmm (default), cnn, or cnn-crf",
+    )
+    parser.add_argument(
         "--ancestry-detection",
         choices=["recursive", "eigenvalue-gap"],
         default="recursive",
@@ -165,6 +171,33 @@ def main(argv: list[str] | None = None) -> None:
         help="Maximum haplotypes per ancestry in panel (default: all passing)",
     )
 
+    # --- CNN backend ---
+    cnn_group = parser.add_argument_group("CNN backend (--method cnn or cnn-crf)")
+    cnn_group.add_argument(
+        "--cnn-layers", type=int, default=12,
+        help="Number of dilated conv layers (default: 12)",
+    )
+    cnn_group.add_argument(
+        "--cnn-channels", type=int, default=64,
+        help="Hidden channel dimension (default: 64)",
+    )
+    cnn_group.add_argument(
+        "--cnn-epochs", type=int, default=5,
+        help="Training epochs per pseudo-label round (default: 5)",
+    )
+    cnn_group.add_argument(
+        "--cnn-pseudo-rounds", type=int, default=2,
+        help="Number of pseudo-label self-training rounds (default: 2)",
+    )
+    cnn_group.add_argument(
+        "--cnn-lr", type=float, default=1e-3,
+        help="CNN learning rate (default: 1e-3)",
+    )
+    cnn_group.add_argument(
+        "--cnn-batch-size", type=int, default=512,
+        help="Haplotypes per CNN training/inference batch (default: 512)",
+    )
+
     args = parser.parse_args(argv)
 
     # --- Logging ---
@@ -190,6 +223,7 @@ def main(argv: list[str] | None = None) -> None:
     if not args.no_stats:
         from .stats import StatsCollector
         config = {
+            "method": args.method,
             "n_ancestries": args.n_ancestries,
             "n_em_iter": args.n_em_iter,
             "gen_since_admix": args.gen_since_admix,
@@ -254,9 +288,7 @@ def main(argv: list[str] | None = None) -> None:
     n_samples = len(sample_names)
     log.info("Input: %d samples (%d haplotypes)", n_samples, 2 * n_samples)
 
-    # --- Stream chromosomes and run EM ---
-    from .em import run_em_genome
-
+    # --- Stream chromosomes and run pipeline ---
     # We need to keep ChromData for output writing, so collect them
     chrom_data_list = []
     def chrom_iter_with_save():
@@ -264,21 +296,42 @@ def main(argv: list[str] | None = None) -> None:
             chrom_data_list.append(cd)
             yield cd
 
-    results = run_em_genome(
-        chrom_iter_with_save(),
-        n_ancestries=args.n_ancestries,
-        n_em_iter=args.n_em_iter,
-        gen_since_admix=args.gen_since_admix,
-        batch_size=args.batch_size,
-        rng_seed=args.seed,
-        stats=stats,
-        bandwidth_cm=args.smooth_bandwidth_cm,
-        maf_threshold=args.smooth_maf_threshold,
-        per_hap_T=args.per_hap_T,
-        n_T_buckets=args.n_T_buckets,
-        use_block_emissions=args.block_emissions,
-        block_size=args.block_size,
-    )
+    if args.method in ("cnn", "cnn-crf"):
+        from .cnn.refine import run_cnn_genome
+        results = run_cnn_genome(
+            chrom_iter_with_save(),
+            n_ancestries=args.n_ancestries,
+            gen_since_admix=args.gen_since_admix,
+            hmm_batch_size=args.batch_size,
+            rng_seed=args.seed,
+            stats=stats,
+            bandwidth_cm=args.smooth_bandwidth_cm,
+            maf_threshold=args.smooth_maf_threshold,
+            n_layers=args.cnn_layers,
+            hidden_dim=args.cnn_channels,
+            n_epochs=args.cnn_epochs,
+            n_pseudo_rounds=args.cnn_pseudo_rounds,
+            cnn_lr=args.cnn_lr,
+            cnn_batch_size=args.cnn_batch_size,
+            use_crf=(args.method == "cnn-crf"),
+        )
+    else:
+        from .em import run_em_genome
+        results = run_em_genome(
+            chrom_iter_with_save(),
+            n_ancestries=args.n_ancestries,
+            n_em_iter=args.n_em_iter,
+            gen_since_admix=args.gen_since_admix,
+            batch_size=args.batch_size,
+            rng_seed=args.seed,
+            stats=stats,
+            bandwidth_cm=args.smooth_bandwidth_cm,
+            maf_threshold=args.smooth_maf_threshold,
+            per_hap_T=args.per_hap_T,
+            n_T_buckets=args.n_T_buckets,
+            use_block_emissions=args.block_emissions,
+            block_size=args.block_size,
+        )
 
     t_compute = time.perf_counter() - t0
     log.info("Computation complete in %.1f seconds", t_compute)
