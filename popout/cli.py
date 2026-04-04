@@ -90,6 +90,38 @@ def main(argv: list[str] | None = None) -> None:
              "(default: no thinning)",
     )
     parser.add_argument(
+        "--ancestry-detection",
+        choices=["recursive", "eigenvalue-gap"],
+        default="recursive",
+        help="Method for auto-detecting number of ancestries (default: recursive)",
+    )
+    parser.add_argument(
+        "--per-hap-T", action="store_true",
+        help="Estimate per-haplotype admixture time (default: single global T)",
+    )
+    parser.add_argument(
+        "--n-T-buckets", type=int, default=20,
+        help="Number of transition-matrix buckets for per-haplotype T (default: 20)",
+    )
+    parser.add_argument(
+        "--block-emissions", action="store_true",
+        help="Use block-level haplotype pattern emissions instead of single-site Bernoulli",
+    )
+    parser.add_argument(
+        "--block-size", type=int, default=8,
+        help="SNPs per block for block emissions (default: 8)",
+    )
+    parser.add_argument(
+        "--smooth-bandwidth-cm", type=float, default=0.05,
+        help="Gaussian kernel bandwidth (cM) for smoothing rare-variant allele "
+             "frequencies. Set to 0 to disable. (default: 0.05)",
+    )
+    parser.add_argument(
+        "--smooth-maf-threshold", type=float, default=0.05,
+        help="MAF threshold below which allele frequencies are smoothed "
+             "(default: 0.05)",
+    )
+    parser.add_argument(
         "--probs", action="store_true",
         help="Write posterior probabilities to output files",
     )
@@ -217,6 +249,12 @@ def main(argv: list[str] | None = None) -> None:
         batch_size=args.batch_size,
         rng_seed=args.seed,
         stats=stats,
+        bandwidth_cm=args.smooth_bandwidth_cm,
+        maf_threshold=args.smooth_maf_threshold,
+        per_hap_T=args.per_hap_T,
+        n_T_buckets=args.n_T_buckets,
+        use_block_emissions=args.block_emissions,
+        block_size=args.block_size,
     )
 
     t_compute = time.perf_counter() - t0

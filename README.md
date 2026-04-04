@@ -8,21 +8,21 @@ Feed it phased WGS from a large cohort and ancestry structure falls out of the j
 
 With 500K+ samples, the data *is* the reference panel. The pipeline:
 
-1. **SEED** — Randomized SVD on a SNP subset projects all haplotypes into PCA space. GMM assigns soft ancestry labels. Number of ancestries auto-detected from the eigenvalue gap.
+1. **SEED** — Randomized SVD on a SNP subset projects all haplotypes into PCA space. GMM assigns soft ancestry labels. Number of ancestries auto-detected via recursive hierarchical splitting (BIC-based binary splits on sub-PCA projections) or eigenvalue gap heuristic.
 
 2. **INIT** — Allele frequencies per ancestry computed from soft GMM assignments via weighted GEMM. Window-based refinement handles admixed haplotypes.
 
-3. **EM ITERATE** — Forward-backward HMM with A states (not K reference haplotypes — just A ancestries). State space is tiny: 8 floats per haplotype. All haplotypes run simultaneously on GPU. M-step updates allele frequencies, ancestry proportions μ, and generations since admixture T. Converges in 2-3 iterations with large samples.
+3. **EM ITERATE** — Forward-backward HMM with A states (not K reference haplotypes — just A ancestries). State space is tiny: 8 floats per haplotype. All haplotypes run simultaneously on GPU via gradient-checkpointed scan (O(√T) memory). M-step updates allele frequencies (with optional rare-variant smoothing), ancestry proportions μ, and generations since admixture T (global or per-haplotype). Converges in 2-3 iterations with large samples.
 
 4. **DECODE** — Final forward-backward pass produces posteriors. Argmax gives hard ancestry calls.
 
 ### Key design choices
 
-- **A-state HMM, not K-state.** FLARE showed that composite reference haplotypes reduce effective K. We go further: with self-derived allele frequencies from 500K samples, we don't need individual reference haplotypes at all. The emission model is `P(allele | ancestry, site)` = allele frequency.
+- **A-state HMM, not K-state.** FLARE showed that composite reference haplotypes reduce effective K. We go further: with self-derived allele frequencies from 500K samples, we don't need individual reference haplotypes at all. The emission model is `P(allele | ancestry, site)` = allele frequency. Optionally, `--block-emissions` uses k-SNP haplotype pattern matching for LD-aware inference.
 
-- **Sequential over sites, parallel over haplotypes.** The forward algorithm must be sequential across T sites. But all H haplotypes are independent. An A100 can hold 1M+ haplotypes' forward state (32 MB) simultaneously.
+- **Sequential over sites, parallel over haplotypes.** The forward algorithm must be sequential across T sites. But all H haplotypes are independent. An A100 can hold 1M+ haplotypes' forward state (32 MB) simultaneously. Gradient checkpointing reduces stored forward states from T to √T.
 
-- **Memory-bandwidth bound.** The A×A transition matrix product is trivially cheap. The bottleneck is reading/writing the forward state vector at each step. This means the GPU is at <1% ALU utilization — there's room for richer emission models for free.
+- **Memory-bandwidth bound.** The A×A transition matrix product is trivially cheap. The bottleneck is reading/writing the forward state vector at each step. This means the GPU is at <1% ALU utilization — block emissions exploit this headroom for richer per-step computation with fewer total steps.
 
 ## Usage
 
@@ -38,6 +38,14 @@ popout --vcf cohort.phased.vcf.gz \
        --map plink.GRCh38.map \
        --out results/cohort \
        --n-ancestries 6
+
+# With per-haplotype admixture time and block emissions
+popout --pgen /path/to/pgens/ \
+       --map plink.GRCh38.map \
+       --out results/cohort \
+       --thin-cm 0.02 \
+       --per-hap-T \
+       --block-emissions
 
 # Generate QC report from a completed run
 popout report --stats results/cohort.summary.json --out report/
@@ -109,9 +117,10 @@ popout --pgen data/ --map map.txt --out results --no-stats
 pgen_io.py     PGEN reader (biobank-scale, chunked, with site thinning)
 vcf_io.py      VCF/BCF reader (pysam, for smaller datasets)
 gmap.py        Genetic map loading and chromosome normalization
-spectral.py    Randomized SVD + GMM for seed labels
-hmm.py         Forward-backward HMM in JAX (GPU workhorse)
-em.py          EM loop: seed → init → iterate → decode
+spectral.py    Randomized SVD + GMM + hierarchical ancestry detection
+hmm.py         Forward-backward HMM in JAX with gradient checkpointing
+em.py          EM loop: seed → init → iterate → decode, with freq smoothing
+blocks.py      Block-level haplotype pattern encoding for LD-aware emissions
 output.py      Tract TSV, global ancestry TSV, model file writers
 stats.py       Runtime metrics collection (JSONL + W&B/TensorBoard)
 report.py      QC report generation (matplotlib plots from summary JSON)
@@ -132,16 +141,28 @@ demo.py        Standalone demo on simulated data
 | 500K    | A100   | ~15 minutes          |
 | 500K    | 8×A100 | ~3 minutes           |
 
+## Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--ancestry-detection` | `recursive` | Auto-detection method: `recursive` (hierarchical BIC splitting) or `eigenvalue-gap` |
+| `--per-hap-T` | off | Estimate per-haplotype admixture time instead of a single global T |
+| `--n-T-buckets` | 20 | Number of transition-matrix buckets for per-haplotype T |
+| `--block-emissions` | off | Use k-SNP haplotype pattern matching instead of single-site Bernoulli |
+| `--block-size` | 8 | SNPs per block when using block emissions |
+| `--smooth-bandwidth-cm` | 0.05 | Gaussian kernel bandwidth (cM) for rare-variant frequency smoothing (0 = disabled) |
+| `--smooth-maf-threshold` | 0.05 | MAF threshold below which frequencies are smoothed |
+| `--thin-cm` | none | Minimum cM spacing for site thinning (recommended: 0.02 for WGS) |
+
 ## Limitations
 
-- No haplotype-window emission model yet (single-site only). This limits accuracy for closely related ancestries (e.g., CHB vs JPT).
-- No checkpointed backward pass — stores full `(H, T, A)` posteriors. For WGS use `--thin-cm 0.02` to reduce to array-like density.
 - No multi-GPU support yet. Use `--chromosomes` to manually partition across GPUs.
+- LD-aware block boundaries (using r² decay or recombination maps) are not yet implemented; blocks are fixed-width.
+- Rare-ancestry detection (clusters with <1% of samples) needs further work.
 
 ## What's next
 
-- [ ] Haplotype-window emissions (8-SNP pattern histograms per ancestry)
-- [ ] Checkpointed backward pass for full WGS-scale site counts
+- [ ] LD-aware variable-width blocks (r² decay threshold or external block maps)
 - [ ] `jax.pmap` multi-GPU parallelism
 - [ ] Rare-ancestry detection (clusters with <1% of samples)
 - [ ] Benchmark against FLARE on simulated data

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -86,6 +87,13 @@ class AncestryModel:
     gen_since_admix: float
     allele_freq: jnp.ndarray
     mismatch: jnp.ndarray = field(default_factory=lambda: jnp.array([]))
+    # Per-haplotype T (optional — None means scalar T for all haplotypes)
+    gen_per_hap: Optional[jnp.ndarray] = None       # (H,)
+    bucket_centers: Optional[jnp.ndarray] = None     # (B,)
+    bucket_assignments: Optional[jnp.ndarray] = None # (H,) int32
+    # Block emission model (optional — None means single-site Bernoulli)
+    pattern_freq: Optional[jnp.ndarray] = None       # (n_blocks, max_patterns, A)
+    block_data: object = None                         # BlockData (avoid circular import)
 
     def log_transition_matrix(self, d_morgan: jnp.ndarray) -> jnp.ndarray:
         """Build (n_intervals, A, A) log transition matrices.
@@ -123,6 +131,55 @@ class AncestryModel:
             jnp.broadcast_to(log_off, (d_morgan.shape[0], A, A)),
         )
         return log_trans
+
+    def log_transition_matrices_bucketed(
+        self, d_morgan: jnp.ndarray
+    ) -> jnp.ndarray:
+        """Build transition matrices for each T-bucket.
+
+        Returns
+        -------
+        log_trans : (B, n_intervals, A, A)
+        """
+        assert self.bucket_centers is not None
+        A = self.n_ancestries
+        mu = self.mu
+        log_mu = jnp.log(mu)
+        eye = jnp.eye(A)
+
+        def _single_bucket(T_val):
+            p_switch = 1.0 - jnp.exp(-d_morgan * T_val)
+            log_p = jnp.log(p_switch + 1e-30)[:, None, None]
+            log_1mp = jnp.log(1.0 - p_switch + 1e-30)[:, None, None]
+            log_off = log_p + log_mu[None, None, :]
+            log_diag = jnp.logaddexp(log_1mp, log_p + log_mu[None, None, :])
+            return jnp.where(
+                eye[None, :, :],
+                jnp.broadcast_to(log_diag, (d_morgan.shape[0], A, A)),
+                jnp.broadcast_to(log_off, (d_morgan.shape[0], A, A)),
+            )
+
+        return jax.vmap(_single_bucket)(self.bucket_centers)  # (B, I, A, A)
+
+    def log_emission_block(self, block_data) -> jnp.ndarray:
+        """Compute block-level log emissions from pattern frequency tables.
+
+        Parameters
+        ----------
+        block_data : BlockData with pattern_indices (H, n_blocks)
+
+        Returns
+        -------
+        log_emit : (H, n_blocks, A)
+        """
+        assert self.pattern_freq is not None
+        log_pf = jnp.log(jnp.clip(self.pattern_freq, 1e-10, 1.0))
+        # log_pf: (n_blocks, max_patterns, A)
+        pat_idx = jnp.array(block_data.pattern_indices)  # (H, n_blocks)
+        n_blocks = block_data.n_blocks
+        # Gather: log_pf[b, pat_idx[h, b], :] for each (h, b)
+        block_range = jnp.arange(n_blocks)[None, :]  # (1, n_blocks)
+        return log_pf[block_range, pat_idx, :]  # (H, n_blocks, A)
 
     def log_emission(self, geno: jnp.ndarray) -> jnp.ndarray:
         """Compute log emission probabilities.

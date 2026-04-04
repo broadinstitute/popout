@@ -58,6 +58,7 @@ def seed_ancestry_soft(
     gmm_restarts: int = 5,
     rng_seed: int = 42,
     stats=None,
+    detection_method: str = "recursive",
 ) -> tuple[jnp.ndarray, jnp.ndarray, int]:
     """Compute soft ancestry assignments via PCA + GMM.
 
@@ -100,8 +101,18 @@ def seed_ancestry_soft(
 
     # --- Auto-detect A ---
     if n_ancestries is None:
-        n_ancestries = _detect_n_ancestries(S, max_ancestries)
-        log.info("Auto-detected %d ancestries", n_ancestries)
+        if detection_method == "recursive":
+            # Use full PCA projection for recursive splitting
+            n_pc_full = min(max_ancestries, n_components)
+            proj_full = U[:, :n_pc_full] * S[:n_pc_full]
+            key, subkey = jax.random.split(key)
+            n_ancestries = _detect_n_ancestries_recursive(
+                proj_full, max_ancestries, subkey,
+            )
+            log.info("Auto-detected %d ancestries (recursive)", n_ancestries)
+        else:
+            n_ancestries = _detect_n_ancestries_eigenvalue_gap(S, max_ancestries)
+            log.info("Auto-detected %d ancestries (eigenvalue gap)", n_ancestries)
     if stats is not None:
         stats.emit("spectral/n_ancestries", n_ancestries)
 
@@ -316,8 +327,8 @@ def _randomized_svd(
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _detect_n_ancestries(S: jnp.ndarray, max_a: int) -> int:
-    """Detect number of ancestries from eigenvalue gap."""
+def _detect_n_ancestries_eigenvalue_gap(S: jnp.ndarray, max_a: int) -> int:
+    """Detect number of ancestries from eigenvalue gap (original heuristic)."""
     S = np.array(S)
     if len(S) < 3:
         return 2
@@ -331,6 +342,128 @@ def _detect_n_ancestries(S: jnp.ndarray, max_a: int) -> int:
             return int(min(i + 1, max_a))
 
     return int(min(max(2, int((S > S[0] * 0.1).sum())), max_a))
+
+
+# Keep old name as alias for backward compat
+_detect_n_ancestries = _detect_n_ancestries_eigenvalue_gap
+
+
+def _detect_n_ancestries_recursive(
+    X_proj: jnp.ndarray,
+    max_a: int,
+    key: jax.Array,
+    min_cluster_size: int = 100,
+    bic_threshold: float = 5.0,
+) -> int:
+    """Detect number of ancestries via recursive BIC-based binary splitting.
+
+    Starts with A=1 (all haplotypes), tests for substructure using
+    BIC comparison of 1-GMM vs 2-GMM, and recursively splits clusters
+    that show significant bimodality.
+
+    Parameters
+    ----------
+    X_proj : (H, n_pc) — PCA projection of all haplotypes
+    max_a : maximum number of ancestries
+    key : JAX PRNG key
+    min_cluster_size : don't split clusters smaller than this
+    bic_threshold : BIC(1-GMM) - BIC(2-GMM) must exceed this to split
+
+    Returns
+    -------
+    n_ancestries : int (>= 2)
+    """
+    n = X_proj.shape[0]
+    if n < 2 * min_cluster_size:
+        return 2
+
+    # Queue of cluster masks to test
+    queue = [np.ones(n, dtype=bool)]  # start: all haplotypes
+    leaves = []
+
+    while queue and len(leaves) + len(queue) < max_a:
+        mask = queue.pop(0)
+        cluster_size = int(mask.sum())
+
+        if cluster_size < 2 * min_cluster_size:
+            leaves.append(mask)
+            continue
+
+        # Sub-PCA: project this cluster onto its own top 2 PCs
+        subset = X_proj[mask]
+        sub_proj = _sub_pca(subset, n_components=2)
+
+        # BIC split test
+        key, subkey = jax.random.split(key)
+        should_split, labels = _bic_split_test(sub_proj, subkey, bic_threshold)
+
+        if should_split and labels is not None:
+            mask_np = np.array(mask)
+            labels_np = np.array(labels)
+            child_a = mask_np.copy()
+            child_a[mask_np] = labels_np == 0
+            child_b = mask_np.copy()
+            child_b[mask_np] = labels_np == 1
+            # Only split if both children are big enough
+            if child_a.sum() >= min_cluster_size and child_b.sum() >= min_cluster_size:
+                queue.extend([child_a, child_b])
+            else:
+                leaves.append(mask)
+        else:
+            leaves.append(mask)
+
+    # Add any remaining queued items as leaves
+    leaves.extend(queue)
+
+    n_detected = max(2, len(leaves))
+    return min(n_detected, max_a)
+
+
+def _sub_pca(
+    X: jnp.ndarray,
+    n_components: int = 2,
+) -> jnp.ndarray:
+    """Project a subset onto its own top PCs."""
+    X_centered = X - X.mean(axis=0, keepdims=True)
+    # For small-to-moderate subsets, exact SVD is fine
+    U, S, _ = jnp.linalg.svd(X_centered, full_matrices=False)
+    n_pc = min(n_components, U.shape[1])
+    return U[:, :n_pc] * S[:n_pc]
+
+
+def _bic_split_test(
+    X: jnp.ndarray,
+    key: jax.Array,
+    threshold: float = 5.0,
+) -> tuple[bool, jnp.ndarray | None]:
+    """Test whether a cluster should be split using BIC comparison.
+
+    Compares BIC of 1-component vs 2-component diagonal GMM.
+
+    Returns
+    -------
+    should_split : bool
+    labels : (n,) int32 if should_split, else None
+    """
+    n, d = X.shape
+
+    # 1-component: closed-form
+    mean1 = X.mean(axis=0)
+    var1 = jnp.maximum(jnp.var(X, axis=0), 1e-6)
+    log_det1 = jnp.sum(jnp.log(var1))
+    mahal1 = jnp.sum((X - mean1) ** 2 / var1, axis=1)
+    ll1 = float(jnp.sum(-0.5 * (d * jnp.log(2 * jnp.pi) + log_det1 + mahal1)))
+    k1 = 2 * d  # mean + variance params
+    bic1 = -2 * ll1 + k1 * np.log(n)
+
+    # 2-component: use existing GMM
+    labels, resp, ll2_per = _gmm_single(X, 2, key, max_iter=50, tol=1e-4)
+    ll2 = float(ll2_per * n)  # _gmm_single returns mean LL
+    k2 = 4 * d + 1  # 2 means + 2 variances + 1 mixing weight
+    bic2 = -2 * ll2 + k2 * np.log(n)
+
+    should_split = (bic1 - bic2) > threshold
+    return should_split, labels if should_split else None
 
 
 def _kmeans_pp_init(X: jnp.ndarray, k: int, key: jax.Array) -> jnp.ndarray:

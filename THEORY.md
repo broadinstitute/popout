@@ -98,11 +98,17 @@ SEED  →  INIT  →  EM ITERATE  →  DECODE
    avoids the O(min(H,S)²) cost of full SVD, which is intractable at
    biobank scale.
 
-4. **Auto-detect the number of ancestries** from the eigenvalue gap.
-   Consecutive singular value ratios S[i]/S[i+1] are examined; a ratio
-   significantly above the tail median indicates a gap.  The number of
-   components above the gap gives A (capped at a configurable maximum,
-   default 12).
+4. **Auto-detect the number of ancestries** via recursive hierarchical
+   splitting (default) or eigenvalue gap heuristic.  The recursive method
+   starts with all haplotypes in one cluster and repeatedly tests for
+   substructure by comparing BIC of a 1-component vs 2-component GMM on
+   the cluster's own top PCs.  Clusters that show significant bimodality
+   are split; the process continues until no cluster can be split or the
+   maximum A (default 12) is reached.  This handles nested population
+   structure (e.g., multiple African subpopulations within a continental-
+   scale cohort) more robustly than the single-pass eigenvalue gap
+   heuristic, which is retained as a `--ancestry-detection eigenvalue-gap`
+   fallback.
 
 5. **Gaussian Mixture Model** with diagonal covariance, fitted on the top
    (A−1) or 2 PCs (whichever is larger).  Multiple random restarts
@@ -171,22 +177,40 @@ proportions are the mean of the posteriors across all sites.
 
 ### States and emissions
 
-The hidden state at each site is one of A ancestral populations.  The
-emission model is a single-site Bernoulli:
+The hidden state at each site is one of A ancestral populations.  Two
+emission models are available:
+
+**Single-site Bernoulli (default).**  Each site is treated independently:
 
 ```
 P(g[h,t] | z[h,t] = a) = freq[a,t]^g[h,t] · (1 - freq[a,t])^(1 - g[h,t])
 ```
 
 where g[h,t] ∈ {0, 1} is the observed allele and z[h,t] is the hidden
-ancestry.  In log-space:
-
-```
-log P(g | z=a) = g · log(freq[a,t]) + (1−g) · log(1 − freq[a,t])
-```
-
-This is computed for all H haplotypes, T sites, and A ancestries
+ancestry.  This is computed for all H haplotypes, T sites, and A ancestries
 simultaneously: an (H, T, A) tensor of log-emissions.
+
+**Haplotype-window block emissions (`--block-emissions`).**  Sites are
+grouped into blocks of k SNPs (default k = 8).  Within each block, the k
+binary alleles are packed into a pattern index.  For each block b and
+ancestry a, a categorical frequency table records how often each observed
+pattern appears:
+
+```
+P(pattern p | z = a, block b) = pattern_freq[b, p, a]
+```
+
+Pattern frequencies are initialized from per-site Bernoulli probabilities
+(product over sites in the block) and refined during the M-step by
+accumulating posterior weight per pattern.  The HMM scan iterates over
+blocks instead of sites, with block-level genetic distances for
+transitions.  This captures linkage disequilibrium information that the
+single-site model discards, substantially improving resolution for closely
+related ancestries (e.g., Northern vs Southern European, Han Chinese vs
+Japanese) where F_ST is small but multi-site haplotype patterns differ.
+Because the algorithm is memory-bandwidth bound (§8), the richer emissions
+add negligible compute cost while reducing the number of scan steps by a
+factor of k.
 
 ### Transitions
 
@@ -219,9 +243,34 @@ In log-space, the diagonal requires `logaddexp` to combine the two terms;
 off-diagonal entries are simply `log(p) + log(μ[j])`.
 
 Key property: the transition matrix is **site-dependent** (through the genetic
-distance d) but **haplotype-independent**.  Every haplotype shares the same
-(T−1) transition matrices.  This is critical for GPU efficiency — the
-transition matrices are computed once and broadcast across all H haplotypes.
+distance d).  In the default mode it is also **haplotype-independent** — every
+haplotype shares the same (T−1) transition matrices, computed once and
+broadcast.
+
+**Per-haplotype admixture time (`--per-hap-T`).**  Real biobank cohorts
+contain individuals with admixture at different historical depths.  A Latin
+American cohort includes individuals with 20-generation-old admixture
+alongside individuals with a grandparent from a different population (T ≈ 2).
+A single T produces a compromise that misestimates tract lengths for most
+individuals.
+
+When enabled, the M-step estimates a per-haplotype T_h from each haplotype's
+own hard-call switch rate:
+
+```
+T_h = switches_h / (genetic_distance · (1 − Σ μ²))
+```
+
+T_h is regularized by blending with the global estimate: `T_final = (1−λ)·T_h
++ λ·T_global`, where λ = 1/(1 + switches/5) so that haplotypes with few
+switches (low confidence) are pulled toward the global mean.
+
+To recover GPU efficiency, T_h values are quantized into B = 20
+geometrically spaced buckets (from T = 1 to T = 1000).  B transition
+matrices are precomputed (one per bucket), and haplotypes are partitioned
+by bucket for independent forward-backward passes.  The memory overhead is
+B × (T−1) × A × A × 4 bytes — negligible.  Emissions are shared across
+buckets, computed once.
 
 ### Forward algorithm
 
@@ -303,6 +352,35 @@ T_est = total_switches / ( total_genetic_distance · (1 − Σ μ²) )
 This is regularized by blending with the previous estimate (70% new, 30%
 old) and clamped to [1, 1000] generations.  Using hard calls rather than
 soft overlaps for switch counting is more robust when posteriors are diffuse.
+
+When `--per-hap-T` is enabled, the same formula is applied per-haplotype
+instead of globally (see §4 Transitions above).
+
+### Allele frequency smoothing
+
+At rare variants (MAF < 0.05), per-ancestry frequency estimates can be noisy
+even at biobank scale — a variant present in only 0.1% of the population may
+have only a few hundred weighted observations per ancestry.  After computing
+raw frequencies, a Gaussian kernel smooth is applied along the genomic
+coordinate within each ancestry:
+
+```
+freq_smooth[a, t] = Σ_s K(d(t,s) / σ) · freq_raw[a, s] / Σ_s K(d(t,s) / σ)
+```
+
+where K is a Gaussian kernel, d(t,s) is the genetic distance between sites t
+and s in centiMorgans, and σ is the bandwidth (default 0.05 cM, spanning
+~2–3 sites at thinned array density).
+
+Only variants with overall MAF below the threshold are smoothed; common
+variants are left unchanged.  This borrows strength from neighboring sites
+— justified because ancestry-specific frequencies vary smoothly at fine
+genetic scale due to linkage disequilibrium.  The smoothing is complementary
+to the Beta-Bernoulli pseudocount (which prevents zero frequencies but does
+not exploit spatial structure).
+
+Controlled by `--smooth-bandwidth-cm` (0 = disabled) and
+`--smooth-maf-threshold`.
 
 ---
 
@@ -474,8 +552,43 @@ thousand sites (array-like density), bringing storage to:
 ```
 
 which is manageable with haplotype batching (50K haplotypes per batch → ~5 GB
-per batch).  Gradient checkpointing (storing forward states at √T checkpoints
-and recomputing between them) is planned but not yet implemented.
+per batch).
+
+**Gradient checkpointing** reduces the forward-state storage from O(H·T·A)
+to O(H·√T·A).  Instead of storing every forward state for the backward pass,
+the implementation stores only √T checkpoint alphas — one at every C-th site,
+where C = ⌈√T⌉.  During the backward pass, forward states within each
+segment are recomputed from the nearest checkpoint on the fly, fused with the
+backward computation and posterior normalization.
+
+The algorithm uses a two-level `jax.lax.scan`:
+
+1. **Checkpointed forward scan.**  An outer scan over S = ⌈T/C⌉ segments,
+   each containing an inner scan of C forward steps.  The inner scan discards
+   intermediate states — only the segment-end alpha is carried as output.
+   Sites are padded to a multiple of C with neutral (zero) emissions and
+   identity transitions.
+
+2. **Reverse recompute-backward-posterior scan.**  The S segments are
+   processed in reverse order.  For each segment, a C−1-step inner forward
+   scan recomputes alphas from the checkpoint, a C-step inner backward scan
+   computes betas from the right boundary (carried from the previous
+   segment), and posteriors are computed elementwise.
+
+The result is numerically equivalent to the full forward-backward.  For
+T = 3000 thinned sites, C ≈ 55, and checkpoint storage is:
+
+```
+1M × 55 checkpoints × 8 ancestries × 4 bytes ≈ 1.8 GB
+```
+
+a ~54× reduction from the ~96 GB full-storage case.  The cost is ~2×
+forward compute (one full pass + one segment recompute), which is acceptable
+since the forward pass is memory-bandwidth bound — recomputed segments often
+hit L2 cache rather than HBM.
+
+Checkpointing is enabled automatically for T > 64 and can be forced on/off
+via the `use_checkpointing` parameter.
 
 ### Arithmetic intensity
 
@@ -569,11 +682,11 @@ all chromosomes.
 | **Reference panel** | Required | Required | None (self-bootstrapped) |
 | **HMM states** | K composite ref haplotypes | N/A (random forest) | A ancestral populations |
 | **State space** | O(K), K ~ 1000s | — | O(A), A ~ 4–12 |
-| **Emission model** | Haplotype matching | Window features | Single-site allele frequency |
-| **GPU acceleration** | No | No | Native (JAX) |
+| **Emission model** | Haplotype matching | Window features | Single-site or block-level pattern matching |
+| **GPU acceleration** | No | No | Native (JAX), with gradient checkpointing |
 | **Scales to 500K+** | With effort | No | Yes (designed for it) |
-| **Ancestry count** | User-specified | User-specified | Auto-detected (eigenvalue gap) |
-| **Admixture time** | Estimated | Not modeled | Estimated from switch rate |
+| **Ancestry count** | User-specified | User-specified | Auto-detected (recursive hierarchical or eigenvalue gap) |
+| **Admixture time** | Estimated (global) | Not modeled | Estimated (global or per-haplotype) |
 
 ### The A-state tradeoff
 
@@ -585,12 +698,15 @@ for closely related ancestries (e.g., Han Chinese vs. Japanese, where F_ST is
 very small and the distinctive signal is in LD patterns, not single-site
 frequencies).
 
-The planned mitigation is **haplotype-window emissions**: instead of emitting
-one allele at a time, emit a short haplotype pattern (e.g., 8-SNP windows)
-and match it against per-ancestry pattern frequency histograms.  This
-recovers LD information while keeping the A-state structure.  And because the
-algorithm is memory-bandwidth bound (not compute bound), adding richer
-emissions is essentially free on the GPU.
+The mitigation is **haplotype-window block emissions** (`--block-emissions`):
+instead of emitting one allele at a time, sites are grouped into blocks of k
+SNPs (default 8) and the emission is a categorical distribution over observed
+haplotype patterns within each block.  This recovers LD information while
+keeping the A-state structure.  The HMM scan iterates over blocks (T/k steps)
+instead of individual sites (T steps), making it both richer and faster.
+Because the algorithm is memory-bandwidth bound (not compute bound), the
+richer per-step emission computation adds negligible cost.  See §4 for
+details.
 
 ---
 

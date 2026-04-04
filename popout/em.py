@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .datatypes import AncestryModel, ChromData, AncestryResult
-from .hmm import forward_backward_batched
+from .hmm import forward_backward_batched, forward_backward_bucketed, forward_backward_blocks
 from .spectral import seed_ancestry, seed_ancestry_soft, window_init_allele_freq
 
 log = logging.getLogger(__name__)
@@ -57,6 +57,54 @@ def update_allele_freq(
     # Frequency with pseudocount smoothing
     freq = (weighted_counts + pseudocount) / (total_weights + 2 * pseudocount)
     return freq
+
+
+def smooth_rare_frequencies(
+    freq: jnp.ndarray,
+    pos_cm: jnp.ndarray,
+    bandwidth_cm: float = 0.05,
+    maf_threshold: float = 0.05,
+) -> jnp.ndarray:
+    """Gaussian-kernel smooth allele frequencies at rare variants.
+
+    Rare variants (MAF < threshold) have their per-ancestry frequencies
+    smoothed along the genomic coordinate, borrowing strength from
+    nearby sites.  Common variants are left unchanged.
+
+    Parameters
+    ----------
+    freq : (A, T) — per-ancestry allele frequencies
+    pos_cm : (T,) — genetic positions in centiMorgans
+    bandwidth_cm : Gaussian kernel bandwidth in cM (0 = disabled)
+    maf_threshold : variants with MAF below this are smoothed
+
+    Returns
+    -------
+    freq_smoothed : (A, T)
+    """
+    A, T = freq.shape
+    if bandwidth_cm <= 0 or T <= 1:
+        return freq
+
+    # Identify rare variants by overall MAF (average across ancestries)
+    overall_freq = freq.mean(axis=0)  # (T,)
+    maf = jnp.minimum(overall_freq, 1.0 - overall_freq)
+    is_rare = maf < maf_threshold  # (T,)
+
+    # Pairwise genetic distance matrix and Gaussian kernel
+    # NOTE: O(T^2) memory — fine for thinned data (T ~ 3K–10K).
+    # For very large T without thinning, a windowed implementation
+    # would be needed but is not required in practice.
+    d = jnp.abs(pos_cm[:, None] - pos_cm[None, :])  # (T, T)
+    K = jnp.exp(-0.5 * (d / bandwidth_cm) ** 2)      # (T, T)
+    K_norm = K / K.sum(axis=1, keepdims=True)          # (T, T) rows sum to 1
+
+    # Smooth: freq_smooth[a, t] = Σ_s K_norm[t, s] * freq[a, s]
+    freq_smooth = freq @ K_norm.T  # (A, T)
+
+    # Blend: keep original at common variants, use smoothed at rare ones
+    result = jnp.where(is_rare[None, :], freq_smooth, freq)
+    return jnp.clip(result, 1e-6, 1.0 - 1e-6)
 
 
 def update_mu(gamma: jnp.ndarray) -> jnp.ndarray:
@@ -128,6 +176,65 @@ def update_generations(
     # Regularize: blend with current estimate (0.7 new, 0.3 old)
     T_new = 0.7 * T_est + 0.3 * current_T
     return max(1.0, min(T_new, 1000.0))
+
+
+# ---------------------------------------------------------------------------
+# Per-haplotype T with bucketed transitions
+# ---------------------------------------------------------------------------
+
+def compute_bucket_centers(
+    n_buckets: int = 20,
+    T_min: float = 1.0,
+    T_max: float = 1000.0,
+) -> jnp.ndarray:
+    """Geometrically spaced T-bucket centers."""
+    return jnp.geomspace(T_min, T_max, n_buckets)
+
+
+def assign_buckets(
+    T_per_hap: jnp.ndarray,
+    bucket_centers: jnp.ndarray,
+) -> jnp.ndarray:
+    """Assign each haplotype to the nearest bucket (in log-space)."""
+    log_T = jnp.log(T_per_hap)[:, None]            # (H, 1)
+    log_c = jnp.log(bucket_centers)[None, :]        # (1, B)
+    return jnp.argmin(jnp.abs(log_T - log_c), axis=1).astype(jnp.int32)
+
+
+def update_generations_per_hap(
+    gamma: jnp.ndarray,
+    d_morgan: jnp.ndarray,
+    current_T_global: float,
+    mu: jnp.ndarray,
+    bucket_centers: jnp.ndarray,
+    min_switches_for_confidence: int = 5,
+) -> tuple[jnp.ndarray, jnp.ndarray, float]:
+    """Estimate per-haplotype T from individual switch rates.
+
+    Returns
+    -------
+    T_per_hap : (H,) — regularized per-haplotype T
+    bucket_assignments : (H,) int32
+    T_global : float — updated global T
+    """
+    calls = jnp.argmax(gamma, axis=2)  # (H, T_sites)
+    switches_per_hap = (calls[:, 1:] != calls[:, :-1]).astype(jnp.float32).sum(axis=1)
+
+    p_diff = 1.0 - (mu ** 2).sum()
+    p_diff = jnp.maximum(p_diff, 0.1)
+    total_d = d_morgan.sum()
+
+    T_raw = switches_per_hap / (total_d * p_diff + 1e-10)
+
+    # Regularize: lambda ~ 1/(1 + switches/min_switches)
+    lam = 1.0 / (1.0 + switches_per_hap / min_switches_for_confidence)
+    T_reg = (1.0 - lam) * T_raw + lam * current_T_global
+    T_reg = jnp.clip(T_reg, 1.0, 1000.0)
+
+    bucket_assignments = assign_buckets(T_reg, bucket_centers)
+    T_global = float(jnp.mean(T_reg))
+
+    return T_reg, bucket_assignments, T_global
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +361,12 @@ def run_em(
     batch_size: int = 50_000,
     rng_seed: int = 42,
     stats=None,
+    bandwidth_cm: float = 0.05,
+    maf_threshold: float = 0.05,
+    per_hap_T: bool = False,
+    n_T_buckets: int = 20,
+    use_block_emissions: bool = False,
+    block_size: int = 8,
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -271,6 +384,9 @@ def run_em(
     gen_since_admix : initial guess for T
     batch_size : haplotypes per forward-backward batch
     rng_seed : random seed
+    bandwidth_cm : Gaussian kernel bandwidth for rare-variant frequency smoothing.
+                   Set to 0 to disable.
+    maf_threshold : MAF threshold below which frequencies are smoothed.
 
     Returns
     -------
@@ -295,6 +411,7 @@ def run_em(
     # Transfer to device
     geno = jnp.array(geno_np)
     d_morgan_j = jnp.array(d_morgan)
+    pos_cm_j = jnp.array(chrom_data.pos_cm.astype(np.float32))
 
     # --- Stage 1: Init model from soft assignments + window refinement ---
     log.info("Stage 1: Initializing model from soft assignments")
@@ -302,7 +419,22 @@ def run_em(
     log.info("  mu = %s", np.array(model.mu).round(3))
     log.info("  T = %.1f generations", model.gen_since_admix)
 
+    # --- Optional: block emission setup ---
+    bd = None
+    if use_block_emissions:
+        from .blocks import pack_blocks, init_pattern_freq, update_pattern_freq, expand_block_posteriors
+        bd = pack_blocks(geno_np, block_size=block_size, pos_cm=chrom_data.pos_cm)
+        log.info("  Block emissions: %d blocks of %d SNPs, %d max patterns",
+                 bd.n_blocks, block_size, bd.max_patterns)
+        pf = init_pattern_freq(model.allele_freq, bd, geno_np)
+        model = AncestryModel(
+            n_ancestries=model.n_ancestries, mu=model.mu,
+            gen_since_admix=model.gen_since_admix, allele_freq=model.allele_freq,
+            mismatch=model.mismatch, pattern_freq=pf, block_data=bd,
+        )
+
     # --- Stage 2-3: EM iterations ---
+    bucket_centers = compute_bucket_centers(n_T_buckets) if per_hap_T else None
     prev_freq = model.allele_freq
     for iteration in range(n_em_iter):
         log.info("--- EM iteration %d/%d ---", iteration + 1, n_em_iter)
@@ -311,7 +443,13 @@ def run_em(
         log.info("  E-step: forward-backward on %d haplotypes", chrom_data.n_haps)
         if stats is not None:
             stats.timer_start("e_step")
-        gamma = forward_backward_batched(geno, model, d_morgan_j, batch_size)
+        if bd is not None and model.pattern_freq is not None:
+            gamma_block = forward_backward_blocks(model, bd)
+            gamma = expand_block_posteriors(gamma_block, bd, chrom_data.n_sites)
+        elif model.bucket_assignments is not None:
+            gamma = forward_backward_bucketed(geno, model, d_morgan_j, batch_size)
+        else:
+            gamma = forward_backward_batched(geno, model, d_morgan_j, batch_size)
         if stats is not None:
             stats.timer_stop("e_step", chrom=chrom_data.chrom, iteration=iteration)
 
@@ -320,17 +458,34 @@ def run_em(
         if stats is not None:
             stats.timer_start("m_step")
         new_freq = update_allele_freq(geno, gamma)
+        if bandwidth_cm > 0:
+            new_freq = smooth_rare_frequencies(
+                new_freq, pos_cm_j, bandwidth_cm, maf_threshold,
+            )
         new_mu = update_mu(gamma)
 
         # Hold T fixed for first iteration to let frequencies stabilize
+        T_per_hap = None
+        bucket_assignments = None
         if iteration == 0:
             new_T = model.gen_since_admix
             log.info("  (holding T fixed for first iteration)")
+        elif per_hap_T and bucket_centers is not None:
+            T_per_hap, bucket_assignments, new_T = update_generations_per_hap(
+                gamma, d_morgan_j, model.gen_since_admix, new_mu, bucket_centers,
+            )
+            log.info("  Per-hap T: mean=%.1f, std=%.1f",
+                     float(jnp.mean(T_per_hap)), float(jnp.std(T_per_hap)))
         else:
             new_T = update_generations(gamma, d_morgan_j, model.gen_since_admix, model.mu)
 
         if stats is not None:
             stats.timer_stop("m_step", chrom=chrom_data.chrom, iteration=iteration)
+
+        # Update pattern frequencies if using block emissions
+        new_pf = None
+        if bd is not None and use_block_emissions:
+            new_pf = update_pattern_freq(bd, gamma_block)
 
         model = AncestryModel(
             n_ancestries=n_anc,
@@ -338,6 +493,11 @@ def run_em(
             gen_since_admix=new_T,
             allele_freq=new_freq,
             mismatch=model.mismatch,
+            gen_per_hap=T_per_hap,
+            bucket_centers=bucket_centers,
+            bucket_assignments=bucket_assignments,
+            pattern_freq=new_pf,
+            block_data=bd,
         )
 
         log.info("  mu = %s", np.array(model.mu).round(3))
@@ -364,7 +524,13 @@ def run_em(
 
     # --- Final posteriors ---
     log.info("Final forward-backward pass")
-    gamma = forward_backward_batched(geno, model, d_morgan_j, batch_size)
+    if bd is not None and model.pattern_freq is not None:
+        gamma_block = forward_backward_blocks(model, bd)
+        gamma = expand_block_posteriors(gamma_block, bd, chrom_data.n_sites)
+    elif model.bucket_assignments is not None:
+        gamma = forward_backward_bucketed(geno, model, d_morgan_j, batch_size)
+    else:
+        gamma = forward_backward_batched(geno, model, d_morgan_j, batch_size)
 
     # Hard calls
     calls = np.array(jnp.argmax(gamma, axis=2), dtype=np.int8)
@@ -400,6 +566,12 @@ def run_em_genome(
     rng_seed: int = 42,
     seed_chrom: Optional[str] = None,
     stats=None,
+    bandwidth_cm: float = 0.05,
+    maf_threshold: float = 0.05,
+    per_hap_T: bool = False,
+    n_T_buckets: int = 20,
+    use_block_emissions: bool = False,
+    block_size: int = 8,
 ) -> list[AncestryResult]:
     """Run self-bootstrapping LAI across all chromosomes.
 
@@ -436,6 +608,12 @@ def run_em_genome(
                 batch_size=batch_size,
                 rng_seed=rng_seed,
                 stats=stats,
+                bandwidth_cm=bandwidth_cm,
+                maf_threshold=maf_threshold,
+                per_hap_T=per_hap_T,
+                n_T_buckets=n_T_buckets,
+                use_block_emissions=use_block_emissions,
+                block_size=block_size,
             )
             fitted_model = result.model
         else:
@@ -455,28 +633,45 @@ def run_em_genome(
                 geno, resp, fitted_model.n_ancestries,
                 fitted_model.gen_since_admix,
             )
-            # Override mu and T from the fitted model
+            # Override mu and T from the fitted model (including per-hap T)
             model = AncestryModel(
                 n_ancestries=fitted_model.n_ancestries,
                 mu=fitted_model.mu,
                 gen_since_admix=fitted_model.gen_since_admix,
                 allele_freq=model.allele_freq,
                 mismatch=fitted_model.mismatch,
+                gen_per_hap=fitted_model.gen_per_hap,
+                bucket_centers=fitted_model.bucket_centers,
+                bucket_assignments=fitted_model.bucket_assignments,
             )
 
             # One EM iteration
-            gamma = forward_backward_batched(geno, model, d_morgan_j, batch_size)
+            if model.bucket_assignments is not None:
+                gamma = forward_backward_bucketed(geno, model, d_morgan_j, batch_size)
+            else:
+                gamma = forward_backward_batched(geno, model, d_morgan_j, batch_size)
             new_freq = update_allele_freq(geno, gamma)
+            if bandwidth_cm > 0:
+                pos_cm_j = jnp.array(chrom_data.pos_cm.astype(np.float32))
+                new_freq = smooth_rare_frequencies(
+                    new_freq, pos_cm_j, bandwidth_cm, maf_threshold,
+                )
             model = AncestryModel(
                 n_ancestries=model.n_ancestries,
                 mu=model.mu,
                 gen_since_admix=model.gen_since_admix,
                 allele_freq=new_freq,
                 mismatch=model.mismatch,
+                gen_per_hap=model.gen_per_hap,
+                bucket_centers=model.bucket_centers,
+                bucket_assignments=model.bucket_assignments,
             )
 
             # Final posteriors
-            gamma = forward_backward_batched(geno, model, d_morgan_j, batch_size)
+            if model.bucket_assignments is not None:
+                gamma = forward_backward_bucketed(geno, model, d_morgan_j, batch_size)
+            else:
+                gamma = forward_backward_batched(geno, model, d_morgan_j, batch_size)
             calls = np.array(jnp.argmax(gamma, axis=2), dtype=np.int8)
 
             result = AncestryResult(
