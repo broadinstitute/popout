@@ -6,7 +6,8 @@ Feed it phased WGS from a large cohort and ancestry structure falls out of the j
 
 ## How it works
 
-With 500K+ samples, the data *is* the reference panel. The pipeline:
+With 500K+ samples, the data *is* the reference panel.  See [docs/THEORY.md](docs/THEORY.md)
+for the full mathematical treatment.  The pipeline:
 
 1. **SEED** — Randomized SVD on a SNP subset projects all haplotypes into PCA space. GMM assigns soft ancestry labels. Number of ancestries auto-detected via recursive hierarchical splitting (BIC-based binary splits on sub-PCA projections) or eigenvalue gap heuristic.
 
@@ -46,6 +47,13 @@ popout --pgen /path/to/pgens/ \
        --thin-cm 0.02 \
        --per-hap-T \
        --block-emissions
+
+# Export a reference panel for downstream tools (FLARE, RFMix)
+popout --pgen /path/to/pgens/ \
+       --map plink.GRCh38.map \
+       --out results/cohort \
+       --export-panel \
+       --panel-threshold 0.99
 
 # Generate QC report from a completed run
 popout report --stats results/cohort.summary.json --out report/
@@ -89,6 +97,13 @@ docker run --gpus all -v /data:/data popout \
 | `{prefix}.model` | Fitted model parameters (n_ancestries, mu, T) |
 | `{prefix}.stats.jsonl` | Timestamped runtime metrics (for live monitoring) |
 | `{prefix}.summary.json` | Aggregated QC stats (consumed by `popout report`) |
+| `{prefix}.panel.haplotypes.tsv` | Single-ancestry whole haplotypes (with `--export-panel`) |
+| `{prefix}.panel.segments.tsv.gz` | High-confidence single-ancestry segments (with `--export-panel`) |
+| `{prefix}.panel.frequencies.tsv.gz` | Per-ancestry allele frequencies (with `--export-panel`) |
+| `{prefix}.panel.proportions.tsv` | Per-haplotype ancestry proportions (with `--export-panel`) |
+
+See [docs/PANEL.md](docs/PANEL.md) for output formats, thresholds, and a
+worked example of the two-stage popout → FLARE pipeline.
 
 ### Tract format
 
@@ -121,7 +136,7 @@ spectral.py    Randomized SVD + GMM + hierarchical ancestry detection
 hmm.py         Forward-backward HMM in JAX with gradient checkpointing
 em.py          EM loop: seed → init → iterate → decode, with freq smoothing
 blocks.py      Block-level haplotype pattern encoding for LD-aware emissions
-output.py      Tract TSV, global ancestry TSV, model file writers
+output.py      Tract TSV, global ancestry TSV, model file writers, panel export
 stats.py       Runtime metrics collection (JSONL + W&B/TensorBoard)
 report.py      QC report generation (matplotlib plots from summary JSON)
 cli.py         Command-line interface
@@ -153,6 +168,22 @@ demo.py        Standalone demo on simulated data
 | `--smooth-bandwidth-cm` | 0.05 | Gaussian kernel bandwidth (cM) for rare-variant frequency smoothing (0 = disabled) |
 | `--smooth-maf-threshold` | 0.05 | MAF threshold below which frequencies are smoothed |
 | `--thin-cm` | none | Minimum cM spacing for site thinning (recommended: 0.02 for WGS) |
+| `--export-panel` | off | Export reference panel files for downstream tools |
+| `--panel-threshold` | 0.95 | Min posterior for whole-haplotype extraction |
+| `--panel-segment-threshold` | 0.99 | Min per-site posterior for segment extraction |
+| `--panel-min-segment-cm` | 1.0 | Min segment length in cM |
+| `--panel-max-per-ancestry` | all | Cap on haplotypes per ancestry (whole-haplotype output) |
+
+## Reference panel export
+
+With `--export-panel`, popout extracts single-ancestry haplotypes and segments
+from its posteriors, producing a ready-made reference panel for downstream
+LD-aware tools like FLARE or RFMix. No manual curation is required — in a 500K
+biobank, this typically yields ~850K single-ancestry haplotypes, an order of
+magnitude larger than any curated panel.
+
+See [docs/PANEL.md](docs/PANEL.md) for full details and the two-stage
+popout → FLARE pipeline.
 
 ## Limitations
 
@@ -165,7 +196,7 @@ demo.py        Standalone demo on simulated data
 - [ ] LD-aware variable-width blocks (r² decay threshold or external block maps)
 - [ ] `jax.pmap` multi-GPU parallelism
 - [ ] Rare-ancestry detection (clusters with <1% of samples)
-- [ ] Benchmark against FLARE on simulated data
+- [ ] Benchmark against FLARE on simulated data (two-stage pipeline; see [docs/PANEL.md](docs/PANEL.md))
 
 ## References
 
