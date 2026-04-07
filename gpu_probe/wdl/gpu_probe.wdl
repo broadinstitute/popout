@@ -10,7 +10,7 @@ version 1.0
 task gpu_probe_task {
   input {
     String machine_type
-    String zones        = "us-central1-a us-central1-c us-east4-a us-east4-c"
+    String zones        = "us-central1-a us-central1-c"
     String docker_image = "nvidia/cuda:12.6.3-base-ubuntu24.04"
     Int    boot_disk_gb = 30
   }
@@ -19,9 +19,13 @@ task gpu_probe_task {
     set -euo pipefail
 
     echo "=== Machine type ==="
-    curl -sf -H "Metadata-Flavor: Google" \
-      http://metadata.google.internal/computeMetadata/v1/instance/machine-type \
-      > actual_machine_type.txt
+    python3 -c "
+import urllib.request
+req = urllib.request.Request(
+    'http://metadata.google.internal/computeMetadata/v1/instance/machine-type',
+    headers={'Metadata-Flavor': 'Google'})
+print(urllib.request.urlopen(req).read().decode())
+" > actual_machine_type.txt
     cat actual_machine_type.txt
 
     echo ""
@@ -30,8 +34,6 @@ task gpu_probe_task {
 
     echo ""
     echo "=== CUDA quick test ==="
-    # Use Python + ctypes to run a trivial CUDA operation without needing
-    # any pip packages.  If nvidia-smi works, libcuda.so is available.
     python3 -c "
 import ctypes, ctypes.util, sys
 lib = ctypes.util.find_library('cuda')
@@ -75,7 +77,7 @@ print('CUDA runtime OK')
 workflow gpu_probe {
   input {
     Array[String] machine_types
-    String zones        = "us-central1-a us-central1-c us-east4-a us-east4-c"
+    String zones        = "us-central1-a us-central1-c"
     String docker_image = "nvidia/cuda:12.6.3-base-ubuntu24.04"
   }
 

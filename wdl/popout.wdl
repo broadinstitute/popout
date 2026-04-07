@@ -30,7 +30,7 @@ task popout_task {
 
     # Runtime
     String machine_type  = "a2-highgpu-1g"
-    String zones         = "us-central1-a us-central1-c us-east4-a us-east4-c"
+    String zones         = "us-central1-a us-central1-c"
     Int    disk_size_gb  = 500
     String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:0.1.0"
   }
@@ -123,7 +123,7 @@ workflow popout {
 
     # Runtime
     String machine_type  = "a2-highgpu-1g"
-    String zones         = "us-central1-a us-central1-c us-east4-a us-east4-c"
+    String zones         = "us-central1-a us-central1-c"
     Int    disk_size_gb  = 500
     String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:0.1.0"
   }
