@@ -1,0 +1,18 @@
+{
+  "popout.pgens": [
+    "gs://your-bucket/pgens/chr1.pgen",
+    "gs://your-bucket/pgens/chr2.pgen"
+  ],
+  "popout.pvars": [
+    "gs://your-bucket/pgens/chr1.pvar",
+    "gs://your-bucket/pgens/chr2.pvar"
+  ],
+  "popout.psams": [
+    "gs://your-bucket/pgens/chr1.psam",
+    "gs://your-bucket/pgens/chr2.psam"
+  ],
+  "popout.genetic_map": "gs://your-bucket/maps/plink.GRCh38.map",
+  "popout.output_prefix": "my_cohort",
+  "popout.machine_type": "a2-highgpu-1g",
+  "popout.zones": "us-central1-a us-central1-c"
+}

@@ -1,0 +1,7 @@
+{
+  "gpu_probe.machine_types": [
+    "a2-highgpu-1g",
+    "g2-standard-4"
+  ],
+  "gpu_probe.zones": "us-central1-a us-central1-c us-east4-a us-east4-c"
+}
