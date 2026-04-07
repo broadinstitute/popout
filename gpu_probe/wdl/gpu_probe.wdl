@@ -10,6 +10,7 @@ version 1.0
 task gpu_probe_task {
   input {
     String machine_type
+    String gpu_type     = "nvidia-tesla-a100"
     String zones        = "us-central1-a us-central1-c"
     String docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:0.1.0"
     Int    boot_disk_gb = 30
@@ -81,9 +82,10 @@ if any(d.platform == 'gpu' for d in jax.devices()):
   runtime {
     docker:               docker_image
     predefinedMachineType: machine_type
-    # gpuCount triggers Cromwell to call setInstallGpuDrivers(true) on
-    # GCP Batch.  Without this, predefinedMachineType alone provisions the
-    # machine but never installs NVIDIA drivers.
+    # Specify the matching GPU type to trigger Cromwell's
+    # setInstallGpuDrivers(true) on GCP Batch.  The accelerator
+    # declaration should match the built-in GPU on the machine.
+    gpuType:              gpu_type
     gpuCount:             1
     zones:                zones
     bootDiskSizeGb:       boot_disk_gb
@@ -98,14 +100,16 @@ if any(d.platform == 'gpu' for d in jax.devices()):
 workflow gpu_probe {
   input {
     Array[String] machine_types
+    Array[String] gpu_types
     String zones        = "us-central1-a us-central1-c"
     String docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:0.1.0"
   }
 
-  scatter (mt in machine_types) {
+  scatter (idx in range(length(machine_types))) {
     call gpu_probe_task {
       input:
-        machine_type = mt,
+        machine_type = machine_types[idx],
+        gpu_type     = gpu_types[idx],
         zones        = zones,
         docker_image = docker_image
     }
