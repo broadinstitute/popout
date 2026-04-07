@@ -5,3 +5,11 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /vcf2pgen/wdl/vcf_to_pgen.wdl
     topic: Convert phased VCF files to PGEN format for popout
+  - name: gpu-probe
+    subclass: WDL
+    primaryDescriptorPath: /gpu_probe/wdl/gpu_probe.wdl
+    topic: Validate GPU machine types on Terra
+  - name: popout
+    subclass: WDL
+    primaryDescriptorPath: /wdl/popout.wdl
+    topic: GPU-accelerated local ancestry inference at biobank scale
