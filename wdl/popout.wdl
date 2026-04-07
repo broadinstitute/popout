@@ -18,7 +18,7 @@ task popout_task {
     Array[File] pgens
     Array[File] pvars
     Array[File] psams
-    File         genetic_map
+    File?        genetic_map
     String       output_prefix = "popout"
 
     # popout algorithm options
@@ -63,7 +63,8 @@ task popout_task {
     nvidia-smi || echo "WARNING: nvidia-smi failed"
 
     # ---- Build popout command ----
-    CMD="popout --pgen pgen_dir/ --map ~{genetic_map} --out ~{output_prefix}"
+    CMD="popout --pgen pgen_dir/ --out ~{output_prefix}"
+    ~{if defined(genetic_map) then 'CMD="$CMD --map ~{genetic_map}"' else ''}
     CMD="$CMD --n-em-iter ~{n_em_iter}"
     CMD="$CMD --method ~{method}"
     CMD="$CMD --gen-since-admix ~{gen_since_admix}"
@@ -116,7 +117,7 @@ workflow popout {
     Array[File] pgens
     Array[File] pvars
     Array[File] psams
-    File         genetic_map
+    File?        genetic_map
     String       output_prefix = "popout"
 
     # Algorithm options
