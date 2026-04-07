@@ -90,7 +90,7 @@ def write_ancestry_vcf(
                 hap2_idx = 2 * si + 1
                 new_rec.samples[sample_name]["AN1"] = int(calls[hap1_idx, site_idx])
                 new_rec.samples[sample_name]["AN2"] = int(calls[hap2_idx, site_idx])
-                if write_probs:
+                if write_probs and result.posteriors is not None:
                     p1 = result.posteriors[hap1_idx, site_idx, :]
                     p2 = result.posteriors[hap2_idx, site_idx, :]
                     new_rec.samples[sample_name]["ANP1"] = tuple(
@@ -169,7 +169,7 @@ def write_ancestry_tracts(
                 continue
 
             posteriors = None
-            if write_posteriors:
+            if write_posteriors and result.posteriors is not None:
                 posteriors = np.array(result.posteriors)  # (n_haps, n_sites, A)
 
             # Vectorized switch detection per haplotype:
@@ -199,8 +199,12 @@ def write_ancestry_tracts(
                     tract_lengths_by_anc.setdefault(anc, []).append(n_sites_tract)
 
             # Posterior confidence: mean of max posterior per site
-            if posteriors is not None:
-                max_post = np.array(result.posteriors).max(axis=2)  # (n_haps, n_sites)
+            if result.decode is not None and result.decode.max_post is not None:
+                max_post = result.decode.max_post
+                confidence_sum += float(max_post.sum())
+                confidence_count += max_post.size
+            elif posteriors is not None:
+                max_post = posteriors.max(axis=2)  # (n_haps, n_sites)
                 confidence_sum += float(max_post.sum())
                 confidence_count += max_post.size
 
@@ -244,10 +248,17 @@ def write_global_ancestry(
     total_sites = 0
 
     for result in results:
-        gamma = np.array(result.posteriors)  # (n_haps, T, A)
-        T = gamma.shape[1]
-        # Sum over sites per haplotype: (n_haps, A)
-        hap_sums = gamma.sum(axis=1)
+        # Use pre-computed global_sums from DecodeResult when available
+        if result.decode is not None and result.decode.global_sums is not None:
+            hap_sums = result.decode.global_sums  # (n_haps, A) float64
+            T = result.calls.shape[1]
+        elif result.posteriors is not None:
+            gamma = np.array(result.posteriors)  # (n_haps, T, A)
+            T = gamma.shape[1]
+            hap_sums = gamma.sum(axis=1)  # (n_haps, A)
+        else:
+            log.warning("No posteriors or decode for chrom %s, skipping", result.chrom)
+            continue
         # Average paired haplotypes: even indices = hap1, odd = hap2
         sample_sums += (hap_sums[0::2] + hap_sums[1::2]) / 2
         total_sites += T

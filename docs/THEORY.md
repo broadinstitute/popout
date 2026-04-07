@@ -551,15 +551,38 @@ thousand sites (array-like density), bringing storage to:
 1M × 3K × 8 × 4 bytes ≈ 96 GB
 ```
 
-which is manageable with haplotype batching (50K haplotypes per batch → ~5 GB
-per batch).
+This does **not** fit on any single GPU (96 GB exceeds even the 80 GB A100).
+However, the HMM is independent across haplotypes, so the forward-backward
+pass is batched over H.  With 50K haplotypes per batch, each batch is ~5 GB.
 
-**Gradient checkpointing** reduces the forward-state storage from O(H·T·A)
-to O(H·√T·A).  Instead of storing every forward state for the backward pass,
-the implementation stores only √T checkpoint alphas — one at every C-th site,
-where C = ⌈√T⌉.  During the backward pass, forward states within each
-segment are recomputed from the nearest checkpoint on the fly, fused with the
-backward computation and posterior normalization.
+**Streaming M-step.**  The EM loop's M-step consumers are all reductions over
+the haplotype dimension:
+
+- `update_allele_freq`: einsum over H → (A, T)
+- `update_mu`: mean over H and T → (A,)
+- `update_generations`: argmax + switch count → scalar
+
+None require the full (H, T, A) posterior simultaneously.  The implementation
+accumulates these sufficient statistics inside the batching loop — gamma is
+computed per batch, reduced, and freed.  Peak GPU memory during the E-step
+is therefore O(batch\_size · T · A), independent of total H:
+
+```
+batch_size=50K,  T=3K, A=8:   50K × 3K × 8 × 4 ≈  4.8 GB per batch
+batch_size=25K,  T=14K, A=6:  25K × 14K × 6 × 4 ≈  8.4 GB per batch
+```
+
+The final decode pass uses the same streaming pattern, computing hard calls
+(argmax), per-site max posteriors, and per-haplotype global ancestry sums
+per batch — writing results to CPU numpy arrays.
+
+**Gradient checkpointing** reduces the *within-batch* forward-state storage
+from O(batch\_size · T · A) to O(batch\_size · √T · A).  Instead of storing
+every forward state for the backward pass, the implementation stores only √T
+checkpoint alphas — one at every C-th site, where C = ⌈√T⌉.  During the
+backward pass, forward states within each segment are recomputed from the
+nearest checkpoint on the fly, fused with the backward computation and
+posterior normalization.
 
 The algorithm uses a two-level `jax.lax.scan`:
 
@@ -576,19 +599,31 @@ The algorithm uses a two-level `jax.lax.scan`:
    segment), and posteriors are computed elementwise.
 
 The result is numerically equivalent to the full forward-backward.  For
-T = 3000 thinned sites, C ≈ 55, and checkpoint storage is:
+T = 3000 thinned sites, C ≈ 55, and checkpoint storage per batch is:
 
 ```
-1M × 55 checkpoints × 8 ancestries × 4 bytes ≈ 1.8 GB
+50K × 55 checkpoints × 8 ancestries × 4 bytes ≈ 88 MB
 ```
 
-a ~54× reduction from the ~96 GB full-storage case.  The cost is ~2×
-forward compute (one full pass + one segment recompute), which is acceptable
-since the forward pass is memory-bandwidth bound — recomputed segments often
-hit L2 cache rather than HBM.
+The cost is ~2× forward compute (one full pass + one segment recompute),
+which is acceptable since the forward pass is memory-bandwidth bound —
+recomputed segments often hit L2 cache rather than HBM.
 
 Checkpointing is enabled automatically for T > 64 and can be forced on/off
 via the `use_checkpointing` parameter.
+
+**Peak GPU memory budget** (1M haplotypes, 3K thinned sites, A=8,
+batch\_size=50K on A100 40 GB):
+
+| Tensor                        | Size    | Location          |
+|-------------------------------|---------|-------------------|
+| geno (H, T) uint8            | 3 GB    | GPU               |
+| gamma per batch (50K, T, A)  | 4.8 GB  | GPU (freed/batch) |
+| M-step accumulators (A, T)×3 | ~1 MB   | GPU               |
+| calls (H, T) int8            | 3 GB    | CPU               |
+| max\_post (H, T) float32     | 12 GB   | CPU (optional)    |
+
+Peak GPU ≈ 3 GB (geno) + 5 GB (one batch) ≈ **8 GB**. Fits comfortably.
 
 ### Arithmetic intensity
 

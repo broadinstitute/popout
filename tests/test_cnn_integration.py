@@ -72,14 +72,14 @@ class TestRunCNNSimulated:
         )
 
         assert isinstance(result, AncestryResult)
-        assert result.posteriors.shape == (chrom_data.n_haps, chrom_data.n_sites, 3)
         assert result.calls.shape == (chrom_data.n_haps, chrom_data.n_sites)
         assert result.calls.dtype == np.int8
         assert set(np.unique(result.calls)).issubset({0, 1, 2})
 
-        # Posteriors should sum to 1
-        sums = result.posteriors.sum(axis=-1)
-        assert jnp.allclose(sums, 1.0, atol=1e-4)
+        # Decode result should have pre-computed reductions
+        assert result.decode is not None
+        assert result.decode.max_post.shape == (chrom_data.n_haps, chrom_data.n_sites)
+        assert result.decode.global_sums.shape == (chrom_data.n_haps, 3)
 
         # Model should have valid parameters
         assert result.model.n_ancestries == 3
@@ -111,7 +111,8 @@ class TestRunCNNSimulated:
         )
 
         assert isinstance(result, AncestryResult)
-        assert result.posteriors.shape == (chrom_data.n_haps, chrom_data.n_sites, 3)
+        assert result.calls.shape == (chrom_data.n_haps, chrom_data.n_sites, )
+        assert result.decode is not None
         assert crf_params is not None
 
 
@@ -140,9 +141,12 @@ class TestOutputFormatMatch:
         )
 
         # Same shapes
-        assert hmm_result.posteriors.shape == cnn_result.posteriors.shape
         assert hmm_result.calls.shape == cnn_result.calls.shape
         assert hmm_result.calls.dtype == cnn_result.calls.dtype
+
+        # Both should have decode results
+        assert hmm_result.decode is not None
+        assert cnn_result.decode is not None
 
         # Same model structure
         assert hmm_result.model.n_ancestries == cnn_result.model.n_ancestries

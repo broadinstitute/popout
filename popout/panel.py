@@ -90,7 +90,7 @@ def extract_whole_haplotypes(
             mean_posteriors=np.array([], dtype=np.float32),
         )
 
-    n_haps = results[0].posteriors.shape[0]
+    n_haps = results[0].calls.shape[0]
 
     # Accumulate per-hap genome-wide min-of-max and mean-of-max posteriors
     genome_min = np.ones(n_haps, dtype=np.float64)
@@ -104,17 +104,25 @@ def extract_whole_haplotypes(
     has_switch = np.zeros(n_haps, dtype=bool)
 
     for result in results:
-        gamma = np.array(result.posteriors)  # (H, T, A)
-        max_post = gamma.max(axis=2)         # (H, T)
-        hard_calls = gamma.argmax(axis=2)    # (H, T)
+        # Use pre-computed decode fields when available
+        if result.decode is not None and result.decode.max_post is not None:
+            max_post = result.decode.max_post      # (H, T)
+            hard_calls = np.array(result.calls)    # (H, T)
+        elif result.posteriors is not None:
+            gamma = np.array(result.posteriors)    # (H, T, A)
+            max_post = gamma.max(axis=2)           # (H, T)
+            hard_calls = gamma.argmax(axis=2)      # (H, T)
+        else:
+            hard_calls = np.array(result.calls)
+            max_post = None
 
         # Per-haplotype minimum of max-posterior across sites
-        chrom_min = max_post.min(axis=1)     # (H,)
-        genome_min = np.minimum(genome_min, chrom_min)
+        if max_post is not None:
+            chrom_min = max_post.min(axis=1)     # (H,)
+            genome_min = np.minimum(genome_min, chrom_min)
+            genome_mean_sum += max_post.sum(axis=1)
 
-        # Accumulate mean
-        genome_mean_sum += max_post.sum(axis=1)
-        total_sites += gamma.shape[1]
+        total_sites += hard_calls.shape[1]
 
         # Accumulate ancestry counts for mode
         for a in range(A):
@@ -174,15 +182,27 @@ def extract_segments(
     min_cm : minimum segment genetic length in centiMorgans
     min_sites : minimum number of sites in a segment
     """
-    gamma = np.array(result.posteriors)  # (H, T, A)
-    H, T, A = gamma.shape
+    # Use pre-computed decode fields when available
+    if result.decode is not None and result.decode.max_post is not None:
+        max_post = result.decode.max_post
+        hard_calls = np.array(result.calls)
+        gamma = np.array(result.posteriors) if result.posteriors is not None else None
+    elif result.posteriors is not None:
+        gamma = np.array(result.posteriors)  # (H, T, A)
+        max_post = gamma.max(axis=2)
+        hard_calls = gamma.argmax(axis=2)
+    else:
+        hard_calls = np.array(result.calls)
+        max_post = None
+        gamma = None
+
+    H, T = hard_calls.shape
+    A = result.model.n_ancestries
 
     if T == 0:
         return []
 
-    max_post = gamma.max(axis=2)       # (H, T)
-    hard_calls = gamma.argmax(axis=2)  # (H, T)
-    confident = max_post > threshold   # (H, T)
+    confident = max_post > threshold if max_post is not None else np.ones((H, T), dtype=bool)
 
     pos_bp = cdata.pos_bp
     pos_cm = cdata.pos_cm
@@ -218,7 +238,12 @@ def extract_segments(
             if seg_cm < min_cm:
                 continue
 
-            mean_post = float(gamma[hi, s:e, anc].mean())
+            if gamma is not None:
+                mean_post = float(gamma[hi, s:e, anc].mean())
+            elif max_post is not None:
+                mean_post = float(max_post[hi, s:e].mean())
+            else:
+                mean_post = 1.0
             segments.append(Segment(
                 hap_index=hi,
                 chrom=chrom,
@@ -348,9 +373,16 @@ def write_haplotype_proportions(
     total_sites = 0
 
     for result in results:
-        gamma = np.array(result.posteriors)  # (H, T, A)
-        hap_sums += gamma.sum(axis=1)
-        total_sites += gamma.shape[1]
+        if result.decode is not None and result.decode.global_sums is not None:
+            hap_sums += result.decode.global_sums
+            total_sites += result.calls.shape[1]
+        elif result.posteriors is not None:
+            gamma = np.array(result.posteriors)  # (H, T, A)
+            hap_sums += gamma.sum(axis=1)
+            total_sites += gamma.shape[1]
+        else:
+            log.warning("No posteriors or decode for chrom %s, skipping", result.chrom)
+            continue
 
     hap_props = hap_sums / max(total_sites, 1)
 

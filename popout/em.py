@@ -14,8 +14,16 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from .datatypes import AncestryModel, ChromData, AncestryResult
-from .hmm import forward_backward_batched, forward_backward_bucketed, forward_backward_blocks
+from .datatypes import AncestryModel, ChromData, AncestryResult, EMStats, DecodeResult
+from .hmm import (
+    forward_backward_batched,
+    forward_backward_bucketed,
+    forward_backward_blocks,
+    forward_backward_em,
+    forward_backward_bucketed_em,
+    forward_backward_decode,
+    forward_backward_bucketed_decode,
+)
 from .spectral import seed_ancestry, seed_ancestry_soft, window_init_allele_freq
 
 log = logging.getLogger(__name__)
@@ -238,6 +246,87 @@ def update_generations_per_hap(
 
 
 # ---------------------------------------------------------------------------
+# Streaming M-step: operate on EMStats instead of full gamma
+# ---------------------------------------------------------------------------
+
+def update_allele_freq_from_stats(
+    stats: EMStats,
+    pseudocount: float = 0.5,
+) -> jnp.ndarray:
+    """Update allele frequencies from pre-accumulated sufficient statistics.
+
+    Equivalent to update_allele_freq(geno, gamma) but without needing
+    the full (H, T, A) gamma tensor.
+    """
+    return (stats.weighted_counts + pseudocount) / (stats.total_weights + 2 * pseudocount)
+
+
+def update_mu_from_stats(stats: EMStats) -> jnp.ndarray:
+    """Update global ancestry proportions from pre-accumulated stats.
+
+    Equivalent to update_mu(gamma).
+    """
+    mu = stats.mu_sum / (stats.n_haps * stats.n_sites)
+    return mu / mu.sum()
+
+
+def update_generations_from_stats(
+    stats: EMStats,
+    d_morgan: jnp.ndarray,
+    current_T: float,
+    mu: jnp.ndarray,
+) -> float:
+    """Estimate generations since admixture from pre-accumulated switch stats.
+
+    Equivalent to update_generations(gamma, d_morgan, current_T, mu).
+    """
+    # Per-interval switch rate averaged over haplotypes
+    switch_rate = stats.switch_sum / stats.n_haps  # (T-1,)
+
+    p_diff_ancestry = 1.0 - (mu ** 2).sum()
+    p_diff_ancestry = float(jnp.maximum(p_diff_ancestry, 0.1))
+
+    d = jnp.maximum(d_morgan, 1e-10)
+    total_switches = switch_rate.sum()
+    total_distance = d.sum()
+
+    T_est = float(total_switches / (total_distance * p_diff_ancestry + 1e-10))
+
+    T_new = 0.7 * T_est + 0.3 * current_T
+    return max(1.0, min(T_new, 1000.0))
+
+
+def update_generations_per_hap_from_stats(
+    stats: EMStats,
+    d_morgan: jnp.ndarray,
+    current_T_global: float,
+    mu: jnp.ndarray,
+    bucket_centers: jnp.ndarray,
+    min_switches_for_confidence: int = 5,
+) -> tuple[jnp.ndarray, jnp.ndarray, float]:
+    """Per-haplotype T estimation from pre-accumulated switch counts.
+
+    Equivalent to update_generations_per_hap(gamma, ...).
+    """
+    switches_per_hap = jnp.array(stats.switches_per_hap, dtype=jnp.float32)
+
+    p_diff = 1.0 - (mu ** 2).sum()
+    p_diff = jnp.maximum(p_diff, 0.1)
+    total_d = d_morgan.sum()
+
+    T_raw = switches_per_hap / (total_d * p_diff + 1e-10)
+
+    lam = 1.0 / (1.0 + switches_per_hap / min_switches_for_confidence)
+    T_reg = (1.0 - lam) * T_raw + lam * current_T_global
+    T_reg = jnp.clip(T_reg, 1.0, 1000.0)
+
+    bucket_assignments = assign_buckets(T_reg, bucket_centers)
+    T_global = float(jnp.mean(T_reg))
+
+    return T_reg, bucket_assignments, T_global
+
+
+# ---------------------------------------------------------------------------
 # Initialization from hard labels
 # ---------------------------------------------------------------------------
 
@@ -439,30 +528,48 @@ def run_em(
     for iteration in range(n_em_iter):
         log.info("--- EM iteration %d/%d ---", iteration + 1, n_em_iter)
 
-        # E-step: forward-backward
+        # E-step: forward-backward (streaming — no full gamma materialised)
         log.info("  E-step: forward-backward on %d haplotypes", chrom_data.n_haps)
         if stats is not None:
             stats.timer_start("e_step")
+
+        gamma_block = None  # only set for block-emissions path
         if bd is not None and model.pattern_freq is not None:
+            # Block emissions: small (H, n_blocks, A) — no streaming needed
             gamma_block = forward_backward_blocks(model, bd)
             gamma = expand_block_posteriors(gamma_block, bd, chrom_data.n_sites)
+            # Build EMStats from full gamma for this (small) path
+            geno_f = geno.astype(jnp.float32)
+            calls_tmp = jnp.argmax(gamma, axis=2)
+            switches_tmp = (calls_tmp[:, 1:] != calls_tmp[:, :-1]) if gamma.shape[1] > 1 else jnp.zeros((gamma.shape[0], 0), dtype=bool)
+            em_stats = EMStats(
+                weighted_counts=jnp.einsum('hta,ht->at', gamma, geno_f),
+                total_weights=gamma.sum(axis=0).T,
+                mu_sum=gamma.sum(axis=(0, 1)),
+                switch_sum=switches_tmp.sum(axis=0).astype(jnp.float32),
+                switches_per_hap=np.array(switches_tmp.sum(axis=1), dtype=np.int32),
+                n_haps=gamma.shape[0],
+                n_sites=gamma.shape[1],
+            )
+            del gamma  # free the expanded block gamma
         elif model.bucket_assignments is not None:
-            gamma = forward_backward_bucketed(geno, model, d_morgan_j, batch_size)
+            em_stats = forward_backward_bucketed_em(geno, model, d_morgan_j, batch_size)
         else:
-            gamma = forward_backward_batched(geno, model, d_morgan_j, batch_size)
+            em_stats = forward_backward_em(geno, model, d_morgan_j, batch_size)
+
         if stats is not None:
             stats.timer_stop("e_step", chrom=chrom_data.chrom, iteration=iteration)
 
-        # M-step: update parameters
+        # M-step: update parameters from streaming stats
         log.info("  M-step: updating parameters")
         if stats is not None:
             stats.timer_start("m_step")
-        new_freq = update_allele_freq(geno, gamma)
+        new_freq = update_allele_freq_from_stats(em_stats)
         if bandwidth_cm > 0:
             new_freq = smooth_rare_frequencies(
                 new_freq, pos_cm_j, bandwidth_cm, maf_threshold,
             )
-        new_mu = update_mu(gamma)
+        new_mu = update_mu_from_stats(em_stats)
 
         # Hold T fixed for first iteration to let frequencies stabilize
         T_per_hap = None
@@ -471,13 +578,13 @@ def run_em(
             new_T = model.gen_since_admix
             log.info("  (holding T fixed for first iteration)")
         elif per_hap_T and bucket_centers is not None:
-            T_per_hap, bucket_assignments, new_T = update_generations_per_hap(
-                gamma, d_morgan_j, model.gen_since_admix, new_mu, bucket_centers,
+            T_per_hap, bucket_assignments, new_T = update_generations_per_hap_from_stats(
+                em_stats, d_morgan_j, model.gen_since_admix, new_mu, bucket_centers,
             )
             log.info("  Per-hap T: mean=%.1f, std=%.1f",
                      float(jnp.mean(T_per_hap)), float(jnp.std(T_per_hap)))
         else:
-            new_T = update_generations(gamma, d_morgan_j, model.gen_since_admix, model.mu)
+            new_T = update_generations_from_stats(em_stats, d_morgan_j, model.gen_since_admix, model.mu)
 
         if stats is not None:
             stats.timer_stop("m_step", chrom=chrom_data.chrom, iteration=iteration)
@@ -522,29 +629,39 @@ def run_em(
             break
         prev_freq = new_freq
 
-    # --- Final posteriors ---
+    # --- Final decode (streaming — no full gamma materialised) ---
     log.info("Final forward-backward pass")
     if bd is not None and model.pattern_freq is not None:
+        # Block emissions: small tensor, use legacy path
         gamma_block = forward_backward_blocks(model, bd)
         gamma = expand_block_posteriors(gamma_block, bd, chrom_data.n_sites)
-    elif model.bucket_assignments is not None:
-        gamma = forward_backward_bucketed(geno, model, d_morgan_j, batch_size)
+        calls = np.array(jnp.argmax(gamma, axis=2), dtype=np.int8)
+        decode = DecodeResult(
+            calls=calls,
+            max_post=np.array(gamma.max(axis=2)),
+            global_sums=np.array(gamma.sum(axis=1)),
+        )
+        result = AncestryResult(
+            calls=calls, model=model, chrom=chrom_data.chrom,
+            decode=decode, posteriors=gamma,
+        )
     else:
-        gamma = forward_backward_batched(geno, model, d_morgan_j, batch_size)
-
-    # Hard calls
-    calls = np.array(jnp.argmax(gamma, axis=2), dtype=np.int8)
-
-    result = AncestryResult(
-        posteriors=gamma,
-        calls=calls,
-        model=model,
-        chrom=chrom_data.chrom,
-    )
+        if model.bucket_assignments is not None:
+            decode = forward_backward_bucketed_decode(
+                geno, model, d_morgan_j, batch_size,
+            )
+        else:
+            decode = forward_backward_decode(
+                geno, model, d_morgan_j, batch_size,
+            )
+        result = AncestryResult(
+            calls=decode.calls, model=model, chrom=chrom_data.chrom,
+            decode=decode,
+        )
 
     # Summary stats
     for a in range(n_anc):
-        prop = float((calls == a).mean())
+        prop = float((result.calls == a).mean())
         log.info("  Ancestry %d: %.1f%% of genome", a, 100 * prop)
         if stats is not None:
             stats.emit("em/ancestry_proportion", prop,
@@ -645,12 +762,12 @@ def run_em_genome(
                 bucket_assignments=fitted_model.bucket_assignments,
             )
 
-            # One EM iteration
+            # One EM iteration (streaming — no full gamma)
             if model.bucket_assignments is not None:
-                gamma = forward_backward_bucketed(geno, model, d_morgan_j, batch_size)
+                em_stats = forward_backward_bucketed_em(geno, model, d_morgan_j, batch_size)
             else:
-                gamma = forward_backward_batched(geno, model, d_morgan_j, batch_size)
-            new_freq = update_allele_freq(geno, gamma)
+                em_stats = forward_backward_em(geno, model, d_morgan_j, batch_size)
+            new_freq = update_allele_freq_from_stats(em_stats)
             if bandwidth_cm > 0:
                 pos_cm_j = jnp.array(chrom_data.pos_cm.astype(np.float32))
                 new_freq = smooth_rare_frequencies(
@@ -667,18 +784,18 @@ def run_em_genome(
                 bucket_assignments=model.bucket_assignments,
             )
 
-            # Final posteriors
+            # Final decode (streaming)
             if model.bucket_assignments is not None:
-                gamma = forward_backward_bucketed(geno, model, d_morgan_j, batch_size)
+                decode = forward_backward_bucketed_decode(
+                    geno, model, d_morgan_j, batch_size,
+                )
             else:
-                gamma = forward_backward_batched(geno, model, d_morgan_j, batch_size)
-            calls = np.array(jnp.argmax(gamma, axis=2), dtype=np.int8)
-
+                decode = forward_backward_decode(
+                    geno, model, d_morgan_j, batch_size,
+                )
             result = AncestryResult(
-                posteriors=gamma,
-                calls=calls,
-                model=model,
-                chrom=chrom_data.chrom,
+                calls=decode.calls, model=model, chrom=chrom_data.chrom,
+                decode=decode,
             )
 
         if stats is not None:

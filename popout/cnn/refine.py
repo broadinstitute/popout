@@ -15,7 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ..datatypes import AncestryModel, AncestryResult, ChromData
+from ..datatypes import AncestryModel, AncestryResult, ChromData, DecodeResult
 from ..em import (
     init_model_soft,
     smooth_rare_frequencies,
@@ -23,7 +23,7 @@ from ..em import (
     update_generations,
     update_mu,
 )
-from ..hmm import forward_backward_batched
+from ..hmm import forward_backward_batched, forward_backward_em
 from ..spectral import seed_ancestry_soft
 from .features import build_cnn_features
 from .model import CNNConfig, CNNParams, cnn_forward, init_cnn_params
@@ -75,6 +75,45 @@ def cnn_inference_batched(
         gamma_batch = _infer_batch(features[start:end])
         gammas.append(gamma_batch)
     return jnp.concatenate(gammas, axis=0)
+
+
+def cnn_inference_decode(
+    params: CNNParams,
+    config: CNNConfig,
+    features: jnp.ndarray,
+    crf_params=None,
+    batch_size: int = 512,
+    compute_max_post: bool = True,
+) -> DecodeResult:
+    """Batched CNN inference returning DecodeResult (no full gamma).
+
+    Same as cnn_inference_batched but avoids materialising the full
+    (H, T, A) posterior on GPU.
+    """
+    H = features.shape[0]
+    T = features.shape[1]
+    A = config.n_ancestries
+
+    def _infer_batch(feat_batch):
+        logits = cnn_forward(params, config, feat_batch)
+        if crf_params is not None:
+            from .crf import crf_marginals
+            return crf_marginals(logits, crf_params.W)
+        return jax.nn.softmax(logits, axis=-1)
+
+    calls = np.zeros((H, T), dtype=np.int8)
+    max_post = np.zeros((H, T), dtype=np.float32) if compute_max_post else None
+    global_sums = np.zeros((H, A), dtype=np.float64) if compute_max_post else None
+
+    for start in range(0, H, batch_size):
+        end = min(start + batch_size, H)
+        gamma = _infer_batch(features[start:end])
+        calls[start:end] = np.array(jnp.argmax(gamma, axis=2), dtype=np.int8)
+        if compute_max_post:
+            max_post[start:end] = np.array(gamma.max(axis=2))
+            global_sums[start:end] = np.array(gamma.sum(axis=1))
+
+    return DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)
 
 
 # ---------------------------------------------------------------------------
@@ -235,25 +274,24 @@ def run_cnn(
         log.info("  mu = %s", np.array(model.mu).round(3))
         log.info("  T = %.1f generations", model.gen_since_admix)
 
-    # --- Stage 5: Final inference ---
+    # --- Stage 5: Final inference (streaming decode) ---
     log.info("Final CNN inference")
     features = build_cnn_features(geno, model.allele_freq, d_morgan_j)
-    gamma = cnn_inference_batched(
+    decode = cnn_inference_decode(
         params, config, features,
         crf_params=crf_params,
         batch_size=cnn_batch_size,
     )
-    calls = np.array(jnp.argmax(gamma, axis=2), dtype=np.int8)
 
     result = AncestryResult(
-        posteriors=gamma,
-        calls=calls,
+        calls=decode.calls,
         model=model,
         chrom=chrom_data.chrom,
+        decode=decode,
     )
 
     for a in range(n_anc):
-        prop = float((calls == a).mean())
+        prop = float((result.calls == a).mean())
         log.info("  Ancestry %d: %.1f%% of genome", a, 100 * prop)
 
     return result, params, crf_params
@@ -408,12 +446,18 @@ def run_cnn_genome(
                 mismatch=model.mismatch,
             )
 
-            calls = np.array(jnp.argmax(gamma, axis=2), dtype=np.int8)
+            # Build decode result from the final gamma without keeping full tensor
+            decode = DecodeResult(
+                calls=np.array(jnp.argmax(gamma, axis=2), dtype=np.int8),
+                max_post=np.array(gamma.max(axis=2)),
+                global_sums=np.array(gamma.sum(axis=1)),
+            )
+            del gamma
             result = AncestryResult(
-                posteriors=gamma,
-                calls=calls,
+                calls=decode.calls,
                 model=model,
                 chrom=chrom_data.chrom,
+                decode=decode,
             )
 
         if stats is not None:

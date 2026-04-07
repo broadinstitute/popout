@@ -20,7 +20,9 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 
-from .datatypes import AncestryModel
+import numpy as _np
+
+from .datatypes import AncestryModel, DecodeResult, EMStats
 
 
 # ---------------------------------------------------------------------------
@@ -579,3 +581,250 @@ def forward_backward_bucketed(
         gamma_out[hap_idx] = _np.concatenate(b_gammas, axis=0)
 
     return jnp.array(gamma_out)
+
+
+# ---------------------------------------------------------------------------
+# Streaming batched forward-backward (no full-tensor materialisation)
+# ---------------------------------------------------------------------------
+
+def forward_backward_em(
+    geno: jnp.ndarray,
+    model: AncestryModel,
+    d_morgan: jnp.ndarray,
+    batch_size: int = 50_000,
+) -> EMStats:
+    """Batched forward-backward with streaming M-step accumulation.
+
+    Instead of concatenating all batch gammas into (H, T, A), accumulates
+    the sufficient statistics needed by the M-step per batch.  Peak GPU
+    memory is O(batch_size * T * A), independent of total H.
+
+    Parameters
+    ----------
+    geno : (H, T)
+    model : AncestryModel
+    d_morgan : (T-1,)
+    batch_size : max haplotypes per batch
+
+    Returns
+    -------
+    EMStats with accumulated sufficient statistics.
+    """
+    H, T = geno.shape
+    A = model.n_ancestries
+
+    weighted_counts = jnp.zeros((A, T))
+    total_weights = jnp.zeros((A, T))
+    mu_sum = jnp.zeros((A,))
+    switch_sum = jnp.zeros((T - 1,)) if T > 1 else jnp.zeros((0,))
+    switches_per_hap = _np.zeros(H, dtype=_np.int32)
+
+    for start in range(0, H, batch_size):
+        end = min(start + batch_size, H)
+        batch_geno = geno[start:end]
+        gamma = forward_backward(batch_geno, model, d_morgan)  # (B, T, A)
+
+        # Allele freq stats: einsum('hta,ht->at', gamma, geno_f)
+        geno_f = batch_geno.astype(jnp.float32)
+        weighted_counts += jnp.einsum('hta,ht->at', gamma, geno_f)
+        total_weights += gamma.sum(axis=0).T  # (T, A).T → (A, T)
+
+        # Mu stats
+        mu_sum += gamma.sum(axis=(0, 1))  # (A,)
+
+        # Switch stats from hard calls
+        calls = jnp.argmax(gamma, axis=2)  # (B, T)
+        if T > 1:
+            switches = (calls[:, 1:] != calls[:, :-1])  # (B, T-1) bool
+            switch_sum += switches.sum(axis=0).astype(jnp.float32)
+            switches_per_hap[start:end] = _np.array(
+                switches.sum(axis=1), dtype=_np.int32,
+            )
+
+        # gamma freed here — not accumulated
+
+    return EMStats(
+        weighted_counts=weighted_counts,
+        total_weights=total_weights,
+        mu_sum=mu_sum,
+        switch_sum=switch_sum,
+        switches_per_hap=switches_per_hap,
+        n_haps=H,
+        n_sites=T,
+    )
+
+
+def forward_backward_bucketed_em(
+    geno: jnp.ndarray,
+    model: AncestryModel,
+    d_morgan: jnp.ndarray,
+    batch_size: int = 50_000,
+) -> EMStats:
+    """Bucketed forward-backward with streaming M-step accumulation.
+
+    Like forward_backward_em but uses per-bucket transition matrices
+    when model.bucket_assignments is set (per-haplotype T).
+
+    Falls back to forward_backward_em when no bucket assignments exist.
+    """
+    if model.bucket_assignments is None:
+        return forward_backward_em(geno, model, d_morgan, batch_size)
+
+    H, T = geno.shape
+    A = model.n_ancestries
+    B = len(model.bucket_centers)
+
+    weighted_counts = jnp.zeros((A, T))
+    total_weights = jnp.zeros((A, T))
+    mu_sum = jnp.zeros((A,))
+    switch_sum = jnp.zeros((T - 1,)) if T > 1 else jnp.zeros((0,))
+    switches_per_hap = _np.zeros(H, dtype=_np.int32)
+
+    bucket_np = _np.array(model.bucket_assignments)
+
+    for b in range(B):
+        mask = bucket_np == b
+        n_b = int(mask.sum())
+        if n_b == 0:
+            continue
+
+        hap_idx = _np.where(mask)[0]
+        b_geno = geno[hap_idx]
+
+        b_model = AncestryModel(
+            n_ancestries=A,
+            mu=model.mu,
+            gen_since_admix=float(model.bucket_centers[b]),
+            allele_freq=model.allele_freq,
+            mismatch=model.mismatch,
+        )
+
+        for s in range(0, n_b, batch_size):
+            e = min(s + batch_size, n_b)
+            batch_geno = b_geno[s:e]
+            gamma = forward_backward(batch_geno, b_model, d_morgan)  # (bs, T, A)
+
+            geno_f = batch_geno.astype(jnp.float32)
+            weighted_counts += jnp.einsum('hta,ht->at', gamma, geno_f)
+            total_weights += gamma.sum(axis=0).T
+            mu_sum += gamma.sum(axis=(0, 1))
+
+            calls = jnp.argmax(gamma, axis=2)
+            if T > 1:
+                switches = (calls[:, 1:] != calls[:, :-1])
+                switch_sum += switches.sum(axis=0).astype(jnp.float32)
+                batch_hap_idx = hap_idx[s:e]
+                switches_per_hap[batch_hap_idx] = _np.array(
+                    switches.sum(axis=1), dtype=_np.int32,
+                )
+
+    return EMStats(
+        weighted_counts=weighted_counts,
+        total_weights=total_weights,
+        mu_sum=mu_sum,
+        switch_sum=switch_sum,
+        switches_per_hap=switches_per_hap,
+        n_haps=H,
+        n_sites=T,
+    )
+
+
+def forward_backward_decode(
+    geno: jnp.ndarray,
+    model: AncestryModel,
+    d_morgan: jnp.ndarray,
+    batch_size: int = 50_000,
+    compute_max_post: bool = True,
+) -> DecodeResult:
+    """Batched forward-backward for final decode pass.
+
+    Returns hard calls and optional pre-computed reductions on CPU,
+    without materialising the full (H, T, A) posterior tensor.
+
+    Parameters
+    ----------
+    geno : (H, T)
+    model : AncestryModel
+    d_morgan : (T-1,)
+    batch_size : max haplotypes per batch
+    compute_max_post : whether to compute max_post (H, T) and global_sums (H, A)
+
+    Returns
+    -------
+    DecodeResult
+    """
+    H, T = geno.shape
+    A = model.n_ancestries
+
+    calls = _np.zeros((H, T), dtype=_np.int8)
+    max_post = _np.zeros((H, T), dtype=_np.float32) if compute_max_post else None
+    global_sums = _np.zeros((H, A), dtype=_np.float64) if compute_max_post else None
+
+    for start in range(0, H, batch_size):
+        end = min(start + batch_size, H)
+        gamma = forward_backward(geno[start:end], model, d_morgan)  # (B, T, A)
+
+        calls[start:end] = _np.array(jnp.argmax(gamma, axis=2), dtype=_np.int8)
+        if compute_max_post:
+            max_post[start:end] = _np.array(gamma.max(axis=2))
+            global_sums[start:end] = _np.array(gamma.sum(axis=1))
+
+    return DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)
+
+
+def forward_backward_bucketed_decode(
+    geno: jnp.ndarray,
+    model: AncestryModel,
+    d_morgan: jnp.ndarray,
+    batch_size: int = 50_000,
+    compute_max_post: bool = True,
+) -> DecodeResult:
+    """Bucketed forward-backward for final decode with per-haplotype T.
+
+    Falls back to forward_backward_decode when no bucket assignments exist.
+    """
+    if model.bucket_assignments is None:
+        return forward_backward_decode(
+            geno, model, d_morgan, batch_size, compute_max_post,
+        )
+
+    H, T = geno.shape
+    A = model.n_ancestries
+    B = len(model.bucket_centers)
+
+    calls = _np.zeros((H, T), dtype=_np.int8)
+    max_post = _np.zeros((H, T), dtype=_np.float32) if compute_max_post else None
+    global_sums = _np.zeros((H, A), dtype=_np.float64) if compute_max_post else None
+
+    bucket_np = _np.array(model.bucket_assignments)
+
+    for b in range(B):
+        mask = bucket_np == b
+        n_b = int(mask.sum())
+        if n_b == 0:
+            continue
+
+        hap_idx = _np.where(mask)[0]
+        b_geno = geno[hap_idx]
+
+        b_model = AncestryModel(
+            n_ancestries=A,
+            mu=model.mu,
+            gen_since_admix=float(model.bucket_centers[b]),
+            allele_freq=model.allele_freq,
+            mismatch=model.mismatch,
+        )
+
+        for s in range(0, n_b, batch_size):
+            e = min(s + batch_size, n_b)
+            gamma = forward_backward(b_geno[s:e], b_model, d_morgan)
+            batch_hap_idx = hap_idx[s:e]
+
+            calls[batch_hap_idx] = _np.array(
+                jnp.argmax(gamma, axis=2), dtype=_np.int8,
+            )
+            if compute_max_post:
+                max_post[batch_hap_idx] = _np.array(gamma.max(axis=2))
+                global_sums[batch_hap_idx] = _np.array(gamma.sum(axis=1))
+
+    return DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)

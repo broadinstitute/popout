@@ -207,22 +207,55 @@ class AncestryModel:
 
 
 @dataclass
+class EMStats:
+    """Sufficient statistics accumulated from batched forward-backward.
+
+    All fields are reductions over the haplotype dimension H — no
+    per-haplotype posterior storage is needed for the M-step.
+    """
+
+    weighted_counts: jnp.ndarray  # (A, T) — Σ_h gamma[h,t,a] * geno[h,t]
+    total_weights: jnp.ndarray    # (A, T) — Σ_h gamma[h,t,a]
+    mu_sum: jnp.ndarray           # (A,)   — Σ_{h,t} gamma[h,t,a]
+    switch_sum: jnp.ndarray       # (T-1,) — Σ_h 1[call[h,t] ≠ call[h,t-1]]
+    switches_per_hap: np.ndarray  # (H,)   — per-haplotype switch counts (CPU)
+    n_haps: int
+    n_sites: int
+
+
+@dataclass
+class DecodeResult:
+    """Pre-computed reductions from final batched decode.
+
+    Avoids materialising the full (H, T, A) posterior tensor by storing
+    only the derived arrays that output functions actually need.
+    """
+
+    calls: np.ndarray              # (H, T) int8 — hard ancestry calls
+    max_post: Optional[np.ndarray] = None  # (H, T) float32 — max posterior per site
+    global_sums: Optional[np.ndarray] = None  # (H, A) float64 — Σ_t gamma[h,t,a]
+
+
+@dataclass
 class AncestryResult:
     """Output of the LAI pipeline for one chromosome.
 
     Attributes
     ----------
-    posteriors : jnp.ndarray, shape (n_haps, n_sites, A)
-        Posterior ancestry probabilities.
     calls : np.ndarray, shape (n_haps, n_sites), dtype int8
         Hard ancestry calls (argmax of posteriors).
     model : AncestryModel
         Final fitted model parameters.
     chrom : str
         Chromosome name.
+    decode : Optional[DecodeResult]
+        Pre-computed reductions (max_post, global_sums) when available.
+    posteriors : Optional[jnp.ndarray], shape (n_haps, n_sites, A)
+        Full posterior probabilities.  None at biobank scale to avoid OOM.
     """
 
-    posteriors: jnp.ndarray
     calls: np.ndarray
     model: AncestryModel
     chrom: str
+    decode: Optional[DecodeResult] = None
+    posteriors: Optional[jnp.ndarray] = None
