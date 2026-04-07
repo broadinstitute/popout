@@ -11,7 +11,7 @@ task gpu_probe_task {
   input {
     String machine_type
     String zones        = "us-central1-a us-central1-c"
-    String docker_image = "nvidia/cuda:12.6.3-base-ubuntu24.04"
+    String docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:0.1.0"
     Int    boot_disk_gb = 30
   }
 
@@ -78,7 +78,7 @@ workflow gpu_probe {
   input {
     Array[String] machine_types
     String zones        = "us-central1-a us-central1-c"
-    String docker_image = "nvidia/cuda:12.6.3-base-ubuntu24.04"
+    String docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:0.1.0"
   }
 
   scatter (mt in machine_types) {
