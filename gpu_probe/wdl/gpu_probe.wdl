@@ -29,29 +29,46 @@ print(urllib.request.urlopen(req).read().decode())
     cat actual_machine_type.txt
 
     echo ""
-    echo "=== nvidia-smi ==="
-    nvidia-smi | tee nvidia_smi.txt
+    echo "=== Environment diagnostics ==="
+    echo "PATH: $PATH"
+    echo "LD_LIBRARY_PATH: ${LD_LIBRARY_PATH:-unset}"
+    echo ""
+    echo "Searching for nvidia-smi..."
+    find / -name nvidia-smi -type f 2>/dev/null || echo "nvidia-smi not found anywhere"
+    echo ""
+    echo "Checking /dev for nvidia devices..."
+    ls -la /dev/nvidia* 2>/dev/null || echo "No /dev/nvidia* devices"
+    echo ""
+    echo "Checking for GPU driver mounts..."
+    ls -la /usr/local/nvidia/ 2>/dev/null || echo "No /usr/local/nvidia/"
+    mount | grep -i nvidia || echo "No nvidia mounts"
 
     echo ""
-    echo "=== CUDA quick test ==="
+    echo "=== nvidia-smi ==="
+    # Try common paths
+    NVSMI=$(find / -name nvidia-smi -type f 2>/dev/null | head -1)
+    if [ -n "$NVSMI" ]; then
+      echo "Found at: $NVSMI"
+      "$NVSMI" | tee nvidia_smi.txt
+    elif command -v nvidia-smi &>/dev/null; then
+      nvidia-smi | tee nvidia_smi.txt
+    else
+      echo "nvidia-smi not available" | tee nvidia_smi.txt
+    fi
+
+    echo ""
+    echo "=== JAX GPU test ==="
     python3 -c "
-import ctypes, ctypes.util, sys
-lib = ctypes.util.find_library('cuda')
-if lib is None:
-    print('WARN: libcuda not found, skipping runtime test')
-    sys.exit(0)
-cuda = ctypes.CDLL(lib)
-rc = cuda.cuInit(0)
-assert rc == 0, f'cuInit failed: {rc}'
-count = ctypes.c_int(0)
-rc = cuda.cuDeviceGetCount(ctypes.byref(count))
-assert rc == 0, f'cuDeviceGetCount failed: {rc}'
-print(f'CUDA devices: {count.value}')
-for i in range(count.value):
-    name = (ctypes.c_char * 256)()
-    cuda.cuDeviceGetName(name, 256, i)
-    print(f'  device {i}: {name.value.decode()}')
-print('CUDA runtime OK')
+import jax
+print(f'JAX version: {jax.__version__}')
+print(f'JAX devices: {jax.devices()}')
+print(f'GPU count: {jax.device_count(\"gpu\")}' if any(d.platform == 'gpu' for d in jax.devices()) else 'No GPU detected')
+if any(d.platform == 'gpu' for d in jax.devices()):
+    import jax.numpy as jnp
+    x = jnp.ones((1000, 1000))
+    y = x @ x
+    print(f'Matmul result shape: {y.shape}, sum: {y.sum()}')
+    print('JAX GPU OK')
 " | tee cuda_test.txt
   >>>
 
@@ -64,6 +81,10 @@ print('CUDA runtime OK')
   runtime {
     docker:               docker_image
     predefinedMachineType: machine_type
+    # gpuCount triggers Cromwell to call setInstallGpuDrivers(true) on
+    # GCP Batch.  Without this, predefinedMachineType alone provisions the
+    # machine but never installs NVIDIA drivers.
+    gpuCount:             1
     zones:                zones
     bootDiskSizeGb:       boot_disk_gb
     disks:                "local-disk 10 HDD"

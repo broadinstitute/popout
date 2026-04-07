@@ -97,6 +97,10 @@ task popout_task {
   runtime {
     docker:               docker_image
     predefinedMachineType: machine_type
+    # gpuCount triggers Cromwell to call setInstallGpuDrivers(true) on
+    # GCP Batch.  Without this, predefinedMachineType alone provisions the
+    # machine but never installs NVIDIA drivers.
+    gpuCount:             1
     zones:                zones
     disks:                "local-disk ~{disk_size_gb} SSD"
     bootDiskSizeGb:       50
