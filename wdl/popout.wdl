@@ -6,9 +6,12 @@ version 1.0
 ## The task localizes all chromosomes into a single directory and invokes
 ## popout, which processes them together on the GPU.
 ##
-## Default machine type is a2-highgpu-1g (1x A100 40 GB).  If Terra does
-## not support predefinedMachineType, switch to the n1_t4 fallback by
-## commenting/uncommenting the appropriate runtime block.
+## Default machine type is a2-highgpu-1g (1x A100 40 GB).
+##
+## GPU driver workaround: Cromwell's predefinedMachineType does not trigger
+## GPU driver installation on its own.  Setting gpuType to match the
+## built-in GPU (e.g. nvidia-tesla-a100 for A2) triggers the driver flag
+## while GCP accepts the redundant accelerator declaration.
 
 task popout_task {
   input {
@@ -28,9 +31,10 @@ task popout_task {
     Boolean block_emissions = false
     String  extra_args      = ""
 
-    # Runtime
+    # Runtime — machine_type and gpu_type must match (see header comment)
     String machine_type  = "a2-highgpu-1g"
-    String zones         = "us-central1-a us-central1-c"
+    String gpu_type      = "nvidia-tesla-a100"
+    String zones         = "us-central1-c us-central1-a"
     Int    disk_size_gb  = 500
     String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:0.1.0"
   }
@@ -97,9 +101,9 @@ task popout_task {
   runtime {
     docker:               docker_image
     predefinedMachineType: machine_type
-    # gpuCount triggers Cromwell to call setInstallGpuDrivers(true) on
-    # GCP Batch.  Without this, predefinedMachineType alone provisions the
-    # machine but never installs NVIDIA drivers.
+    # gpu_type must match the built-in GPU on the machine to trigger
+    # Cromwell's setInstallGpuDrivers(true) without causing a conflict.
+    gpuType:              gpu_type
     gpuCount:             1
     zones:                zones
     disks:                "local-disk ~{disk_size_gb} SSD"
@@ -125,9 +129,10 @@ workflow popout {
     Boolean block_emissions = false
     String  extra_args      = ""
 
-    # Runtime
+    # Runtime — machine_type and gpu_type must match (see header comment)
     String machine_type  = "a2-highgpu-1g"
-    String zones         = "us-central1-a us-central1-c"
+    String gpu_type      = "nvidia-tesla-a100"
+    String zones         = "us-central1-c us-central1-a"
     Int    disk_size_gb  = 500
     String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:0.1.0"
   }
@@ -148,6 +153,7 @@ workflow popout {
       block_emissions = block_emissions,
       extra_args      = extra_args,
       machine_type    = machine_type,
+      gpu_type        = gpu_type,
       zones           = zones,
       disk_size_gb    = disk_size_gb,
       docker_image    = docker_image

@@ -11,7 +11,7 @@ task gpu_probe_task {
   input {
     String machine_type
     String gpu_type     = "nvidia-tesla-a100"
-    String zones        = "us-central1-a us-central1-c"
+    String zones        = "us-central1-c us-central1-a"
     String docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:0.1.0"
     Int    boot_disk_gb = 30
   }
@@ -101,7 +101,7 @@ workflow gpu_probe {
   input {
     Array[String] machine_types
     Array[String] gpu_types
-    String zones        = "us-central1-a us-central1-c"
+    String zones        = "us-central1-c us-central1-a"
     String docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:0.1.0"
   }
 
