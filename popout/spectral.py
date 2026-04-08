@@ -189,7 +189,6 @@ def window_init_allele_freq(
     """
     H, T = geno.shape
     A = n_ancestries
-    geno_f = geno.astype(jnp.float32)
     freq = jnp.clip(global_freq, 1e-4, 1.0 - 1e-4)
 
     weighted_counts = jnp.zeros((A, T))
@@ -201,7 +200,7 @@ def window_init_allele_freq(
         start = w * window_size
         end = min(start + window_size, T)
         w_len = end - start
-        w_geno = geno_f[:, start:end]   # (H, W)
+        w_geno = geno[:, start:end].astype(jnp.float32)   # (H, W)
         w_freq = freq[:, start:end]      # (A, W)
 
         # Log-likelihood per haplotype per ancestry in this window

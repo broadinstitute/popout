@@ -408,12 +408,17 @@ def init_model_soft(
     """
     H, T = geno.shape
     A = n_ancestries
-    geno_f = geno.astype(jnp.float32)
     resp = responsibilities  # (H, A)
 
     # Global allele frequencies from soft assignments
     # resp.T @ geno → (A, T) weighted allele counts
-    weighted_counts = resp.T @ geno_f        # (A, T)
+    # Batched to avoid float32 copy of full geno (H×T×4 bytes)
+    _INIT_BATCH = 50_000
+    weighted_counts = jnp.zeros((A, T))
+    for start in range(0, H, _INIT_BATCH):
+        end = min(start + _INIT_BATCH, H)
+        batch_geno = geno[start:end].astype(jnp.float32)
+        weighted_counts += resp[start:end].T @ batch_geno
     totals = resp.sum(axis=0)[:, None]       # (A, 1)
     freq = (weighted_counts + 0.5) / (totals + 1.0)
     freq = jnp.clip(freq, 1e-4, 1.0 - 1e-4)
