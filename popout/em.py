@@ -31,13 +31,14 @@ log = logging.getLogger(__name__)
 
 def _auto_batch_size(
     T: int, A: int, user_batch_size: int | None,
+    H: int = 0,
 ) -> int:
     """Pick batch_size to fit GPU memory.
 
     Peak GPU for one forward-backward batch is ~3 × B × T × A × 4 bytes
     (three simultaneous (B, T, A) float32 tensors during log_emission).
-    We target 60% of available GPU memory to leave headroom for model
-    parameters, JAX runtime, and intermediate scan buffers.
+    The full genotype array (H × T uint8) also lives on GPU throughout,
+    so we subtract that from the available budget.
     """
     if user_batch_size is not None:
         return user_batch_size
@@ -48,7 +49,10 @@ def _auto_batch_size(
     except Exception:
         gpu_mem = 16 * 1024**3
 
-    budget = int(gpu_mem * 0.6)
+    # Reserve memory for the full genotype array on GPU + overhead
+    geno_bytes = H * T  # uint8
+    budget = int(gpu_mem * 0.5) - geno_bytes  # 50% safety + geno reservation
+    budget = max(budget, 512 * 1024 * 1024)   # floor at 512 MB
     batch_size = budget // (3 * T * A * 4)
     batch_size = max(256, min(batch_size, 50_000))
     return batch_size
@@ -337,7 +341,7 @@ def update_mu_from_stats(stats: EMStats) -> jnp.ndarray:
 
     Equivalent to update_mu(gamma).
     """
-    mu = stats.mu_sum / (stats.n_haps * stats.n_sites)
+    mu = stats.mu_sum / (float(stats.n_haps) * float(stats.n_sites))
     return mu / mu.sum()
 
 
@@ -579,8 +583,11 @@ def run_em(
         stats.timer_stop("spectral", chrom=chrom_data.chrom)
 
     # Auto-tune batch_size now that we know A
-    batch_size = _auto_batch_size(chrom_data.n_sites, n_anc, batch_size)
-    log.info("  batch_size = %d (T=%d, A=%d)", batch_size, chrom_data.n_sites, n_anc)
+    batch_size = _auto_batch_size(
+        chrom_data.n_sites, n_anc, batch_size, H=chrom_data.n_haps,
+    )
+    log.info("  batch_size = %d (T=%d, A=%d, H=%d)",
+             batch_size, chrom_data.n_sites, n_anc, chrom_data.n_haps)
 
     # Transfer to device
     geno = jnp.array(geno_np)
@@ -610,6 +617,7 @@ def run_em(
     # --- Stage 2-3: EM iterations ---
     bucket_centers = compute_bucket_centers(n_T_buckets) if per_hap_T else None
     prev_freq = model.allele_freq
+    prev_T = model.gen_since_admix
     for iteration in range(n_em_iter):
         log.info("--- EM iteration %d/%d ---", iteration + 1, n_em_iter)
 
@@ -709,10 +717,14 @@ def run_em(
                        chrom=chrom_data.chrom, iteration=iteration)
             stats.emit("em/T", float(new_T),
                        chrom=chrom_data.chrom, iteration=iteration)
-        if iteration > 0 and max_delta < 1e-4:
-            log.info("  Converged.")
+        T_delta = abs(float(new_T) - float(prev_T)) / max(float(prev_T), 1.0)
+        freq_converged = max_delta < 1e-4
+        T_converged = T_delta < 0.01  # <1% relative change
+        if iteration > 0 and freq_converged and T_converged:
+            log.info("  Converged (Δfreq=%.2e, ΔT=%.1f%%)", max_delta, T_delta * 100)
             break
         prev_freq = new_freq
+        prev_T = new_T
 
     # --- Final decode (streaming — no full gamma materialised) ---
     log.info("Final forward-backward pass")
@@ -854,6 +866,7 @@ def run_em_genome(
             # Auto-tune batch_size for this chromosome's site count
             chrom_batch = _auto_batch_size(
                 chrom_data.n_sites, fitted_model.n_ancestries, batch_size,
+                H=chrom_data.n_haps,
             )
 
             # One EM iteration (streaming — no full gamma)

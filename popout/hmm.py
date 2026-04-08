@@ -357,9 +357,12 @@ def forward_backward_checkpointed(
         (seg_emit_rev, seg_trans_rev, ckpt_rev),
     )
     # gammas_rev: (S, C, H, A) in reverse group order
+    del seg_emit_rev, seg_trans_rev, ckpt_rev, checkpoints  # free scan inputs
 
     gammas = jnp.flip(gammas_rev, axis=0)            # (S, C, H, A)
+    del gammas_rev  # free the unflipped copy
     gamma_flat = gammas.reshape(S * C, H, A)[:T]     # (T, H, A) — trim padding
+    del gammas  # gamma_flat may share buffer, but del allows GC if not
     return jnp.transpose(gamma_flat, (1, 0, 2))      # (H, T, A)
 
 

@@ -25,7 +25,7 @@ task popout_task {
     Int?    n_ancestries
     String  ancestry_detection = "marchenko-pastur"
     Int     max_ancestries     = 20
-    Int     n_em_iter          = 3
+    Int     n_em_iter          = 20
     Float?  thin_cm
     String  method             = "hmm"
     Float   gen_since_admix    = 20.0
@@ -168,7 +168,7 @@ workflow popout {
     Int?    n_ancestries
     String  ancestry_detection = "marchenko-pastur"
     Int     max_ancestries     = 20
-    Int     n_em_iter          = 3
+    Int     n_em_iter          = 20
     Float?  thin_cm
     String  method             = "hmm"
     Float   gen_since_admix    = 20.0

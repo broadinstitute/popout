@@ -36,14 +36,19 @@ RUN python3 -m venv /opt/popout
 ENV PATH="/opt/popout/bin:$PATH"
 RUN pip install --no-cache-dir --upgrade pip setuptools
 
-# ---- Install popout ----
+# ---- Install dependencies (cached unless pyproject.toml changes) ----
+# This is the expensive layer (~3 GB for JAX+CUDA wheels).  By installing
+# deps before copying source code, Docker caches this layer across
+# code-only changes — turning multi-minute rebuilds into seconds.
 WORKDIR /app
 COPY pyproject.toml .
-COPY popout/ popout/
+RUN mkdir -p popout && touch popout/__init__.py \
+    && pip install --no-cache-dir ".[dev,monitor]" \
+    && rm -rf popout
 
-# Install the package.  jax[cuda12] pulls CUDA/cuDNN pip wheels
-# automatically — no system CUDA toolkit needed at pip level.
-RUN pip install --no-cache-dir ".[dev,monitor]"
+# ---- Install popout (code-only, fast) ----
+COPY popout/ popout/
+RUN pip install --no-cache-dir --no-deps .
 
 # ---- Runtime config ----
 # Tell JAX to pre-allocate 90% of GPU memory (avoids fragmentation)
