@@ -531,23 +531,17 @@ def _read_one_chromosome(
 
     # --- Pass 1b: MAF/MAC filtering ---
     # Multiallelic PGENs require allele_idx_offsets for PgenReader.
-    # Read them from the .pvar via PvarReader when present.
-    pvar_reader = pgenlib.PvarReader(bytes(str(pvar_path), encoding="utf-8"))
-    max_allele_ct = pvar_reader.get_max_allele_ct()
-    if max_allele_ct > 2:
-        allele_idx_offsets = pvar_reader.get_allele_idx_offsets()
-    else:
-        allele_idx_offsets = None
-    pvar_reader.close()
-
+    # Pass the PvarReader directly — it must stay alive while the reader is open.
+    _pvar_reader = pgenlib.PvarReader(bytes(str(pvar_path), encoding="utf-8"))
     reader = pgenlib.PgenReader(
         bytes(str(pgen_path), encoding="utf-8"),
-        allele_idx_offsets=allele_idx_offsets,
+        pvar=_pvar_reader,
     )
 
     # Validate phase
     if not reader.hardcall_phase_present():
         reader.close()
+        _pvar_reader.close()
         raise ValueError(
             f"PGEN file {pgen_path} does not contain phased genotypes. "
             "popout requires phased input. Re-run phasing (e.g. SHAPEIT5) or "
@@ -564,6 +558,7 @@ def _read_one_chromosome(
 
     if n_passing == 0:
         reader.close()
+        _pvar_reader.close()
         log.warning("  No sites passed filters on chromosome %s", chrom)
         return None
 
@@ -577,6 +572,7 @@ def _read_one_chromosome(
     # --- Pass 2: read phased genotypes ---
     geno, site_ok = _read_genotypes(reader, passing_idxs, n_haps)
     reader.close()
+    _pvar_reader.close()
 
     # If some sites were dropped for missing data, filter metadata too
     if not site_ok.all():
