@@ -2,7 +2,7 @@ version 1.0
 
 ## Run popout (GPU-accelerated local ancestry inference) on Terra.
 ##
-## Inputs: per-chromosome PGEN files + genetic map.
+## Inputs: per-chromosome PGEN files + optional genetic map.
 ## The task localizes all chromosomes into a single directory and invokes
 ## popout, which processes them together on the GPU.
 ##
@@ -31,16 +31,28 @@ task popout_task {
     Boolean block_emissions = false
     String  extra_args      = ""
 
+    # Weights & Biases — API key string or gs:// URL to a file containing it
+    String? wandb_key
+
     # Runtime — machine_type and gpu_type must match (see header comment)
     String machine_type  = "a2-highgpu-1g"
     String gpu_type      = "nvidia-tesla-a100"
     String zones         = "us-central1-c us-central1-a"
     Int    disk_size_gb  = 500
-    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:0.1.0"
+    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest"
   }
 
   command <<<
     set -euo pipefail
+
+    # ---- Weights & Biases setup ----
+    ~{if defined(wandb_key) then 'WANDB_RAW="~{wandb_key}"
+    if [[ "$WANDB_RAW" == gs://* ]]; then
+      export WANDB_API_KEY=$(gsutil cat "$WANDB_RAW")
+    else
+      export WANDB_API_KEY="$WANDB_RAW"
+    fi
+    echo "W&B API key configured"' else ''}
 
     # ---- Localize PGEN files into a single directory ----
     # Terra scatters files into separate paths; popout expects them
@@ -73,6 +85,7 @@ task popout_task {
     ~{if defined(thin_cm) then 'CMD="$CMD --thin-cm ~{thin_cm}"' else ''}
     ~{if export_panel then 'CMD="$CMD --export-panel"' else ''}
     ~{if block_emissions then 'CMD="$CMD --block-emissions"' else ''}
+    ~{if defined(wandb_key) then 'CMD="$CMD --monitor wandb"' else ''}
 
     if [ -n "~{extra_args}" ]; then
       CMD="$CMD ~{extra_args}"
@@ -130,12 +143,15 @@ workflow popout {
     Boolean block_emissions = false
     String  extra_args      = ""
 
+    # Weights & Biases
+    String? wandb_key
+
     # Runtime — machine_type and gpu_type must match (see header comment)
     String machine_type  = "a2-highgpu-1g"
     String gpu_type      = "nvidia-tesla-a100"
     String zones         = "us-central1-c us-central1-a"
     Int    disk_size_gb  = 500
-    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:0.1.0"
+    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest"
   }
 
   call popout_task {
@@ -153,6 +169,7 @@ workflow popout {
       export_panel    = export_panel,
       block_emissions = block_emissions,
       extra_args      = extra_args,
+      wandb_key       = wandb_key,
       machine_type    = machine_type,
       gpu_type        = gpu_type,
       zones           = zones,
