@@ -23,13 +23,15 @@ task popout_task {
 
     # popout algorithm options
     Int?    n_ancestries
-    Int     n_em_iter       = 3
+    String  ancestry_detection = "marchenko-pastur"
+    Int     max_ancestries     = 20
+    Int     n_em_iter          = 3
     Float?  thin_cm
-    String  method          = "hmm"
-    Float   gen_since_admix = 20.0
-    Boolean export_panel    = false
-    Boolean block_emissions = false
-    String  extra_args      = ""
+    String  method             = "hmm"
+    Float   gen_since_admix    = 20.0
+    Boolean export_panel       = false
+    Boolean block_emissions    = false
+    String  extra_args         = ""
 
     # Weights & Biases — API key string or gs:// URL to a file containing it
     String? wandb_key
@@ -107,6 +109,8 @@ task popout_task {
     CMD="$CMD --n-em-iter ~{n_em_iter}"
     CMD="$CMD --method ~{method}"
     CMD="$CMD --gen-since-admix ~{gen_since_admix}"
+    CMD="$CMD --ancestry-detection ~{ancestry_detection}"
+    CMD="$CMD --max-ancestries ~{max_ancestries}"
 
     ~{if defined(n_ancestries) then 'CMD="$CMD --n-ancestries ~{n_ancestries}"' else ''}
     ~{if defined(thin_cm) then 'CMD="$CMD --thin-cm ~{thin_cm}"' else ''}
@@ -162,13 +166,15 @@ workflow popout {
 
     # Algorithm options
     Int?    n_ancestries
-    Int     n_em_iter       = 3
+    String  ancestry_detection = "marchenko-pastur"
+    Int     max_ancestries     = 20
+    Int     n_em_iter          = 3
     Float?  thin_cm
-    String  method          = "hmm"
-    Float   gen_since_admix = 20.0
-    Boolean export_panel    = false
-    Boolean block_emissions = false
-    String  extra_args      = ""
+    String  method             = "hmm"
+    Float   gen_since_admix    = 20.0
+    Boolean export_panel       = false
+    Boolean block_emissions    = false
+    String  extra_args         = ""
 
     # Weights & Biases
     String? wandb_key
@@ -188,9 +194,11 @@ workflow popout {
       psams           = psams,
       genetic_map     = genetic_map,
       output_prefix   = output_prefix,
-      n_ancestries    = n_ancestries,
-      n_em_iter       = n_em_iter,
-      thin_cm         = thin_cm,
+      n_ancestries       = n_ancestries,
+      ancestry_detection = ancestry_detection,
+      max_ancestries     = max_ancestries,
+      n_em_iter          = n_em_iter,
+      thin_cm            = thin_cm,
       method          = method,
       gen_since_admix = gen_since_admix,
       export_panel    = export_panel,
