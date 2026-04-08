@@ -226,7 +226,7 @@ def _find_pgen_files(
         psam = Path(stem + ".psam")
 
         if pvar is None:
-            raise FileNotFoundError(f"No .pvar file found for prefix {prefix}")
+            raise FileNotFoundError(f"No .pvar file found for prefix {stem}")
         if not psam.exists():
             raise FileNotFoundError(f"No .psam file found: {psam}")
 
@@ -239,15 +239,6 @@ def _find_pgen_files(
             result["_multi"] = (pgen, pvar, psam)
 
     return result
-
-
-def _find_pvar(prefix: Path) -> Optional[Path]:
-    """Find .pvar or .pvar.zst file for a given prefix."""
-    for suffix in [".pvar", ".pvar.zst"]:
-        p = prefix.with_suffix(suffix)
-        if p.exists():
-            return p
-    return None
 
 
 def _find_pvar_str(stem: str) -> Optional[Path]:
@@ -495,7 +486,12 @@ def _read_one_chromosome(
     thin_cm: Optional[float],
     stats=None,
 ) -> Optional[ChromData]:
-    """Read and filter one chromosome from a PGEN file set."""
+    """Read and filter one chromosome from a PGEN file set.
+
+    Assumes the PGEN file contains only biallelic variants.  Multiallelic
+    PGENs will crash pgenlib (v0.94 doesn't support multiallelic+phase).
+    The WDL pre-filters with: plink2 --max-alleles 2 --make-pgen
+    """
 
     # --- Pass 1: parse .pvar for biallelic SNP candidates ---
     chrom_set = {chrom}
@@ -530,18 +526,22 @@ def _read_one_chromosome(
         pos_cm = pos_cm[keep]
 
     # --- Pass 1b: MAF/MAC filtering ---
-    # Multiallelic PGENs require allele_idx_offsets for PgenReader.
-    # Pass the PvarReader directly — it must stay alive while the reader is open.
-    _pvar_reader = pgenlib.PvarReader(bytes(str(pvar_path), encoding="utf-8"))
-    reader = pgenlib.PgenReader(
-        bytes(str(pgen_path), encoding="utf-8"),
-        pvar=_pvar_reader,
-    )
+    try:
+        reader = pgenlib.PgenReader(bytes(str(pgen_path), encoding="utf-8"))
+    except RuntimeError as e:
+        if "multiallelic" in str(e).lower() or "allele_idx_offsets" in str(e).lower():
+            raise RuntimeError(
+                f"PGEN file {pgen_path.name} contains multiallelic variants, "
+                "which pgenlib cannot read with phased data. Pre-filter with:\n"
+                "  plink2 --pfile <prefix> --max-alleles 2 --make-pgen --out <prefix_biallelic>\n"
+                "The popout WDL does this automatically."
+            ) from e
+        raise
 
     # Validate phase
     if not reader.hardcall_phase_present():
         reader.close()
-        _pvar_reader.close()
+
         raise ValueError(
             f"PGEN file {pgen_path} does not contain phased genotypes. "
             "popout requires phased input. Re-run phasing (e.g. SHAPEIT5) or "
@@ -558,7 +558,7 @@ def _read_one_chromosome(
 
     if n_passing == 0:
         reader.close()
-        _pvar_reader.close()
+
         log.warning("  No sites passed filters on chromosome %s", chrom)
         return None
 
@@ -572,7 +572,6 @@ def _read_one_chromosome(
     # --- Pass 2: read phased genotypes ---
     geno, site_ok = _read_genotypes(reader, passing_idxs, n_haps)
     reader.close()
-    _pvar_reader.close()
 
     # If some sites were dropped for missing data, filter metadata too
     if not site_ok.all():

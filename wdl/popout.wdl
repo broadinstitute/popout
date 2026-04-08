@@ -75,6 +75,23 @@ task popout_task {
     echo "=== Localized PGEN files ==="
     ls -lh pgen_dir/
 
+    # ---- Strip multiallelic variants (pgenlib requires allele_idx_offsets) ----
+    mkdir -p pgen_biallelic
+    for pf in pgen_dir/*.pgen; do
+      base=$(basename "$pf" .pgen)
+      plink2 --pfile "pgen_dir/${base}" \
+             --max-alleles 2 \
+             --make-pgen \
+             --out "pgen_biallelic/${base}" \
+             --threads 4 \
+             --memory 8000
+    done
+    # Use the filtered files from now on
+    rm -rf pgen_dir
+    mv pgen_biallelic pgen_dir
+    echo "=== After biallelic filter ==="
+    ls -lh pgen_dir/
+
     # ---- GPU check ----
     nvidia-smi || echo "WARNING: nvidia-smi failed"
 
