@@ -187,9 +187,12 @@ def _find_pgen_files(
             raise FileNotFoundError(f"No .pgen files found in {path}")
 
         for pgen in pgen_files:
-            prefix = pgen.with_suffix("")
-            pvar = _find_pvar(prefix)
-            psam = prefix.with_suffix(".psam")
+            # Use string replacement instead of Path.with_suffix() to handle
+            # multi-dot filenames like chr20.aou.v9.phased.pgen correctly.
+            pgen_str = str(pgen)
+            stem = pgen_str[:-len(".pgen")]
+            pvar = _find_pvar_str(stem)
+            psam = Path(stem + ".psam")
             if not psam.exists():
                 # Try shared .psam in directory
                 shared_psam = list(path.glob("*.psam"))
@@ -218,9 +221,9 @@ def _find_pgen_files(
         pgen = path.with_suffix(".pgen") if not path.suffix == ".pgen" else path
         if not pgen.exists():
             raise FileNotFoundError(f"PGEN file not found: {pgen}")
-        prefix = pgen.with_suffix("")
-        pvar = _find_pvar(prefix)
-        psam = prefix.with_suffix(".psam")
+        stem = str(pgen)[:-len(".pgen")]
+        pvar = _find_pvar_str(stem)
+        psam = Path(stem + ".psam")
 
         if pvar is None:
             raise FileNotFoundError(f"No .pvar file found for prefix {prefix}")
@@ -242,6 +245,15 @@ def _find_pvar(prefix: Path) -> Optional[Path]:
     """Find .pvar or .pvar.zst file for a given prefix."""
     for suffix in [".pvar", ".pvar.zst"]:
         p = prefix.with_suffix(suffix)
+        if p.exists():
+            return p
+    return None
+
+
+def _find_pvar_str(stem: str) -> Optional[Path]:
+    """Find .pvar or .pvar.zst for a stem string (handles multi-dot names)."""
+    for suffix in [".pvar", ".pvar.zst"]:
+        p = Path(stem + suffix)
         if p.exists():
             return p
     return None

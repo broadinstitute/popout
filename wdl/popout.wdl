@@ -65,9 +65,11 @@ task popout_task {
     psams=(~{sep=' ' psams})
 
     for i in "${!pgens[@]}"; do
-      ln -s "${pgens[$i]}" pgen_dir/
-      ln -s "${pvars[$i]}" pgen_dir/
-      ln -s "${psams[$i]}" pgen_dir/
+      # Use basename of pgen to derive consistent naming
+      base=$(basename "${pgens[$i]}" .pgen)
+      ln -sf "${pgens[$i]}" "pgen_dir/${base}.pgen"
+      ln -sf "${pvars[$i]}" "pgen_dir/${base}.pvar"
+      ln -sf "${psams[$i]}" "pgen_dir/${base}.psam"
     done
 
     echo "=== Localized PGEN files ==="
