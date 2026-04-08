@@ -530,7 +530,20 @@ def _read_one_chromosome(
         pos_cm = pos_cm[keep]
 
     # --- Pass 1b: MAF/MAC filtering ---
-    reader = pgenlib.PgenReader(bytes(str(pgen_path), encoding="utf-8"))
+    # Multiallelic PGENs require allele_idx_offsets for PgenReader.
+    # Read them from the .pvar via PvarReader when present.
+    pvar_reader = pgenlib.PvarReader(bytes(str(pvar_path), encoding="utf-8"))
+    max_allele_ct = pvar_reader.get_max_allele_ct()
+    if max_allele_ct > 2:
+        allele_idx_offsets = pvar_reader.get_allele_idx_offsets()
+    else:
+        allele_idx_offsets = None
+    pvar_reader.close()
+
+    reader = pgenlib.PgenReader(
+        bytes(str(pgen_path), encoding="utf-8"),
+        allele_idx_offsets=allele_idx_offsets,
+    )
 
     # Validate phase
     if not reader.hardcall_phase_present():
