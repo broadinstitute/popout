@@ -388,8 +388,8 @@ def _read_genotypes(
 def iter_chromosomes(
     path: str | Path,
     gmap: dict[str, GeneticMap],
-    min_maf: float = 0.005,
-    min_mac: int = 50,
+    min_maf: float = 0.0,
+    min_mac: int = 0,
     chromosomes: Optional[list[str]] = None,
     thin_cm: Optional[float] = None,
     stats=None,
@@ -400,8 +400,9 @@ def iter_chromosomes(
     ----------
     path : directory of per-chromosome PGEN files, or a single prefix
     gmap : genetic maps keyed by normalised chromosome name
-    min_maf : minimum minor allele frequency filter
-    min_mac : minimum minor allele count filter
+    min_maf : minimum minor allele frequency filter (default 0 = skip;
+              plink2 should handle MAF/MAC filtering before popout)
+    min_mac : minimum minor allele count filter (default 0 = skip)
     chromosomes : restrict to these chromosomes (default: autosomes 1-22)
     thin_cm : if set, thin sites to this minimum cM spacing (e.g. 0.02 for WGS)
 
@@ -548,26 +549,32 @@ def _read_one_chromosome(
             "convert with: plink2 --vcf phased.vcf.gz --make-pgen phased-list"
         )
 
-    passing_idxs = _apply_maf_mac_filter(
-        reader, pvar.variant_idx, n_samples, min_maf, min_mac,
-    )
-    n_passing = len(passing_idxs)
-    log.info("  After MAF/MAC filter: %d sites", n_passing)
-    if stats is not None:
-        stats.emit("io/sites_after_maf_mac", n_passing, chrom=chrom)
+    if min_maf > 0 or min_mac > 0:
+        passing_idxs = _apply_maf_mac_filter(
+            reader, pvar.variant_idx, n_samples, min_maf, min_mac,
+        )
+        n_passing = len(passing_idxs)
+        log.info("  After MAF/MAC filter: %d sites", n_passing)
+        if stats is not None:
+            stats.emit("io/sites_after_maf_mac", n_passing, chrom=chrom)
 
-    if n_passing == 0:
-        reader.close()
+        if n_passing == 0:
+            reader.close()
+            log.warning("  No sites passed filters on chromosome %s", chrom)
+            return None
 
-        log.warning("  No sites passed filters on chromosome %s", chrom)
-        return None
-
-    # Build index mapping: passing_idxs → positions in original pvar arrays
-    passing_set = set(passing_idxs.tolist())
-    keep_mask = np.array([int(v) in passing_set for v in pvar.variant_idx], dtype=bool)
-    final_pos_bp = pvar.pos_bp[keep_mask]
-    final_pos_cm = pos_cm[keep_mask]
-    final_site_ids = [s for s, k in zip(pvar.site_ids, keep_mask) if k]
+        # Build index mapping: passing_idxs → positions in original pvar arrays
+        passing_set = set(passing_idxs.tolist())
+        keep_mask = np.array([int(v) in passing_set for v in pvar.variant_idx], dtype=bool)
+        final_pos_bp = pvar.pos_bp[keep_mask]
+        final_pos_cm = pos_cm[keep_mask]
+        final_site_ids = [s for s, k in zip(pvar.site_ids, keep_mask) if k]
+    else:
+        log.info("  MAF/MAC filter skipped (plink2 pre-filtered)")
+        passing_idxs = pvar.variant_idx
+        final_pos_bp = pvar.pos_bp
+        final_pos_cm = pos_cm
+        final_site_ids = list(pvar.site_ids)
 
     # --- Pass 2: read phased genotypes ---
     geno, site_ok = _read_genotypes(reader, passing_idxs, n_haps)
