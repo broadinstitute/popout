@@ -275,6 +275,7 @@ def forward_backward_checkpointed(
     # Build step-indexed segment arrays.
     # Forward step i (0-indexed): transition[i], emission at site i+1.
     step_emit = log_emit[:, 1:n_fwd_steps + 1, :].transpose(1, 0, 2)  # (n_fwd_steps, H, A)
+    del log_emit  # free ~10 GB; step_emit has all we need
     step_trans = log_trans_fwd                                          # (n_fwd_steps, A, A)
 
     seg_emit = step_emit.reshape(S, C, H, A)    # (S, C, H, A)
@@ -314,6 +315,7 @@ def forward_backward_checkpointed(
     #     Reversed segment data gives the correct pairing.
 
     seg_emit_rev = jnp.flip(seg_emit, axis=0)         # (S, C, H, A)
+    del step_emit, seg_emit  # free ~10 GB; reversed copy is all we need
     seg_trans_rev = jnp.flip(seg_trans, axis=0)        # (S, C, A, A)
     ckpt_rev = jnp.flip(checkpoints[:S], axis=0)       # (S, H, A)
 

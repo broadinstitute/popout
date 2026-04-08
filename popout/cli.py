@@ -77,8 +77,8 @@ def main(argv: list[str] | None = None) -> None:
         help="Initial guess for generations since admixture (default: 20)",
     )
     parser.add_argument(
-        "--batch-size", type=int, default=50_000,
-        help="Haplotypes per forward-backward batch (default: 50000)",
+        "--batch-size", type=int, default=None,
+        help="Haplotypes per forward-backward batch (default: auto-tuned from GPU memory)",
     )
     parser.add_argument(
         "--chromosomes", nargs="+", default=None,
@@ -97,9 +97,14 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--ancestry-detection",
-        choices=["recursive", "eigenvalue-gap"],
-        default="recursive",
-        help="Method for auto-detecting number of ancestries (default: recursive)",
+        choices=["marchenko-pastur", "recursive", "eigenvalue-gap"],
+        default="marchenko-pastur",
+        help="Method for auto-detecting number of ancestries "
+             "(default: marchenko-pastur)",
+    )
+    parser.add_argument(
+        "--max-ancestries", type=int, default=20,
+        help="Upper bound for auto-detected ancestry count (default: 20)",
     )
     parser.add_argument(
         "--per-hap-T", action="store_true",
@@ -330,6 +335,8 @@ def main(argv: list[str] | None = None) -> None:
             per_hap_T=args.per_hap_T,
             n_T_buckets=args.n_T_buckets,
             use_block_emissions=args.block_emissions,
+            detection_method=args.ancestry_detection,
+            max_ancestries=args.max_ancestries,
             block_size=args.block_size,
         )
 

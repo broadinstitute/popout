@@ -135,7 +135,13 @@ def seed_ancestry_soft(
 
     # --- Auto-detect A ---
     if n_ancestries is None:
-        if detection_method == "recursive":
+        if detection_method == "marchenko-pastur":
+            n_haps_svd = max_haps_svd if need_batched_proj else n_haps
+            n_ancestries = _detect_n_ancestries_mp(
+                S, n_haps_svd, n_snps_used, max_ancestries,
+            )
+            log.info("Auto-detected %d ancestries (Marchenko-Pastur)", n_ancestries)
+        elif detection_method == "recursive":
             # Use full PCA projection for recursive splitting
             n_pc_full = min(max_ancestries, n_components)
             proj_full = proj_all[:, :n_pc_full]
@@ -380,6 +386,45 @@ def _detect_n_ancestries_eigenvalue_gap(S: jnp.ndarray, max_a: int) -> int:
 
 # Keep old name as alias for backward compat
 _detect_n_ancestries = _detect_n_ancestries_eigenvalue_gap
+
+
+def _detect_n_ancestries_mp(
+    S_vals: jnp.ndarray,
+    n_haps: int,
+    n_sites: int,
+    max_a: int,
+) -> int:
+    """Detect number of ancestries via Marchenko-Pastur law.
+
+    For a random (n × p) matrix the bulk eigenvalue distribution has an
+    upper edge at σ²(1 + √(p/n))².  Singular values whose squares exceed
+    this edge are signal; the number of significant PCs + 1 gives the
+    number of ancestral populations (Patterson, Price & Reich 2006).
+    """
+    S_np = np.array(S_vals)
+    if len(S_np) < 3:
+        return 2
+
+    gamma = n_sites / n_haps  # aspect ratio p/n
+    eigenvalues = S_np ** 2 / n_sites  # normalized eigenvalues
+
+    # Estimate noise variance from the tail (bottom 50% of computed SVs)
+    n_sv = len(eigenvalues)
+    tail = eigenvalues[n_sv // 2:]
+    sigma2 = float(np.median(tail))
+
+    # Marchenko-Pastur upper edge with 1.5× safety margin
+    mp_upper = sigma2 * (1 + np.sqrt(gamma)) ** 2
+    threshold = mp_upper * 1.5
+
+    n_significant = int((eigenvalues > threshold).sum())
+    n_ancestries = n_significant + 1  # K = #significant_PCs + 1
+
+    log.info("  MP detection: σ²=%.4f, γ=%.4f, upper=%.4f, threshold=%.4f, "
+             "significant PCs=%d → A=%d",
+             sigma2, gamma, mp_upper, threshold, n_significant, n_ancestries)
+
+    return max(2, min(n_ancestries, max_a))
 
 
 def _detect_n_ancestries_recursive(
