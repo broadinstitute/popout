@@ -46,13 +46,15 @@ task popout_task {
     set -euo pipefail
 
     # ---- Weights & Biases setup ----
-    ~{if defined(wandb_key) then 'WANDB_RAW="~{wandb_key}"
-    if [[ "$WANDB_RAW" == gs://* ]]; then
-      export WANDB_API_KEY=$(gsutil cat "$WANDB_RAW")
-    else
-      export WANDB_API_KEY="$WANDB_RAW"
+    WANDB_RAW="~{default="" wandb_key}"
+    if [ -n "$WANDB_RAW" ]; then
+      if [[ "$WANDB_RAW" == gs://* ]]; then
+        export WANDB_API_KEY=$(gsutil cat "$WANDB_RAW")
+      else
+        export WANDB_API_KEY="$WANDB_RAW"
+      fi
+      echo "W&B API key configured"
     fi
-    echo "W&B API key configured"' else ''}
 
     # ---- Localize PGEN files into a single directory ----
     # Terra scatters files into separate paths; popout expects them
@@ -85,7 +87,7 @@ task popout_task {
     ~{if defined(thin_cm) then 'CMD="$CMD --thin-cm ~{thin_cm}"' else ''}
     ~{if export_panel then 'CMD="$CMD --export-panel"' else ''}
     ~{if block_emissions then 'CMD="$CMD --block-emissions"' else ''}
-    ~{if defined(wandb_key) then 'CMD="$CMD --monitor wandb"' else ''}
+    if [ -n "$WANDB_RAW" ]; then CMD="$CMD --monitor wandb"; fi
 
     if [ -n "~{extra_args}" ]; then
       CMD="$CMD ~{extra_args}"
