@@ -90,7 +90,7 @@ task popout_task {
              --make-pgen \
              --out "pgen_biallelic/${base}" \
              --threads "$(nproc)" \
-             --memory 8000
+             --memory "$(free -m | awk '/Mem:/{print int($7*0.8)}')"
     done
     # Use the filtered files from now on
     rm -rf pgen_dir
