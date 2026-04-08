@@ -59,6 +59,8 @@ def seed_ancestry_soft(
     rng_seed: int = 42,
     stats=None,
     detection_method: str = "recursive",
+    max_haps_svd: int = 100_000,
+    projection_batch: int = 50_000,
 ) -> tuple[jnp.ndarray, jnp.ndarray, int]:
     """Compute soft ancestry assignments via PCA + GMM.
 
@@ -71,15 +73,31 @@ def seed_ancestry_soft(
     key = jax.random.PRNGKey(rng_seed)
     n_haps, n_sites = geno.shape
 
+    # --- Subsample SNPs if needed (columns) ---
     if n_sites > max_snps:
         key, subkey = jax.random.split(key)
         idx = jax.random.choice(subkey, n_sites, shape=(max_snps,), replace=False)
-        idx = jnp.sort(idx)
-        X = jnp.array(geno[:, np.array(idx)], dtype=jnp.float32)
+        idx = np.array(jnp.sort(idx))
+        geno_sub = geno[:, idx]
     else:
-        X = jnp.array(geno, dtype=jnp.float32)
+        geno_sub = geno
 
-    log.info("Spectral init: %d haplotypes × %d SNPs", n_haps, X.shape[1])
+    n_snps_used = geno_sub.shape[1]
+    need_batched_proj = n_haps > max_haps_svd
+
+    # --- Subsample haplotypes for SVD if needed (rows) ---
+    if need_batched_proj:
+        key, subkey = jax.random.split(key)
+        hap_idx = np.array(jax.random.choice(
+            subkey, n_haps, shape=(max_haps_svd,), replace=False,
+        ))
+        hap_idx.sort()
+        X = jnp.array(geno_sub[hap_idx], dtype=jnp.float32)
+        log.info("Spectral init: %d haplotypes × %d SNPs (SVD on %d subsample)",
+                 n_haps, n_snps_used, max_haps_svd)
+    else:
+        X = jnp.array(geno_sub, dtype=jnp.float32)
+        log.info("Spectral init: %d haplotypes × %d SNPs", n_haps, n_snps_used)
 
     # --- Patterson-style normalization ---
     mean = X.mean(axis=0)
@@ -91,6 +109,7 @@ def seed_ancestry_soft(
     # --- Randomized SVD ---
     key, subkey = jax.random.split(key)
     U, S, Vt = _randomized_svd(X, n_components, subkey)
+    del X  # free GPU memory before projection
     log.info("Top singular values: %s", np.array(S[:min(10, len(S))]).round(1))
     if stats is not None:
         sv = np.array(S[:min(20, len(S))])
@@ -99,12 +118,27 @@ def seed_ancestry_soft(
             ratios = (sv[:-1] / (sv[1:] + 1e-10)).tolist()
             stats.emit("spectral/gap_ratios", ratios)
 
+    # --- Project ALL haplotypes ---
+    if need_batched_proj:
+        # U is only for the subsample; project all haplotypes via Vt
+        # proj = normalized(geno_sub) @ Vt.T, done in GPU batches
+        proj_np = np.empty((n_haps, n_components), dtype=np.float32)
+        for start in range(0, n_haps, projection_batch):
+            end = min(start + projection_batch, n_haps)
+            batch = jnp.array(geno_sub[start:end], dtype=jnp.float32)
+            batch = (batch - mean) / scale
+            proj_np[start:end] = np.array(batch @ Vt.T)
+        proj_all = jnp.array(proj_np)
+        del proj_np
+    else:
+        proj_all = U * S  # equivalent to X @ Vt.T
+
     # --- Auto-detect A ---
     if n_ancestries is None:
         if detection_method == "recursive":
             # Use full PCA projection for recursive splitting
             n_pc_full = min(max_ancestries, n_components)
-            proj_full = U[:, :n_pc_full] * S[:n_pc_full]
+            proj_full = proj_all[:, :n_pc_full]
             key, subkey = jax.random.split(key)
             n_ancestries = _detect_n_ancestries_recursive(
                 proj_full, max_ancestries, subkey,
@@ -116,9 +150,10 @@ def seed_ancestry_soft(
     if stats is not None:
         stats.emit("spectral/n_ancestries", n_ancestries)
 
-    # --- Project ---
+    # --- Project to final dimensionality ---
     n_pc = max(n_ancestries - 1, 2)
-    proj = U[:, :n_pc] * S[:n_pc]
+    proj = proj_all[:, :n_pc]
+    del proj_all
 
     # --- GMM ---
     key, subkey = jax.random.split(key)
