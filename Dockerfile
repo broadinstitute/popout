@@ -43,7 +43,7 @@ COPY popout/ popout/
 
 # Install the package.  jax[cuda12] pulls CUDA/cuDNN pip wheels
 # automatically — no system CUDA toolkit needed at pip level.
-RUN pip install --no-cache-dir ".[dev]"
+RUN pip install --no-cache-dir ".[dev,monitor]"
 
 # ---- Runtime config ----
 # Tell JAX to pre-allocate 90% of GPU memory (avoids fragmentation)
