@@ -209,7 +209,8 @@ def forward_backward_checkpointed(
     model: AncestryModel,
     d_morgan: jnp.ndarray,
     checkpoint_interval: int | None = None,
-) -> jnp.ndarray:
+    compute_transitions: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
     """Memory-efficient forward-backward using gradient checkpointing.
 
     Instead of storing the full (H, T, A) forward state, stores only
@@ -227,10 +228,12 @@ def forward_backward_checkpointed(
     model : AncestryModel
     d_morgan : (T-1,)
     checkpoint_interval : sites between checkpoints (default: √T)
+    compute_transitions : if True, also return xi-based soft switches (H,)
 
     Returns
     -------
     gamma : (H, T, A) posterior probabilities
+        — or (gamma, soft_switches) when compute_transitions=True.
     """
     H, T = geno.shape
     A = model.n_ancestries
@@ -319,22 +322,20 @@ def forward_backward_checkpointed(
     seg_trans_rev = jnp.flip(seg_trans, axis=0)        # (S, C, A, A)
     ckpt_rev = jnp.flip(checkpoints[:S], axis=0)       # (S, H, A)
 
-    def _bwd_group_body(beta_right, xs):
-        se, st, ckpt = xs  # (C, H, A), (C, A, A), (H, A)
-
-        # --- Forward recompute from checkpoint ---
-        # C-1 steps produce alpha at sites ckpt+1 … ckpt+C-1
+    # Shared forward-recompute + backward logic for each segment
+    def _segment_fwd_bwd(ckpt, se, st, beta_right):
+        """Recompute forward + backward within a segment, return alphas, betas, gamma."""
+        # Forward recompute from checkpoint: C-1 steps
         def _fwd(a, x):
             e, t = x
             a_new = _log_matvec_batch(a, t) + e
             return a_new, a_new
 
         _, alphas_inner = jax.lax.scan(_fwd, ckpt, (se[:C - 1], st[:C - 1]))
-        # alphas_inner: (C-1, H, A)
         alphas = jnp.concatenate([ckpt[None], alphas_inner], axis=0)  # (C, H, A)
 
-        # --- Backward: C steps from beta_right ---
-        se_bwd = jnp.flip(se, axis=0)  # reversed within segment
+        # Backward: C steps from beta_right
+        se_bwd = jnp.flip(se, axis=0)
         st_bwd = jnp.flip(st, axis=0)
 
         def _bwd(beta, x):
@@ -345,17 +346,63 @@ def forward_backward_checkpointed(
         beta_left, betas_rev = jax.lax.scan(_bwd, beta_right, (se_bwd, st_bwd))
         betas = jnp.flip(betas_rev, axis=0)  # (C, H, A) forward site order
 
-        # --- Posteriors ---
+        # Posteriors
         log_gamma = alphas + betas
         log_norm = jax.nn.logsumexp(log_gamma, axis=2, keepdims=True)
         gamma_seg = jnp.exp(log_gamma - log_norm)  # (C, H, A)
 
+        return alphas, betas, beta_left, gamma_seg
+
+    def _bwd_group_body(beta_right, xs):
+        se, st, ckpt = xs  # (C, H, A), (C, A, A), (H, A)
+        _, _, beta_left, gamma_seg = _segment_fwd_bwd(ckpt, se, st, beta_right)
         return beta_left, gamma_seg
 
-    _, gammas_rev = jax.lax.scan(
-        _bwd_group_body, jnp.zeros((H, A)),  # beta at T_pad = 0 (log 1)
-        (seg_emit_rev, seg_trans_rev, ckpt_rev),
-    )
+    def _bwd_group_body_with_xi(carry, xs):
+        beta_right, soft_sw = carry
+        se, st, ckpt = xs  # (C, H, A), (C, A, A), (H, A)
+
+        alphas, betas, beta_left, gamma_seg = _segment_fwd_bwd(
+            ckpt, se, st, beta_right,
+        )
+
+        # --- Xi-based soft switches for this segment ---
+        # betas_ext[k] = backward at site (g*C + k + 1):
+        #   k < C-1: betas[k+1]  (intra-segment)
+        #   k = C-1: beta_right  (boundary to next segment)
+        betas_ext = jnp.concatenate(
+            [betas[1:], beta_right[None]], axis=0,
+        )  # (C, H, A)
+
+        # P(data) — constant across t, from first position
+        log_P = jax.nn.logsumexp(alphas[0] + betas[0], axis=1)  # (H,)
+
+        # Diagonal of transition matrices for this segment
+        st_diag = jnp.diagonal(st, axis1=1, axis2=2)  # (C, A)
+
+        # ξ_diag[k,h,a] = α[k,h,a] · trans_diag[k,a] · emit[k,h,a] · β_ext[k,h,a] / P
+        log_xi_diag = (
+            alphas + st_diag[:, None, :] + se + betas_ext
+        )  # (C, H, A)
+        xi_diag = jnp.exp(log_xi_diag - log_P[None, :, None])  # (C, H, A)
+        stay = xi_diag.sum(axis=2)                                # (C, H)
+        seg_soft = jnp.clip(1.0 - stay, 0.0, 1.0).sum(axis=0)   # (H,)
+
+        return (beta_left, soft_sw + seg_soft), gamma_seg
+
+    if compute_transitions:
+        (_, soft_switches), gammas_rev = jax.lax.scan(
+            _bwd_group_body_with_xi,
+            (jnp.zeros((H, A)), jnp.zeros(H)),
+            (seg_emit_rev, seg_trans_rev, ckpt_rev),
+        )
+    else:
+        _, gammas_rev = jax.lax.scan(
+            _bwd_group_body, jnp.zeros((H, A)),
+            (seg_emit_rev, seg_trans_rev, ckpt_rev),
+        )
+        soft_switches = None
+
     # gammas_rev: (S, C, H, A) in reverse group order
     del seg_emit_rev, seg_trans_rev, ckpt_rev, checkpoints  # free scan inputs
 
@@ -363,7 +410,11 @@ def forward_backward_checkpointed(
     del gammas_rev  # free the unflipped copy
     gamma_flat = gammas.reshape(S * C, H, A)[:T]     # (T, H, A) — trim padding
     del gammas  # gamma_flat may share buffer, but del allows GC if not
-    return jnp.transpose(gamma_flat, (1, 0, 2))      # (H, T, A)
+    gamma = jnp.transpose(gamma_flat, (1, 0, 2))     # (H, T, A)
+
+    if compute_transitions:
+        return gamma, soft_switches
+    return gamma
 
 
 # ---------------------------------------------------------------------------
@@ -430,12 +481,66 @@ def forward_backward_blocks(
 # Main entry points
 # ---------------------------------------------------------------------------
 
+def _compute_soft_switches(
+    log_alpha: jnp.ndarray,
+    log_beta: jnp.ndarray,
+    model: AncestryModel,
+    geno: jnp.ndarray,
+    d_morgan: jnp.ndarray,
+) -> jnp.ndarray:
+    """Expected number of ancestry transitions per haplotype from xi.
+
+    Uses the diagonal of the pairwise posterior ξ[t,a,a] to compute
+    P(z_t ≠ z_{t+1} | data) at each interval — density-invariant
+    unlike hard-call switch counting.
+
+    Parameters
+    ----------
+    log_alpha : (H, T, A)
+    log_beta : (H, T, A)
+    model : AncestryModel (for emissions + transitions)
+    geno : (H, T) uint8
+    d_morgan : (T-1,)
+
+    Returns
+    -------
+    soft_switches : (H,) float32 — expected transition count per haplotype
+    """
+    H, T, A = log_alpha.shape
+    if T <= 1:
+        return jnp.zeros(H)
+
+    log_emit = model.log_emission(geno)               # (H, T, A)
+    log_trans = model.log_transition_matrix(d_morgan)  # (T-1, A, A)
+
+    # P(data) — constant across t, compute from position 0
+    log_P = jax.nn.logsumexp(
+        log_alpha[:, 0, :] + log_beta[:, 0, :], axis=1
+    )  # (H,)
+
+    # Diagonal of transition matrices: log((1-p) + p·μ[a])
+    log_trans_diag = jnp.diagonal(log_trans, axis1=1, axis2=2)  # (T-1, A)
+
+    # ξ_diag[h,t,a] = α[h,t,a] · trans_diag[t,a] · emit[h,t+1,a] · β[h,t+1,a] / P(data)
+    log_xi_diag = (
+        log_alpha[:, :-1, :]           # (H, T-1, A)
+        + log_trans_diag[None, :, :]   # (1, T-1, A)
+        + log_emit[:, 1:, :]           # (H, T-1, A)
+        + log_beta[:, 1:, :]           # (H, T-1, A)
+    )  # (H, T-1, A)
+
+    xi_diag = jnp.exp(log_xi_diag - log_P[:, None, None])  # (H, T-1, A)
+    stay = xi_diag.sum(axis=2)                               # (H, T-1)
+    return jnp.clip(1.0 - stay, 0.0, 1.0).sum(axis=1)       # (H,)
+
+
 def forward_backward(
     geno: jnp.ndarray,
     model: AncestryModel,
     d_morgan: jnp.ndarray,
     use_checkpointing: bool | None = None,
-) -> jnp.ndarray:
+    compute_transitions: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
     """Full forward-backward, returning posteriors.
 
     This is the main entry point for the HMM.  For T > 64,
@@ -447,21 +552,36 @@ def forward_backward(
     model : AncestryModel
     d_morgan : (T-1,)
     use_checkpointing : force checkpointing on/off (default: auto)
+    compute_transitions : if True, also return per-haplotype expected
+        transition counts (soft switches) from xi posteriors
 
     Returns
     -------
     gamma : (H, T, A) posterior probabilities
+        — or (gamma, soft_switches) when compute_transitions=True,
+        where soft_switches is (H,) float32.
     """
     T = geno.shape[1]
     if use_checkpointing is None:
         use_checkpointing = T > 64
 
     if use_checkpointing:
-        return forward_backward_checkpointed(geno, model, d_morgan)
+        return forward_backward_checkpointed(
+            geno, model, d_morgan,
+            compute_transitions=compute_transitions,
+        )
 
     log_alpha, _ = forward(geno, model, d_morgan)
     log_beta = backward(geno, model, d_morgan)
-    return posteriors(log_alpha, log_beta)
+    gamma = posteriors(log_alpha, log_beta)
+
+    if compute_transitions:
+        soft_sw = _compute_soft_switches(
+            log_alpha, log_beta, model, geno, d_morgan,
+        )
+        return gamma, soft_sw
+
+    return gamma
 
 
 # ---------------------------------------------------------------------------
@@ -563,8 +683,6 @@ def forward_backward_bucketed(
             continue
 
         hap_idx = _np.where(mask)[0]
-        b_emit = log_emit[hap_idx]           # (n_b, T, A)
-        b_geno = geno[hap_idx]               # (n_b, T)
         b_trans = all_log_trans[b]            # (T-1, A, A)
 
         # Build a temporary scalar-T model for this bucket
@@ -580,7 +698,7 @@ def forward_backward_bucketed(
         b_gammas = []
         for s in range(0, n_b, batch_size):
             e = min(s + batch_size, n_b)
-            g = forward_backward(b_geno[s:e], b_model, d_morgan)
+            g = forward_backward(geno[hap_idx[s:e]], b_model, d_morgan)
             b_gammas.append(_np.array(g))
 
         gamma_out[hap_idx] = _np.concatenate(b_gammas, axis=0)
@@ -623,11 +741,14 @@ def forward_backward_em(
     mu_sum = jnp.zeros((A,))
     switch_sum = jnp.zeros((T - 1,)) if T > 1 else jnp.zeros((0,))
     switches_per_hap = _np.zeros(H, dtype=_np.int32)
+    soft_switches_per_hap = _np.zeros(H, dtype=_np.float32)
 
     for start in range(0, H, batch_size):
         end = min(start + batch_size, H)
         batch_geno = geno[start:end]
-        gamma = forward_backward(batch_geno, model, d_morgan)  # (B, T, A)
+        gamma, batch_soft_sw = forward_backward(
+            batch_geno, model, d_morgan, compute_transitions=True,
+        )
 
         # Allele freq stats: einsum('hta,ht->at', gamma, geno_f)
         geno_f = batch_geno.astype(jnp.float32)
@@ -637,16 +758,20 @@ def forward_backward_em(
         # Mu stats
         mu_sum += gamma.sum(axis=(0, 1))  # (A,)
 
-        # Switch stats from hard calls
+        # Soft switches (xi-based, density-invariant)
+        soft_switches_per_hap[start:end] = _np.array(batch_soft_sw)
+
+        # Hard switch stats (kept for diagnostics)
         calls = jnp.argmax(gamma, axis=2)  # (B, T)
+        del gamma, geno_f, batch_soft_sw  # free GPU before switch computation
+
         if T > 1:
             switches = (calls[:, 1:] != calls[:, :-1])  # (B, T-1) bool
             switch_sum += switches.sum(axis=0).astype(jnp.float32)
             switches_per_hap[start:end] = _np.array(
                 switches.sum(axis=1), dtype=_np.int32,
             )
-
-        # gamma freed here — not accumulated
+            del calls, switches  # free GPU before next batch
 
     return EMStats(
         weighted_counts=weighted_counts,
@@ -654,6 +779,7 @@ def forward_backward_em(
         mu_sum=mu_sum,
         switch_sum=switch_sum,
         switches_per_hap=switches_per_hap,
+        soft_switches_per_hap=soft_switches_per_hap,
         n_haps=H,
         n_sites=T,
     )
@@ -684,6 +810,7 @@ def forward_backward_bucketed_em(
     mu_sum = jnp.zeros((A,))
     switch_sum = jnp.zeros((T - 1,)) if T > 1 else jnp.zeros((0,))
     switches_per_hap = _np.zeros(H, dtype=_np.int32)
+    soft_switches_per_hap = _np.zeros(H, dtype=_np.float32)
 
     bucket_np = _np.array(model.bucket_assignments)
 
@@ -694,7 +821,6 @@ def forward_backward_bucketed_em(
             continue
 
         hap_idx = _np.where(mask)[0]
-        b_geno = geno[hap_idx]
 
         b_model = AncestryModel(
             n_ancestries=A,
@@ -706,22 +832,31 @@ def forward_backward_bucketed_em(
 
         for s in range(0, n_b, batch_size):
             e = min(s + batch_size, n_b)
-            batch_geno = b_geno[s:e]
-            gamma = forward_backward(batch_geno, b_model, d_morgan)  # (bs, T, A)
+            batch_hap_idx = hap_idx[s:e]
+            batch_geno = geno[batch_hap_idx]  # index from original, no per-bucket copy
+            gamma, batch_soft_sw = forward_backward(
+                batch_geno, b_model, d_morgan, compute_transitions=True,
+            )
 
             geno_f = batch_geno.astype(jnp.float32)
             weighted_counts += jnp.einsum('hta,ht->at', gamma, geno_f)
             total_weights += gamma.sum(axis=0).T
             mu_sum += gamma.sum(axis=(0, 1))
 
+            # Soft switches (xi-based, density-invariant)
+            soft_switches_per_hap[batch_hap_idx] = _np.array(batch_soft_sw)
+
+            # Hard switch stats (kept for diagnostics)
             calls = jnp.argmax(gamma, axis=2)
+            del gamma, geno_f, batch_geno, batch_soft_sw  # free GPU
+
             if T > 1:
                 switches = (calls[:, 1:] != calls[:, :-1])
                 switch_sum += switches.sum(axis=0).astype(jnp.float32)
-                batch_hap_idx = hap_idx[s:e]
                 switches_per_hap[batch_hap_idx] = _np.array(
                     switches.sum(axis=1), dtype=_np.int32,
                 )
+                del calls, switches  # free GPU before next batch
 
     return EMStats(
         weighted_counts=weighted_counts,
@@ -729,6 +864,7 @@ def forward_backward_bucketed_em(
         mu_sum=mu_sum,
         switch_sum=switch_sum,
         switches_per_hap=switches_per_hap,
+        soft_switches_per_hap=soft_switches_per_hap,
         n_haps=H,
         n_sites=T,
     )
@@ -773,6 +909,7 @@ def forward_backward_decode(
         if compute_max_post:
             max_post[start:end] = _np.array(gamma.max(axis=2))
             global_sums[start:end] = _np.array(gamma.sum(axis=1))
+        del gamma  # free GPU before next batch
 
     return DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)
 
@@ -810,7 +947,6 @@ def forward_backward_bucketed_decode(
             continue
 
         hap_idx = _np.where(mask)[0]
-        b_geno = geno[hap_idx]
 
         b_model = AncestryModel(
             n_ancestries=A,
@@ -822,8 +958,8 @@ def forward_backward_bucketed_decode(
 
         for s in range(0, n_b, batch_size):
             e = min(s + batch_size, n_b)
-            gamma = forward_backward(b_geno[s:e], b_model, d_morgan)
             batch_hap_idx = hap_idx[s:e]
+            gamma = forward_backward(geno[batch_hap_idx], b_model, d_morgan)
 
             calls[batch_hap_idx] = _np.array(
                 jnp.argmax(gamma, axis=2), dtype=_np.int8,
@@ -831,5 +967,6 @@ def forward_backward_bucketed_decode(
             if compute_max_post:
                 max_post[batch_hap_idx] = _np.array(gamma.max(axis=2))
                 global_sums[batch_hap_idx] = _np.array(gamma.sum(axis=1))
+            del gamma  # free GPU before next batch
 
     return DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)

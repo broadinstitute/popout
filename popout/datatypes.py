@@ -199,10 +199,11 @@ class AncestryModel:
         freq = jnp.clip(freq, 1e-6, 1.0 - 1e-6)
         log_f1 = jnp.log(freq)      # log P(allele=1 | ancestry)
         log_f0 = jnp.log(1.0 - freq)  # log P(allele=0 | ancestry)
-        # geno is (H, T), freq is (A, T)
-        # result should be (H, T, A)
-        g = geno[:, :, None].astype(jnp.float32)  # (H, T, 1)
-        log_emit = g * log_f1.T[None, :, :] + (1.0 - g) * log_f0.T[None, :, :]
+        # log_emit = g*log_f1 + (1-g)*log_f0 = log_f0 + g*(log_f1 - log_f0)
+        # Rewritten to avoid (1-g) intermediate and one (H,T,A) broadcast product
+        log_odds = log_f1 - log_f0  # (A, T) — tiny
+        g = geno.astype(jnp.float32)  # (H, T) — 2D, no extra dim
+        log_emit = log_f0.T[None, :, :] + g[:, :, None] * log_odds.T[None, :, :]
         return log_emit
 
 
@@ -219,6 +220,7 @@ class EMStats:
     mu_sum: jnp.ndarray           # (A,)   — Σ_{h,t} gamma[h,t,a]
     switch_sum: jnp.ndarray       # (T-1,) — Σ_h 1[call[h,t] ≠ call[h,t-1]]
     switches_per_hap: np.ndarray  # (H,)   — per-haplotype switch counts (CPU)
+    soft_switches_per_hap: np.ndarray  # (H,) float32 — expected transitions per hap (xi-based)
     n_haps: int
     n_sites: int
 

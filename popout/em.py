@@ -7,6 +7,7 @@ converge fast — typically 2-3 EM iterations suffice.
 
 from __future__ import annotations
 
+import gc
 import logging
 from typing import Optional
 
@@ -31,7 +32,7 @@ log = logging.getLogger(__name__)
 
 def _auto_batch_size(
     T: int, A: int, user_batch_size: int | None,
-    H: int = 0,
+    H: int = 0, bucketed: bool = False,
 ) -> int:
     """Pick batch_size to fit GPU memory.
 
@@ -39,6 +40,9 @@ def _auto_batch_size(
     (three simultaneous (B, T, A) float32 tensors during log_emission).
     The full genotype array (H × T uint8) also lives on GPU throughout,
     so we subtract that from the available budget.
+
+    When bucketed=True (per-haplotype T), apply 0.6× factor to account for
+    BFC fragmentation from variable-size allocations across 20 buckets.
     """
     if user_batch_size is not None:
         return user_batch_size
@@ -55,6 +59,8 @@ def _auto_batch_size(
     budget = max(budget, 512 * 1024 * 1024)   # floor at 512 MB
     batch_size = budget // (3 * T * A * 4)
     batch_size = max(256, min(batch_size, 50_000))
+    if bucketed:
+        batch_size = max(256, int(batch_size * 0.6))
     return batch_size
 
 
@@ -351,24 +357,27 @@ def update_generations_from_stats(
     current_T: float,
     mu: jnp.ndarray,
 ) -> float:
-    """Estimate generations since admixture from pre-accumulated switch stats.
+    """Estimate generations since admixture from pre-accumulated stats.
 
-    Equivalent to update_generations(gamma, d_morgan, current_T, mu).
+    Uses xi-based soft switches (density-invariant) when available,
+    falling back to hard-call switches otherwise.
     """
-    # Per-interval switch rate averaged over haplotypes
-    switch_rate = stats.switch_sum / stats.n_haps  # (T-1,)
-
     p_diff_ancestry = 1.0 - (mu ** 2).sum()
     p_diff_ancestry = float(jnp.maximum(p_diff_ancestry, 0.1))
 
     d = jnp.maximum(d_morgan, 1e-10)
-    total_switches = switch_rate.sum()
-    total_distance = d.sum()
+    total_distance = float(d.sum())
 
-    T_est = float(total_switches / (total_distance * p_diff_ancestry + 1e-10))
+    # Use soft switches (density-invariant) from xi posteriors
+    mean_soft_sw = float(jnp.mean(jnp.array(stats.soft_switches_per_hap)))
+    T_est = mean_soft_sw / (total_distance * p_diff_ancestry + 1e-10)
+    T_est = max(1.0, min(T_est, 1000.0))
 
-    T_new = 0.7 * T_est + 0.3 * current_T
-    return max(1.0, min(T_new, 1000.0))
+    # Log-space blend: T_new = T_old^(1-α) · T_est^α
+    # Conservative α keeps T from moving too fast in a single update.
+    alpha = 0.3
+    log_T = (1 - alpha) * np.log(max(current_T, 1.0)) + alpha * np.log(max(T_est, 1.0))
+    return max(1.0, min(float(np.exp(log_T)), 1000.0))
 
 
 def update_generations_per_hap_from_stats(
@@ -377,22 +386,31 @@ def update_generations_per_hap_from_stats(
     current_T_global: float,
     mu: jnp.ndarray,
     bucket_centers: jnp.ndarray,
-    min_switches_for_confidence: int = 5,
+    min_switches_for_confidence: float = 3.0,
 ) -> tuple[jnp.ndarray, jnp.ndarray, float]:
-    """Per-haplotype T estimation from pre-accumulated switch counts.
+    """Per-haplotype T estimation from xi-based soft switch counts.
 
-    Equivalent to update_generations_per_hap(gamma, ...).
+    Uses density-invariant expected transition counts instead of
+    hard-call argmax switches.
     """
-    switches_per_hap = jnp.array(stats.switches_per_hap, dtype=jnp.float32)
+    soft_sw = jnp.array(stats.soft_switches_per_hap, dtype=jnp.float32)
 
     p_diff = 1.0 - (mu ** 2).sum()
     p_diff = jnp.maximum(p_diff, 0.1)
     total_d = d_morgan.sum()
 
-    T_raw = switches_per_hap / (total_d * p_diff + 1e-10)
+    T_raw = soft_sw / (total_d * p_diff + 1e-10)
+    T_raw = jnp.clip(T_raw, 1.0, 1000.0)
 
-    lam = 1.0 / (1.0 + switches_per_hap / min_switches_for_confidence)
-    T_reg = (1.0 - lam) * T_raw + lam * current_T_global
+    # Regularization: shrink toward global mean when few expected switches
+    lam = 1.0 / (1.0 + soft_sw / min_switches_for_confidence)
+    T_shrunk = (1.0 - lam) * T_raw + lam * current_T_global
+
+    # Log-space blend toward previous global T — conservative step size
+    alpha = 0.3
+    log_current = jnp.log(jnp.maximum(current_T_global, 1.0))
+    log_shrunk = jnp.log(jnp.maximum(T_shrunk, 1.0))
+    T_reg = jnp.exp((1 - alpha) * log_current + alpha * log_shrunk)
     T_reg = jnp.clip(T_reg, 1.0, 1000.0)
 
     bucket_assignments = assign_buckets(T_reg, bucket_centers)
@@ -618,6 +636,26 @@ def run_em(
     bucket_centers = compute_bucket_centers(n_T_buckets) if per_hap_T else None
     prev_freq = model.allele_freq
     prev_T = model.gen_since_admix
+
+    # T-update gating: only update T once, after frequencies converge.
+    #
+    # No published LAI tool jointly estimates T and allele frequencies in a
+    # tight EM loop.  HAPMIX/RFMix/ELAI fix T entirely; Ancestry_HMM and
+    # FLARE use reference-panel frequencies (never estimate them); MOSAIC
+    # estimates T in a separate post-hoc step.  Joint iteration creates a
+    # positive feedback loop: uncertain posteriors inflate soft switches →
+    # higher T → more permissive transitions → even more uncertainty.
+    #
+    # Our approach: converge frequencies at fixed T, then do ONE T update
+    # (which is still based on the best-converged posteriors we have), then
+    # re-converge frequencies at the new T.
+    _T_DELTA_THRESHOLD = 0.005   # mean Δ(freq) must drop below this
+    _T_MAX_UPDATES = 1           # update T at most this many times
+    _T_MAX_HOLD = 15             # force first T update by this iteration
+    prev_mean_delta = float('inf')
+    t_update_count = 0
+    last_t_update_iter = -999
+
     for iteration in range(n_em_iter):
         log.info("--- EM iteration %d/%d ---", iteration + 1, n_em_iter)
 
@@ -641,6 +679,10 @@ def run_em(
                 mu_sum=gamma.sum(axis=(0, 1)),
                 switch_sum=switches_tmp.sum(axis=0).astype(jnp.float32),
                 switches_per_hap=np.array(switches_tmp.sum(axis=1), dtype=np.int32),
+                # Block emissions path: use hard switches as proxy (xi not available)
+                soft_switches_per_hap=np.array(
+                    switches_tmp.sum(axis=1), dtype=np.float32,
+                ),
                 n_haps=gamma.shape[0],
                 n_sites=gamma.shape[1],
             )
@@ -664,20 +706,37 @@ def run_em(
             )
         new_mu = update_mu_from_stats(em_stats)
 
-        # Hold T fixed for first iteration to let frequencies stabilize
+        # T update: at most _T_MAX_UPDATES times, only after freq converges.
         T_per_hap = None
         bucket_assignments = None
-        if iteration == 0:
+        freq_stable = prev_mean_delta < _T_DELTA_THRESHOLD
+        force_update = (iteration >= _T_MAX_HOLD and t_update_count == 0)
+        budget_left = t_update_count < _T_MAX_UPDATES
+        should_update_T = budget_left and (freq_stable or force_update)
+
+        if not should_update_T:
             new_T = model.gen_since_admix
-            log.info("  (holding T fixed for first iteration)")
+            if not budget_left:
+                pass  # silent — T is done
+            elif not freq_stable:
+                log.info("  (holding T — freq Δ=%.4f > %.4f)",
+                         prev_mean_delta, _T_DELTA_THRESHOLD)
         elif per_hap_T and bucket_centers is not None:
             T_per_hap, bucket_assignments, new_T = update_generations_per_hap_from_stats(
                 em_stats, d_morgan_j, model.gen_since_admix, new_mu, bucket_centers,
             )
-            log.info("  Per-hap T: mean=%.1f, std=%.1f",
+            t_update_count += 1
+            last_t_update_iter = iteration
+            log.info("  T update %d/%d (per-hap): mean=%.1f, std=%.1f",
+                     t_update_count, _T_MAX_UPDATES,
                      float(jnp.mean(T_per_hap)), float(jnp.std(T_per_hap)))
         else:
             new_T = update_generations_from_stats(em_stats, d_morgan_j, model.gen_since_admix, model.mu)
+            t_update_count += 1
+            last_t_update_iter = iteration
+            log.info("  T update %d/%d: %.1f → %.1f",
+                     t_update_count, _T_MAX_UPDATES,
+                     model.gen_since_admix, new_T)
 
         if stats is not None:
             stats.timer_stop("m_step", chrom=chrom_data.chrom, iteration=iteration)
@@ -700,6 +759,18 @@ def run_em(
             block_data=bd,
         )
 
+        # Re-tune batch_size when entering bucketed path for first time
+        if bucket_assignments is not None and iteration == 1:
+            batch_size = _auto_batch_size(
+                chrom_data.n_sites, n_anc, None,
+                H=chrom_data.n_haps, bucketed=True,
+            )
+            log.info("  Re-tuned batch_size for bucketed path: %d", batch_size)
+
+        # Free M-step intermediates; force cyclic GC so BFC can coalesce
+        del em_stats
+        gc.collect()
+
         log.info("  mu = %s", np.array(model.mu).round(3))
         log.info("  T = %.1f generations", model.gen_since_admix)
 
@@ -718,13 +789,14 @@ def run_em(
             stats.emit("em/T", float(new_T),
                        chrom=chrom_data.chrom, iteration=iteration)
         T_delta = abs(float(new_T) - float(prev_T)) / max(float(prev_T), 1.0)
-        freq_converged = max_delta < 1e-4
+        freq_converged = mean_delta < 1e-4
         T_converged = T_delta < 0.01  # <1% relative change
         if iteration > 0 and freq_converged and T_converged:
-            log.info("  Converged (Δfreq=%.2e, ΔT=%.1f%%)", max_delta, T_delta * 100)
+            log.info("  Converged (mean Δfreq=%.2e, ΔT=%.1f%%)", mean_delta, T_delta * 100)
             break
         prev_freq = new_freq
         prev_T = new_T
+        prev_mean_delta = mean_delta
 
     # --- Final decode (streaming — no full gamma materialised) ---
     log.info("Final forward-backward pass")

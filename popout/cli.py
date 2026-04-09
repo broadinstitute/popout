@@ -108,8 +108,9 @@ def main(argv: list[str] | None = None) -> None:
         help="Upper bound for auto-detected ancestry count (default: 20)",
     )
     parser.add_argument(
-        "--per-hap-T", action="store_true",
-        help="Estimate per-haplotype admixture time (default: single global T)",
+        "--per-hap-T", action=argparse.BooleanOptionalAction, default=True,
+        help="Estimate per-haplotype admixture time (default: enabled; "
+             "use --no-per-hap-T for single global T)",
     )
     parser.add_argument(
         "--n-T-buckets", type=int, default=20,
