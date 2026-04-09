@@ -31,6 +31,7 @@ task popout_task {
     Float   gen_since_admix    = 20.0
     Boolean export_panel       = false
     Boolean block_emissions    = false
+    Float   freq_damping       = 0.0
     String  extra_args         = ""
 
     # Weights & Biases — API key string or gs:// URL to a file containing it
@@ -116,6 +117,7 @@ task popout_task {
     ~{if defined(thin_cm) then 'CMD="$CMD --thin-cm ~{thin_cm}"' else ''}
     ~{if export_panel then 'CMD="$CMD --export-panel"' else ''}
     ~{if block_emissions then 'CMD="$CMD --block-emissions"' else ''}
+    if awk "BEGIN{exit !(~{freq_damping} > 0)}"; then CMD="$CMD --freq-damping ~{freq_damping}"; fi
     if [ -n "$WANDB_RAW" ]; then CMD="$CMD --monitor wandb"; fi
 
     if [ -n "~{extra_args}" ]; then
@@ -174,6 +176,7 @@ workflow popout {
     Float   gen_since_admix    = 20.0
     Boolean export_panel       = false
     Boolean block_emissions    = false
+    Float   freq_damping       = 0.0
     String  extra_args         = ""
 
     # Weights & Biases
@@ -203,6 +206,7 @@ workflow popout {
       gen_since_admix = gen_since_admix,
       export_panel    = export_panel,
       block_emissions = block_emissions,
+      freq_damping    = freq_damping,
       extra_args      = extra_args,
       wandb_key       = wandb_key,
       machine_type    = machine_type,
