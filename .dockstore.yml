@@ -13,3 +13,7 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /wdl/popout.wdl
     topic: GPU-accelerated local ancestry inference at biobank scale
+  - name: popout-report
+    subclass: WDL
+    primaryDescriptorPath: /wdl/popout_report.wdl
+    topic: Generate visualization report from popout LAI results

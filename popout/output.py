@@ -292,12 +292,16 @@ def write_model(result: AncestryResult, out_path: str) -> None:
         f.write(f"mu\t{','.join(f'{x:.4f}' for x in np.array(model.mu))}\n")
         f.write(f"mismatch\t{','.join(f'{x:.6f}' for x in np.array(model.mismatch))}\n")
 
-    np.savez_compressed(
-        f"{out_path}.npz",
+    save_dict = dict(
         allele_freq=np.array(model.allele_freq),
         mu=np.array(model.mu),
         mismatch=np.array(model.mismatch),
         n_ancestries=np.array(model.n_ancestries),
         gen_since_admix=np.array(model.gen_since_admix),
     )
+    if getattr(model, "gen_per_hap", None) is not None:
+        save_dict["gen_per_hap"] = np.array(model.gen_per_hap)
+    if getattr(model, "bucket_centers", None) is not None:
+        save_dict["bucket_centers"] = np.array(model.bucket_centers)
+    np.savez_compressed(f"{out_path}.npz", **save_dict)
     log.info("Wrote model to %s (+ .npz)", out_path)

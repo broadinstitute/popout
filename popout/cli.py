@@ -33,6 +33,10 @@ def main(argv: list[str] | None = None) -> None:
         from .fetch_map import fetch_map_main
         fetch_map_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "viz":
+        from .viz.gallery import viz_main
+        viz_main(raw_args[1:])
+        return
 
     parser = argparse.ArgumentParser(
         description="GPU-accelerated self-bootstrapping local ancestry inference",
