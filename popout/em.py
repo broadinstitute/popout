@@ -556,6 +556,7 @@ def run_em(
     block_size: int = 8,
     detection_method: str = "marchenko-pastur",
     max_ancestries: int = 20,
+    freq_alpha: float = 0.0,
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -704,6 +705,8 @@ def run_em(
             new_freq = smooth_rare_frequencies(
                 new_freq, pos_cm_j, bandwidth_cm, maf_threshold,
             )
+        if freq_alpha > 0 and iteration > 0:
+            new_freq = model.allele_freq + freq_alpha * (new_freq - model.allele_freq)
         new_mu = update_mu_from_stats(em_stats)
 
         # T update: at most _T_MAX_UPDATES times, only after freq converges.
@@ -860,6 +863,7 @@ def run_em_genome(
     block_size: int = 8,
     detection_method: str = "marchenko-pastur",
     max_ancestries: int = 20,
+    freq_alpha: float = 0.0,
 ) -> list[AncestryResult]:
     """Run self-bootstrapping LAI across all chromosomes.
 
@@ -904,6 +908,7 @@ def run_em_genome(
                 block_size=block_size,
                 detection_method=detection_method,
                 max_ancestries=max_ancestries,
+                freq_alpha=freq_alpha,
             )
             fitted_model = result.model
         else:
@@ -952,6 +957,8 @@ def run_em_genome(
                 new_freq = smooth_rare_frequencies(
                     new_freq, pos_cm_j, bandwidth_cm, maf_threshold,
                 )
+            if freq_alpha > 0:
+                new_freq = model.allele_freq + freq_alpha * (new_freq - model.allele_freq)
             model = AncestryModel(
                 n_ancestries=model.n_ancestries,
                 mu=model.mu,

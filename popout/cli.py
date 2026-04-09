@@ -37,6 +37,14 @@ def main(argv: list[str] | None = None) -> None:
         from .viz.gallery import viz_main
         viz_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "label":
+        from .label import label_main
+        label_main(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "fetch-ref":
+        from .fetch_ref import fetch_ref_main
+        fetch_ref_main(raw_args[1:])
+        return
 
     parser = argparse.ArgumentParser(
         description="GPU-accelerated self-bootstrapping local ancestry inference",
@@ -137,6 +145,11 @@ def main(argv: list[str] | None = None) -> None:
         "--smooth-maf-threshold", type=float, default=0.05,
         help="MAF threshold below which allele frequencies are smoothed "
              "(default: 0.05)",
+    )
+    parser.add_argument(
+        "--freq-damping", type=float, default=0.0,
+        help="Frequency dampening factor (0-1). Blends new allele frequencies "
+             "with prior iteration. 0.75 recommended. 0 = disabled (default: 0)",
     )
     parser.add_argument(
         "--probs", action="store_true",
@@ -344,6 +357,7 @@ def main(argv: list[str] | None = None) -> None:
             detection_method=args.ancestry_detection,
             max_ancestries=args.max_ancestries,
             block_size=args.block_size,
+            freq_alpha=args.freq_damping,
         )
 
     t_compute = time.perf_counter() - t0
@@ -360,7 +374,7 @@ def main(argv: list[str] | None = None) -> None:
         stats=stats,
     )
 
-    write_model(results[0], f"{out_prefix}.model")
+    write_model(results[0], f"{out_prefix}.model", chrom_data=chrom_data_list[0])
 
     write_ancestry_tracts(
         results, chrom_data_list, n_samples, sample_names,

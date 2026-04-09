@@ -279,7 +279,7 @@ def write_global_ancestry(
         stats.emit("output/genome_wide_ancestry_proportions", mean_props)
 
 
-def write_model(result: AncestryResult, out_path: str) -> None:
+def write_model(result: AncestryResult, out_path: str, chrom_data: ChromData | None = None) -> None:
     """Write model parameters to a human-readable file.
 
     Also saves a companion ``.npz`` archive with full-precision arrays
@@ -299,6 +299,10 @@ def write_model(result: AncestryResult, out_path: str) -> None:
         n_ancestries=np.array(model.n_ancestries),
         gen_since_admix=np.array(model.gen_since_admix),
     )
+    if chrom_data is not None:
+        save_dict["pos_bp"] = np.array(chrom_data.pos_bp)
+        save_dict["pos_cm"] = np.array(chrom_data.pos_cm)
+        save_dict["chrom"] = np.array(chrom_data.chrom)
     if getattr(model, "gen_per_hap", None) is not None:
         save_dict["gen_per_hap"] = np.array(model.gen_per_hap)
     if getattr(model, "bucket_centers", None) is not None:

@@ -13,6 +13,7 @@ dependencies = [
     "pysam>=0.22.0",
     "numpy>=1.24",
     "Pgenlib>=0.90.0",
+    "scipy>=1.10",
 ]
 
 [project.optional-dependencies]

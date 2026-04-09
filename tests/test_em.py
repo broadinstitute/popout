@@ -132,6 +132,54 @@ def test_per_hap_T_zero_switches():
     assert T_arr.max() <= 1000.0
 
 
+def test_freq_dampening_formula():
+    """Dampening blends old and new frequencies correctly."""
+    old_freq = jnp.array([[0.1, 0.9], [0.8, 0.2]])
+    new_freq = jnp.array([[0.5, 0.5], [0.5, 0.5]])
+    alpha = 0.75
+    damped = old_freq + alpha * (new_freq - old_freq)
+    # alpha=0.75: 25% old + 75% new
+    expected = jnp.array([[0.4, 0.6], [0.575, 0.425]])
+    np.testing.assert_allclose(np.array(damped), np.array(expected), atol=1e-6)
+
+
+def test_freq_dampening_zero_is_noop():
+    """freq_alpha=0 produces same result as no dampening."""
+    from popout.simulate import simulate_admixed
+    from popout.em import run_em
+
+    chrom_data, _ = simulate_admixed(
+        n_samples=100, n_sites=500, n_ancestries=3, rng_seed=42,
+    )
+    r1 = run_em(chrom_data, n_ancestries=3, n_em_iter=3, freq_alpha=0.0, rng_seed=42)
+    r2 = run_em(chrom_data, n_ancestries=3, n_em_iter=3, rng_seed=42)
+    np.testing.assert_allclose(
+        np.array(r1.model.allele_freq),
+        np.array(r2.model.allele_freq),
+        atol=1e-6,
+    )
+
+
+def test_freq_dampening_convergence():
+    """Frequency dampening produces a convergent result."""
+    from popout.simulate import simulate_admixed
+    from popout.em import run_em
+
+    chrom_data, _ = simulate_admixed(
+        n_samples=200, n_sites=1000, n_ancestries=3,
+        gen_since_admix=20, rng_seed=42,
+    )
+    result = run_em(
+        chrom_data,
+        n_ancestries=3,
+        n_em_iter=15,
+        gen_since_admix=20.0,
+        freq_alpha=0.75,
+    )
+    assert result.model.n_ancestries == 3
+    assert result.model.allele_freq.shape == (3, 1000)
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
