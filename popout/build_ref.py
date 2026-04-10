@@ -10,6 +10,7 @@ Output format (gzipped TSV):
 Usage:
     popout build-ref --vcf chr20.vcf.gz chr21.vcf.gz --out 1kg_superpop_freq.GRCh38.tsv.gz
     popout build-ref --vcf-dir /path/to/1kg/vcfs --out 1kg_superpop_freq.GRCh38.tsv.gz
+    popout build-ref --download --genome GRCh38 --out 1kg_superpop_freq.GRCh38.tsv.gz
 """
 
 from __future__ import annotations
@@ -18,13 +19,39 @@ import argparse
 import csv
 import gzip
 import logging
+import shutil
 import sys
+import tempfile
 import urllib.request
 from pathlib import Path
 
 import numpy as np
 
 log = logging.getLogger(__name__)
+
+# 1KG VCF download URLs per genome build
+KG_VCF_URLS: dict[str, dict[str, str]] = {
+    "GRCh37": {
+        "base": (
+            "https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/release/20130502"
+        ),
+        "pattern": (
+            "ALL.chr{chrom}.phase3_shapeit2_mvncall_integrated_v5b"
+            ".20130502.genotypes.vcf.gz"
+        ),
+    },
+    "GRCh38": {
+        "base": (
+            "https://ftp.1000genomes.ebi.ac.uk/vol1/ftp/data_collections/"
+            "1000G_2504_high_coverage/working/"
+            "20220422_3202_phased_SNV_INDEL_SV"
+        ),
+        "pattern": (
+            "1kGP_high_coverage_Illumina.chr{chrom}"
+            ".filtered.SNV_INDEL_SV_phased_panel.vcf.gz"
+        ),
+    },
+}
 
 # 1KG Phase 3 superpopulations and their constituent populations
 SUPERPOPS = {
@@ -150,6 +177,54 @@ def process_vcf(
     return n_written
 
 
+def download_kg_vcfs(
+    genome: str = "GRCh38",
+    dest_dir: Path | None = None,
+    chromosomes: list[str] | None = None,
+) -> list[Path]:
+    """Download 1KG VCFs for the specified genome build.
+
+    Parameters
+    ----------
+    genome : reference genome build
+    dest_dir : directory to download into (default: tempdir)
+    chromosomes : list of chromosome names (default: autosomes 1-22)
+
+    Returns
+    -------
+    List of paths to downloaded VCF files.
+    """
+    if genome not in KG_VCF_URLS:
+        raise ValueError(
+            f"No VCF URLs for genome {genome!r}. "
+            f"Available: {list(KG_VCF_URLS)}"
+        )
+
+    urls = KG_VCF_URLS[genome]
+    if chromosomes is None:
+        chromosomes = [str(i) for i in range(1, 23)]
+
+    if dest_dir is None:
+        dest_dir = Path(tempfile.mkdtemp(prefix="popout_kg_"))
+    dest_dir.mkdir(parents=True, exist_ok=True)
+
+    paths = []
+    for chrom in chromosomes:
+        filename = urls["pattern"].format(chrom=chrom)
+        url = f"{urls['base']}/{filename}"
+        dest = dest_dir / filename
+        if dest.exists() and dest.stat().st_size > 0:
+            log.info("Already downloaded: %s", dest.name)
+        else:
+            log.info("Downloading chr%s from %s ...", chrom, urls["base"])
+            with urllib.request.urlopen(url) as resp, open(dest, "wb") as f:
+                shutil.copyfileobj(resp, f)
+            log.info("  -> %s (%.1f MB)", dest.name, dest.stat().st_size / 1e6)
+        paths.append(dest)
+
+    return paths
+
+
 def build_ref_main(argv: list[str] | None = None) -> None:
     """CLI entry point: ``popout build-ref``."""
     parser = argparse.ArgumentParser(
@@ -162,6 +237,18 @@ def build_ref_main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--vcf-dir",
         help="Directory containing per-chromosome VCF files",
+    )
+    parser.add_argument(
+        "--download", action="store_true",
+        help="Auto-download 1KG VCFs from public FTP (requires internet)",
+    )
+    parser.add_argument(
+        "--genome", choices=["GRCh38", "GRCh37"], default="GRCh38",
+        help="Genome build for --download (default: GRCh38)",
+    )
+    parser.add_argument(
+        "--chromosomes", nargs="+", default=None,
+        help="Chromosomes to process (default: all autosomes 1-22)",
     )
     parser.add_argument(
         "--panel", default=None,
@@ -185,13 +272,19 @@ def build_ref_main(argv: list[str] | None = None) -> None:
 
     # Collect VCF paths
     vcf_paths = []
-    if args.vcf:
+    if args.download:
+        log.info("Auto-downloading 1KG VCFs for %s ...", args.genome)
+        vcf_paths = download_kg_vcfs(
+            genome=args.genome,
+            chromosomes=args.chromosomes,
+        )
+    elif args.vcf:
         vcf_paths = [Path(p) for p in args.vcf]
     elif args.vcf_dir:
         vcf_dir = Path(args.vcf_dir)
         vcf_paths = sorted(vcf_dir.glob("*.vcf.gz"))
     else:
-        parser.error("Provide --vcf or --vcf-dir")
+        parser.error("Provide --vcf, --vcf-dir, or --download")
 
     if not vcf_paths:
         log.error("No VCF files found")

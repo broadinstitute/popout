@@ -2,14 +2,18 @@ version 1.0
 
 ## Label inferred ancestries using 1KG superpopulation reference frequencies.
 ##
-## One-stop workflow: provide a pre-built reference frequency file, OR
-## 1000 Genomes VCF(s) and the task will build the reference before labeling.
-## If neither is provided, the task errors with a helpful message.
+## One-stop workflow: just provide popout outputs and the task handles the rest.
+## It will auto-download 1KG data and build the reference if needed.
 ##
-## Inputs:
+## Optionally provide a pre-built `reference` file to skip the build step,
+## or `kg_vcfs` to build from specific VCF files.
+##
+## Inputs (required):
 ##   - .model.npz, .global.tsv, .tracts.tsv.gz from a popout run
-##   - EITHER `reference` (pre-built superpop freq TSV, reusable across runs)
-##     OR `kg_vcfs` (1KG Phase 3 VCFs to build it from)
+##
+## Inputs (optional — zero-config by default):
+##   - `reference`: pre-built superpop freq TSV (skips build, fastest)
+##   - `kg_vcfs`:   specific 1KG VCFs to build from
 ##
 ## Outputs: labeled versions of global and tracts files, plus a labels.json
 ## metadata report with correlation scores and assignment details.
@@ -22,17 +26,17 @@ task popout_label_task {
     String output_prefix = "popout.labeled"
     String genome        = "GRCh38"
 
-    # Reference: provide ONE of these
-    File?        reference   # pre-built superpop freq TSV (fast — reuse across runs)
-    Array[File]  kg_vcfs = [] # 1KG Phase 3 VCFs (builds reference, then labels)
-    File?        kg_panel    # 1KG sample panel (auto-downloaded if omitted)
-    Float        min_maf = 0.01
+    # Optional — if omitted, 1KG VCFs are auto-downloaded and reference is built
+    File?        reference
+    Array[File]  kg_vcfs  = []
+    File?        kg_panel
+    Float        min_maf  = 0.01
 
     # Runtime
-    Int    cpu          = 4
-    String memory       = "16 GB"
-    Int    extra_disk_gb = 20
-    String docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest"
+    Int    cpu           = 4
+    String memory        = "16 GB"
+    Int    extra_disk_gb = 50
+    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest"
   }
 
   Int tracts_size_gb = ceil(size(tracts, "GB"))
@@ -50,27 +54,25 @@ task popout_label_task {
       ls -lh "$REF_PATH"
 
     elif [ ~{length(kg_vcfs)} -gt 0 ]; then
-      echo "=== Building reference from ~{length(kg_vcfs)} VCF(s) ==="
-
-      cat > vcf_list.txt <<'VCFEOF'
-    ~{sep='\n' kg_vcfs}
-    VCFEOF
-      sed -i 's/^[[:space:]]*//' vcf_list.txt
-      echo "Input VCFs: $(wc -l < vcf_list.txt)"
-
+      echo "=== Building reference from ~{length(kg_vcfs)} provided VCF(s) ==="
       popout build-ref \
-        --vcf $(cat vcf_list.txt | tr '\n' ' ') \
+        --vcf ~{sep=' ' kg_vcfs} \
         ~{if defined(kg_panel) then '--panel ~{kg_panel}' else ''} \
         --min-maf ~{min_maf} \
-        --out "built_ref.tsv.gz"
-
+        --out built_ref.tsv.gz
       REF_PATH="built_ref.tsv.gz"
-      ls -lh "$REF_PATH"
 
     else
-      echo "ERROR: Provide either 'reference' (pre-built TSV) or 'kg_vcfs' (1KG VCFs to build from)." >&2
-      exit 1
+      echo "=== Auto-downloading 1KG data and building reference ==="
+      popout build-ref \
+        --download \
+        --genome ~{genome} \
+        --min-maf ~{min_maf} \
+        --out built_ref.tsv.gz
+      REF_PATH="built_ref.tsv.gz"
     fi
+
+    ls -lh "$REF_PATH"
 
     # ---- Label ----
     echo "=== Labeling ancestries ==="
@@ -89,9 +91,9 @@ task popout_label_task {
   >>>
 
   output {
-    File labeled_global  = "~{output_prefix}.global.tsv"
-    File labeled_tracts  = "~{output_prefix}.tracts.tsv.gz"
-    File labels_json     = "~{output_prefix}.labels.json"
+    File labeled_global   = "~{output_prefix}.global.tsv"
+    File labeled_tracts   = "~{output_prefix}.tracts.tsv.gz"
+    File labels_json      = "~{output_prefix}.labels.json"
     File? built_reference = "built_ref.tsv.gz"
   }
 
@@ -109,15 +111,15 @@ task popout_label_task {
 
 workflow popout_label {
   input {
-    # popout outputs
+    # popout outputs (required)
     File   model_npz
     File   global_ancestry
     File   tracts
 
-    # Reference: provide ONE of these
-    File?        reference   # pre-built superpop freq TSV (fast — reuse across runs)
-    Array[File]  kg_vcfs = [] # 1KG Phase 3 VCFs (builds reference, then labels)
-    File?        kg_panel    # 1KG sample panel (auto-downloaded if omitted)
+    # Reference (all optional — auto-builds from 1KG by default)
+    File?        reference
+    Array[File]  kg_vcfs  = []
+    File?        kg_panel
 
     String output_prefix = "popout.labeled"
     String genome        = "GRCh38"
