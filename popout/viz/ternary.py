@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ._style import ancestry_colors, popout_style
+from ._style import ancestry_colors, ancestry_names, popout_style
 from ._loaders import read_global_tsv
 
 
@@ -20,6 +20,7 @@ def plot_ternary(
     *,
     max_samples: int = 10000,
     point_size: float = 1.0,
+    labels: dict | None = None,
     figsize: tuple[float, float] = (8, 7),
 ) -> "matplotlib.figure.Figure":
     """Ternary plot of three-way ancestry proportions.
@@ -29,6 +30,7 @@ def plot_ternary(
     prefix : path prefix or direct path to .global.tsv
     max_samples : max points to plot
     point_size : scatter point size
+    labels : optional labels dict from read_labels_json()
     figsize : figure size
     """
     import matplotlib.pyplot as plt
@@ -47,6 +49,7 @@ def plot_ternary(
         )
 
     colors = ancestry_colors(3)
+    names = ancestry_names(3, labels)
 
     # Subsample if needed
     if props.shape[0] > max_samples:
@@ -102,11 +105,11 @@ def plot_ternary(
         ax.scatter(x, y, c=rgb, s=point_size, alpha=0.5, edgecolors="none")
 
         # Vertex labels
-        ax.text(0, -0.04, "Ancestry 0", ha="center", fontsize=10,
+        ax.text(0, -0.04, names[0], ha="center", fontsize=10,
                 fontweight="bold", color=colors[0])
-        ax.text(1, -0.04, "Ancestry 1", ha="center", fontsize=10,
+        ax.text(1, -0.04, names[1], ha="center", fontsize=10,
                 fontweight="bold", color=colors[1])
-        ax.text(0.5, sqrt3_2 + 0.03, "Ancestry 2", ha="center", fontsize=10,
+        ax.text(0.5, sqrt3_2 + 0.03, names[2], ha="center", fontsize=10,
                 fontweight="bold", color=colors[2])
 
         ax.set_xlim(-0.1, 1.1)

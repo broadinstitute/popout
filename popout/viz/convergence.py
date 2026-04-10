@@ -8,13 +8,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ._style import ancestry_colors, popout_style
+from ._style import ancestry_colors, ancestry_names, popout_style
 from ._loaders import read_summary, read_stats_jsonl
 
 
 def plot_convergence(
     prefix: str | Path,
     *,
+    labels: dict | None = None,
     figsize: tuple[float, float] = (16, 5),
 ) -> "matplotlib.figure.Figure":
     """Enhanced EM convergence: freq delta, mu trajectory, T trajectory.
@@ -22,6 +23,7 @@ def plot_convergence(
     Parameters
     ----------
     prefix : path prefix
+    labels : optional labels dict from read_labels_json()
     figsize : figure size
     """
     import matplotlib.pyplot as plt
@@ -85,6 +87,13 @@ def plot_convergence(
                         color="#FF9800", markersize=3, label="mean Δ(freq)")
         ax.axhline(1e-4, color="gray", linestyle=":", alpha=0.5,
                    label="threshold (1e-4)")
+        # Annotate final value
+        final_val = max_deltas[-1]
+        ax.annotate(
+            f"{final_val:.2e}", xy=(iterations[-1], final_val),
+            xytext=(5, 10), textcoords="offset points", fontsize=7,
+            arrowprops=dict(arrowstyle="->", color="gray", lw=0.5),
+        )
         ax.set_xlabel("EM Iteration")
         ax.set_ylabel("Allele Frequency Change")
         ax.set_title("Frequency Convergence")
@@ -101,10 +110,11 @@ def plot_convergence(
             mu_vals = [m[1] for m in mu_history]
             n_anc = len(mu_vals[0]) if mu_vals else 0
             colors = ancestry_colors(n_anc)
+            names = ancestry_names(n_anc, labels)
             for a in range(n_anc):
                 vals = [m[a] for m in mu_vals]
                 ax.plot(mu_iters, vals, "o-", color=colors[a],
-                        markersize=3, label=f"Ancestry {a}")
+                        markersize=3, label=names[a])
             ax.set_xlabel("EM Iteration")
             ax.set_ylabel("Ancestry Proportion (μ)")
             ax.set_title("Ancestry Proportions")

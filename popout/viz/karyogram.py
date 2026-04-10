@@ -9,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ._style import (
-    CHROM_ORDER, ancestry_colors, chrom_length, chrom_sort_key,
+    CHROM_ORDER, ancestry_colors, ancestry_names, chrom_length, chrom_sort_key,
     normalize_chrom, popout_style,
 )
 from ._loaders import read_tracts, Tract
@@ -21,6 +21,7 @@ def plot_karyogram(
     *,
     title: str | None = None,
     n_ancestries: int | None = None,
+    labels: dict | None = None,
     figsize: tuple[float, float] = (14, 10),
 ) -> "matplotlib.figure.Figure":
     """Draw a karyogram for one individual.
@@ -31,11 +32,11 @@ def plot_karyogram(
     sample : sample name to plot
     title : optional figure title
     n_ancestries : if known, fixes the color palette size
+    labels : optional labels dict from read_labels_json()
     figsize : figure size in inches
     """
     import matplotlib.pyplot as plt
     from matplotlib.patches import Rectangle
-    from matplotlib.collections import PatchCollection
 
     prefix = Path(prefix)
     tracts_path = (
@@ -58,6 +59,7 @@ def plot_karyogram(
     if n_ancestries is None:
         n_ancestries = max_ancestry + 1
     colors = ancestry_colors(n_ancestries)
+    names = ancestry_names(n_ancestries, labels)
 
     # Sort chromosomes
     chroms = sorted(tracts_by_chrom.keys(), key=chrom_sort_key)
@@ -116,8 +118,7 @@ def plot_karyogram(
             for a in range(n_ancestries)
         ]
         ax.legend(
-            legend_patches,
-            [f"Ancestry {a}" for a in range(n_ancestries)],
+            legend_patches, names,
             loc="upper right", frameon=True, fontsize=8,
         )
 

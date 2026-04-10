@@ -17,6 +17,7 @@ def plot_per_hap_t(
     prefix: str | Path,
     *,
     n_bins: int = 60,
+    labels: dict | None = None,
     figsize: tuple[float, float] = (10, 5),
 ) -> "matplotlib.figure.Figure":
     """Histogram of per-haplotype estimated T (generations since admixture).
@@ -25,6 +26,7 @@ def plot_per_hap_t(
     ----------
     prefix : path prefix or direct path to .model.npz
     n_bins : number of histogram bins
+    labels : optional labels dict (unused, kept for API consistency)
     figsize : figure size
     """
     import matplotlib.pyplot as plt

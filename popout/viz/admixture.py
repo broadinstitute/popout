@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ._style import ancestry_colors, popout_style
+from ._style import ancestry_colors, ancestry_names, popout_style
 from ._loaders import read_global_tsv
 
 
@@ -19,6 +19,7 @@ def plot_admixture(
     *,
     max_samples: int = 5000,
     title: str | None = None,
+    labels: dict | None = None,
     figsize: tuple[float, float] = (16, 4),
 ) -> "matplotlib.figure.Figure":
     """ADMIXTURE-style stacked bar plot of per-sample ancestry proportions.
@@ -28,6 +29,7 @@ def plot_admixture(
     prefix : path prefix or direct path to .global.tsv
     max_samples : maximum samples to display (stratified subsample if exceeded)
     title : optional figure title
+    labels : optional labels dict from read_labels_json()
     figsize : figure size in inches
     """
     import matplotlib.pyplot as plt
@@ -41,6 +43,7 @@ def plot_admixture(
     props = data.proportions  # (N, A)
     n_samples, n_anc = props.shape
     colors = ancestry_colors(n_anc)
+    names = ancestry_names(n_anc, labels)
 
     # Sort by dominant ancestry, then by proportion within group
     dominant = np.argmax(props, axis=1)
@@ -60,15 +63,10 @@ def plot_admixture(
     with popout_style():
         fig, ax = plt.subplots(figsize=figsize)
 
-        # Render as imshow for speed (transpose: ancestries as rows, samples as columns)
-        # Build an RGBA image
-        img = np.zeros((n_anc, n_display, 4), dtype=np.float32)
+        # Build stacked image
         from matplotlib.colors import to_rgba
         rgba_colors = [to_rgba(c) for c in colors]
 
-        # Build stacked image — use cumulative proportions to determine pixel layout
-        # For imshow, we need a different approach: build a color-mapped strip
-        # Use a fine vertical grid and assign colors
         n_vert = 200  # vertical resolution
         strip = np.zeros((n_vert, n_display, 4), dtype=np.float32)
         for si in range(n_display):
@@ -91,7 +89,8 @@ def plot_admixture(
         ax.set_ylabel("Ancestry Proportion")
 
         if title is None:
-            title = f"Global Ancestry Proportions (K={n_anc})"
+            name_str = ", ".join(names)
+            title = f"Global Ancestry Proportions (K={n_anc}: {name_str})"
         ax.set_title(title)
 
         # Legend
@@ -101,8 +100,7 @@ def plot_admixture(
             for a in range(n_anc)
         ]
         ax.legend(
-            legend_patches,
-            [f"Ancestry {a}" for a in range(n_anc)],
+            legend_patches, names,
             loc="upper right", fontsize=7, ncol=min(n_anc, 4),
         )
 
@@ -114,6 +112,7 @@ def plot_ancestry_density(
     prefix: str | Path,
     *,
     n_bins: int = 50,
+    labels: dict | None = None,
     figsize: tuple[float, float] | None = None,
 ) -> "matplotlib.figure.Figure":
     """Per-ancestry histogram of global ancestry proportions across samples.
@@ -122,6 +121,7 @@ def plot_ancestry_density(
     ----------
     prefix : path prefix or direct path to .global.tsv
     n_bins : number of histogram bins
+    labels : optional labels dict from read_labels_json()
     figsize : figure size in inches (auto-scaled to n_ancestries if None)
     """
     import matplotlib.pyplot as plt
@@ -135,6 +135,7 @@ def plot_ancestry_density(
     props = data.proportions
     n_anc = data.n_ancestries
     colors = ancestry_colors(n_anc)
+    names = ancestry_names(n_anc, labels)
 
     ncols = min(n_anc, 4)
     nrows = (n_anc + ncols - 1) // ncols
@@ -149,10 +150,15 @@ def plot_ancestry_density(
                 props[:, a], bins=n_bins, color=colors[a],
                 alpha=0.8, edgecolor="white", linewidth=0.3,
             )
+            # Genome-wide mean proportion
+            mean_prop = float(props[:, a].mean())
+            ax.axvline(mean_prop, color="black", linestyle="--", linewidth=1,
+                       alpha=0.6, label=f"mean={mean_prop:.2f}")
             ax.set_xlabel("Proportion")
             ax.set_ylabel("Count")
-            ax.set_title(f"Ancestry {a}")
+            ax.set_title(names[a], fontsize=11)
             ax.set_xlim(0, 1)
+            ax.legend(fontsize=7)
 
         # Hide unused axes
         for idx in range(n_anc, nrows * ncols):

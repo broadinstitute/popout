@@ -9,7 +9,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from ._loaders import discover_files, read_model_text, read_global_tsv
+from ._loaders import discover_files, read_labels_json, read_model_text, read_global_tsv
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +21,7 @@ PLOT_REGISTRY = {
     "tract_lengths": (["tracts"], "plot_tract_lengths", "tracts"),
     "switch_rate": (["tracts"], "plot_switch_rate", "tracts"),
     "ancestry_along_genome": (["tracts"], "plot_ancestry_along_genome", "genome"),
+    "ancestry_deviation": (["tracts"], "plot_ancestry_deviation", "deviation"),
     "multi_individual": (["tracts"], "plot_multi_individual", "genome"),
     "convergence": ([], "plot_convergence", "convergence"),  # needs stats or summary
     "posterior": ([], "plot_posterior_confidence", "posterior"),  # gracefully degrades
@@ -30,6 +31,7 @@ PLOT_REGISTRY = {
     "ternary": (["global_tsv"], "plot_ternary", "ternary"),
     "pca_ancestry": (["spectral_npz"], "plot_pca_ancestry", "spectral"),
     "seed_vs_final": (["spectral_npz", "global_tsv"], "plot_seed_vs_final", "spectral"),
+    "label_correlation": (["labels_json"], "plot_label_correlation", "label_correlation"),
 }
 
 
@@ -41,6 +43,7 @@ def generate_gallery(
     dpi: int = 300,
     plots: list[str] | None = None,
     sample: str | None = None,
+    labels_path: str | Path | None = None,
 ) -> list[Path]:
     """Generate all applicable plots for a popout run.
 
@@ -52,6 +55,7 @@ def generate_gallery(
     dpi : resolution
     plots : optional list of plot names to generate (default: all applicable)
     sample : sample name for karyogram (required for karyogram, optional for others)
+    labels_path : optional path to .labels.json from popout label
 
     Returns
     -------
@@ -67,6 +71,15 @@ def generate_gallery(
 
     available = discover_files(prefix)
     log.info("Discovered files: %s", ", ".join(available.keys()))
+
+    # Load labels if provided or auto-discovered
+    labels = None
+    if labels_path is not None:
+        labels = read_labels_json(labels_path)
+        log.info("Loaded labels from %s", labels_path)
+    elif "labels_json" in available:
+        labels = read_labels_json(available["labels_json"])
+        log.info("Auto-discovered labels: %s", available["labels_json"])
 
     # Determine which plots to generate
     if plots is not None:
@@ -94,6 +107,9 @@ def generate_gallery(
 
         # Check file requirements
         missing = [f for f in required_files if f not in available]
+        # labels_json requirement can be satisfied by labels param
+        if missing == ["labels_json"] and labels is not None:
+            missing = []
         if missing:
             log.info("Skipping %s: missing %s", name, ", ".join(missing))
             continue
@@ -115,9 +131,11 @@ def generate_gallery(
 
             # Call with appropriate args
             if name == "karyogram":
-                fig = func(prefix, sample)
+                fig = func(prefix, sample, labels=labels)
+            elif name == "label_correlation":
+                fig = func(prefix, labels=labels)
             else:
-                fig = func(prefix)
+                fig = func(prefix, labels=labels)
 
             out_path = out_dir / f"{name}.{fmt}"
             fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
@@ -149,6 +167,9 @@ def viz_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--plots", default=None,
                         help="Comma-separated list of plots to generate "
                              "(default: all applicable)")
+    parser.add_argument("--labels", default=None,
+                        help="Path to .labels.json from popout label "
+                             "(auto-discovered if {prefix}.labels.json exists)")
 
     args = parser.parse_args(argv)
 
@@ -167,4 +188,5 @@ def viz_main(argv: list[str] | None = None) -> None:
         dpi=args.dpi,
         plots=plot_list,
         sample=args.sample,
+        labels_path=args.labels,
     )

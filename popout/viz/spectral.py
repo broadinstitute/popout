@@ -12,7 +12,7 @@ from pathlib import Path
 
 import numpy as np
 
-from ._style import ancestry_colors, popout_style
+from ._style import ancestry_colors, ancestry_names, popout_style
 from ._loaders import read_spectral_npz, read_global_tsv
 
 
@@ -21,6 +21,7 @@ def plot_pca_ancestry(
     *,
     max_points: int = 50000,
     point_size: float = 0.5,
+    labels: dict | None = None,
     figsize: tuple[float, float] = (8, 7),
 ) -> "matplotlib.figure.Figure":
     """PCA scatter colored by final ancestry assignment.
@@ -30,6 +31,7 @@ def plot_pca_ancestry(
     prefix : path prefix
     max_points : max haplotypes to plot
     point_size : scatter point size
+    labels : optional labels dict from read_labels_json()
     figsize : figure size
     """
     import matplotlib.pyplot as plt
@@ -44,7 +46,7 @@ def plot_pca_ancestry(
         )
 
     proj = spec["pca_proj"]  # (H, n_pc)
-    labels = spec["gmm_labels"]  # (H,)
+    gmm_labels = spec["gmm_labels"]  # (H,)
 
     # Try to load final ancestry from global.tsv for coloring
     global_path = prefix.with_name(prefix.name + ".global.tsv")
@@ -54,13 +56,14 @@ def plot_pca_ancestry(
         dominant = np.argmax(data.proportions, axis=1)  # (n_samples,)
         # Duplicate for haplotypes
         final_labels = np.repeat(dominant, 2)
-        if len(final_labels) != len(labels):
-            final_labels = labels  # fallback
+        if len(final_labels) != len(gmm_labels):
+            final_labels = gmm_labels  # fallback
     else:
-        final_labels = labels
+        final_labels = gmm_labels
 
     n_anc = int(final_labels.max()) + 1
     colors = ancestry_colors(n_anc)
+    names = ancestry_names(n_anc, labels)
 
     # Subsample if needed
     if len(proj) > max_points:
@@ -78,7 +81,7 @@ def plot_pca_ancestry(
                 ax.scatter(
                     proj[mask, 0], proj[mask, 1],
                     c=colors[a], s=point_size, alpha=0.3,
-                    label=f"Ancestry {a}", edgecolors="none",
+                    label=names[a], edgecolors="none",
                 )
 
         ax.set_xlabel("PC1")
@@ -94,6 +97,7 @@ def plot_seed_vs_final(
     *,
     max_points: int = 50000,
     point_size: float = 0.5,
+    labels: dict | None = None,
     figsize: tuple[float, float] = (16, 7),
 ) -> "matplotlib.figure.Figure":
     """Side-by-side PCA: GMM seed labels vs final EM ancestry.
@@ -103,6 +107,7 @@ def plot_seed_vs_final(
     prefix : path prefix
     max_points : max haplotypes per panel
     point_size : scatter point size
+    labels : optional labels dict from read_labels_json()
     figsize : figure size
     """
     import matplotlib.pyplot as plt
@@ -132,6 +137,7 @@ def plot_seed_vs_final(
 
     n_anc = max(int(gmm_labels.max()), int(final_labels.max())) + 1
     colors = ancestry_colors(n_anc)
+    names = ancestry_names(n_anc, labels)
 
     # Subsample
     if len(proj) > max_points:
@@ -154,7 +160,7 @@ def plot_seed_vs_final(
                     ax.scatter(
                         proj[mask, 0], proj[mask, 1],
                         c=colors[a], s=point_size, alpha=0.3,
-                        label=f"Ancestry {a}", edgecolors="none",
+                        label=names[a], edgecolors="none",
                     )
             ax.set_xlabel("PC1")
             ax.set_ylabel("PC2")
