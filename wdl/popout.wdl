@@ -137,6 +137,7 @@ task popout_task {
     File model            = "~{output_prefix}.model"
     File model_npz        = "~{output_prefix}.model.npz"
     File summary          = "~{output_prefix}.summary.json"
+    File? spectral_npz     = "~{output_prefix}.spectral.npz"
 
     # Optional panel exports (only produced when export_panel = true)
     File? panel_haplotypes  = "~{output_prefix}.panel.haplotypes.tsv"
@@ -222,6 +223,7 @@ workflow popout {
     File model            = popout_task.model
     File model_npz        = popout_task.model_npz
     File summary          = popout_task.summary
+    File? spectral_npz     = popout_task.spectral_npz
 
     File? panel_haplotypes  = popout_task.panel_haplotypes
     File? panel_segments    = popout_task.panel_segments

@@ -42,7 +42,7 @@ def seed_ancestry(
     labels : jnp.ndarray (n_haps,) int32
     n_ancestries : int
     """
-    labels, _resp, n_anc = seed_ancestry_soft(
+    labels, _resp, n_anc, _proj = seed_ancestry_soft(
         geno, n_ancestries, max_snps, n_components,
         max_ancestries, gmm_restarts, rng_seed,
     )
@@ -61,7 +61,7 @@ def seed_ancestry_soft(
     detection_method: str = "recursive",
     max_haps_svd: int = 100_000,
     projection_batch: int = 50_000,
-) -> tuple[jnp.ndarray, jnp.ndarray, int]:
+) -> tuple[jnp.ndarray, jnp.ndarray, int, np.ndarray]:
     """Compute soft ancestry assignments via PCA + GMM.
 
     Returns
@@ -69,6 +69,7 @@ def seed_ancestry_soft(
     labels : jnp.ndarray (n_haps,) int32  — hard labels
     responsibilities : jnp.ndarray (n_haps, A) — soft assignments
     n_ancestries : int
+    pca_proj : np.ndarray (n_haps, n_pc) — PCA projection used for GMM
     """
     key = jax.random.PRNGKey(rng_seed)
     n_haps, n_sites = geno.shape
@@ -170,7 +171,7 @@ def seed_ancestry_soft(
         log.info("  Ancestry %d: %.0f effective haplotypes (%.1f%%)",
                  a, eff, 100 * eff / n_haps)
 
-    return labels, resp, n_ancestries
+    return labels, resp, n_ancestries, np.array(proj)
 
 
 # ---------------------------------------------------------------------------

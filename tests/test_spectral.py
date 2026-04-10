@@ -83,7 +83,7 @@ def test_seed_ancestry_soft_recursive():
     """Integration: seed_ancestry_soft with recursive detection runs without error."""
     from popout.simulate import simulate_admixed
     chrom_data, _ = simulate_admixed(n_samples=200, n_sites=500, n_ancestries=3)
-    labels, resp, n_anc = seed_ancestry_soft(
+    labels, resp, n_anc, _proj = seed_ancestry_soft(
         chrom_data.geno, detection_method="recursive", rng_seed=42,
     )
     assert n_anc >= 2
@@ -95,7 +95,7 @@ def test_seed_ancestry_soft_eigenvalue_gap():
     """Integration: seed_ancestry_soft with eigenvalue-gap detection."""
     from popout.simulate import simulate_admixed
     chrom_data, _ = simulate_admixed(n_samples=200, n_sites=500, n_ancestries=3)
-    labels, resp, n_anc = seed_ancestry_soft(
+    labels, resp, n_anc, _proj = seed_ancestry_soft(
         chrom_data.geno, detection_method="eigenvalue-gap", rng_seed=42,
     )
     assert n_anc >= 2

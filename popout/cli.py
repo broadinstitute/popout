@@ -376,6 +376,11 @@ def main(argv: list[str] | None = None) -> None:
 
     write_model(results[0], f"{out_prefix}.model", chrom_data=chrom_data_list[0])
 
+    if results[0].spectral is not None:
+        import numpy as np
+        np.savez_compressed(f"{out_prefix}.spectral.npz", **results[0].spectral)
+        log.info("Wrote spectral data to %s.spectral.npz", out_prefix)
+
     write_ancestry_tracts(
         results, chrom_data_list, n_samples, sample_names,
         f"{out_prefix}.tracts.tsv.gz",

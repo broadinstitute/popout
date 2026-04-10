@@ -27,7 +27,7 @@ def _make_model(n_samples=200, n_sites=100, n_ancestries=3, rng_seed=42):
     geno = jnp.array(chrom_data.geno)
     d_morgan = jnp.array(chrom_data.genetic_distances)
 
-    _, resp, n_anc = seed_ancestry_soft(
+    _, resp, n_anc, _proj = seed_ancestry_soft(
         chrom_data.geno, n_ancestries=n_ancestries, rng_seed=rng_seed,
     )
     model = init_model_soft(geno, resp, n_anc)

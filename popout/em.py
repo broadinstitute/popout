@@ -594,7 +594,7 @@ def run_em(
     log.info("Stage 0: Spectral initialization (GMM)")
     if stats is not None:
         stats.timer_start("spectral")
-    labels, responsibilities, n_anc = seed_ancestry_soft(
+    labels, responsibilities, n_anc, pca_proj = seed_ancestry_soft(
         geno_np, n_ancestries=n_ancestries, rng_seed=rng_seed, stats=stats,
         detection_method=detection_method, max_ancestries=max_ancestries,
     )
@@ -656,6 +656,15 @@ def run_em(
     prev_mean_delta = float('inf')
     t_update_count = 0
     last_t_update_iter = -999
+
+    # Frequency stabilization: accumulate stats over last iterations to
+    # detect and replace oscillating sites before the final decode.
+    _STABILIZE_WINDOW = 20
+    _STABILIZE_MULT = 100
+    stabilize_start = max(0, n_em_iter - _STABILIZE_WINDOW)
+    freq_sum = jnp.zeros_like(model.allele_freq)
+    freq_sq_sum = jnp.zeros_like(model.allele_freq)
+    stabilize_count = 0
 
     for iteration in range(n_em_iter):
         log.info("--- EM iteration %d/%d ---", iteration + 1, n_em_iter)
@@ -770,6 +779,12 @@ def run_em(
             )
             log.info("  Re-tuned batch_size for bucketed path: %d", batch_size)
 
+        # Accumulate frequency stats for stabilization
+        if freq_alpha > 0 and iteration >= stabilize_start:
+            freq_sum = freq_sum + new_freq
+            freq_sq_sum = freq_sq_sum + new_freq ** 2
+            stabilize_count += 1
+
         # Free M-step intermediates; force cyclic GC so BFC can coalesce
         del em_stats
         gc.collect()
@@ -801,6 +816,32 @@ def run_em(
         prev_T = new_T
         prev_mean_delta = mean_delta
 
+    # --- Stabilize oscillating sites before final decode ---
+    if freq_alpha > 0 and stabilize_count > 1:
+        freq_mean = freq_sum / stabilize_count
+        freq_var = freq_sq_sum / stabilize_count - freq_mean ** 2
+        site_max_var = freq_var.max(axis=0)
+        median_var = float(jnp.median(site_max_var))
+        threshold = max(median_var * _STABILIZE_MULT, 1e-6)
+        unstable = site_max_var > threshold
+        n_unstable = int(unstable.sum())
+        if n_unstable > 0:
+            stabilized = jnp.where(unstable[None, :], freq_mean, model.allele_freq)
+            model = AncestryModel(
+                n_ancestries=model.n_ancestries,
+                mu=model.mu,
+                gen_since_admix=model.gen_since_admix,
+                allele_freq=stabilized,
+                mismatch=model.mismatch,
+                gen_per_hap=model.gen_per_hap,
+                bucket_centers=model.bucket_centers,
+                bucket_assignments=model.bucket_assignments,
+                pattern_freq=model.pattern_freq,
+                block_data=model.block_data,
+            )
+            log.info("Stabilized %d/%d oscillating sites (var threshold=%.2e)",
+                     n_unstable, stabilized.shape[1], threshold)
+
     # --- Final decode (streaming — no full gamma materialised) ---
     log.info("Final forward-backward pass")
     if bd is not None and model.pattern_freq is not None:
@@ -816,6 +857,7 @@ def run_em(
         result = AncestryResult(
             calls=calls, model=model, chrom=chrom_data.chrom,
             decode=decode, posteriors=gamma,
+            spectral={"pca_proj": pca_proj, "gmm_labels": np.array(labels)},
         )
     else:
         if model.bucket_assignments is not None:
@@ -829,6 +871,7 @@ def run_em(
         result = AncestryResult(
             calls=decode.calls, model=model, chrom=chrom_data.chrom,
             decode=decode,
+            spectral={"pca_proj": pca_proj, "gmm_labels": np.array(labels)},
         )
 
     # Summary stats
@@ -919,7 +962,7 @@ def run_em_genome(
             d_morgan_j = jnp.array(chrom_data.genetic_distances)
 
             # Quick soft init for this chromosome's allele frequencies
-            _labels, resp, n_anc = seed_ancestry_soft(
+            _labels, resp, n_anc, _proj = seed_ancestry_soft(
                 chrom_data.geno,
                 n_ancestries=fitted_model.n_ancestries,
                 rng_seed=rng_seed,

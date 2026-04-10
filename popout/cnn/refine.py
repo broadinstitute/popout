@@ -168,7 +168,7 @@ def run_cnn(
     log.info("Stage 0: Spectral initialization")
     if stats is not None:
         stats.timer_start("spectral")
-    labels, responsibilities, n_anc = seed_ancestry_soft(
+    labels, responsibilities, n_anc, _pca_proj = seed_ancestry_soft(
         geno_np, n_ancestries=n_ancestries, rng_seed=rng_seed, stats=stats,
     )
     if stats is not None:
@@ -380,7 +380,7 @@ def run_cnn_genome(
             pos_cm_j = jnp.array(chrom_data.pos_cm.astype(np.float32))
 
             # Quick spectral init for chromosome-specific allele frequencies
-            _labels, resp, n_anc = seed_ancestry_soft(
+            _labels, resp, n_anc, _proj = seed_ancestry_soft(
                 chrom_data.geno,
                 n_ancestries=fitted_model.n_ancestries,
                 rng_seed=rng_seed,

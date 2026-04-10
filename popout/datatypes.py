@@ -261,3 +261,4 @@ class AncestryResult:
     chrom: str
     decode: Optional[DecodeResult] = None
     posteriors: Optional[jnp.ndarray] = None
+    spectral: Optional[dict] = None
