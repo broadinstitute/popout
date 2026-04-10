@@ -11,40 +11,29 @@ from pathlib import Path
 import numpy as np
 
 from ._style import (
-    CHROM_ORDER, ancestry_colors, chrom_sort_key, normalize_chrom, popout_style,
+    CHROM_ORDER, ancestry_colors, ancestry_names, chrom_sort_key,
+    normalize_chrom, popout_style,
 )
 from ._loaders import read_tracts
 
 
-def plot_ancestry_along_genome(
-    prefix: str | Path,
-    *,
+def _compute_windowed_ancestry(
+    tracts_path: Path,
     window_mb: float = 1.0,
-    figsize: tuple[float, float] = (18, 5),
-) -> "matplotlib.figure.Figure":
-    """Mean ancestry proportion along the genome (Manhattan-style).
+) -> tuple[
+    dict[str, dict[int, dict[int, float]]],
+    dict[str, dict[int, float]],
+]:
+    """Shared helper: compute per-window ancestry coverage from tracts.
 
-    Parameters
-    ----------
-    prefix : path prefix
-    window_mb : window size in Mb for binning
-    figsize : figure size
+    Returns (coverage, total_bp) dicts keyed by chrom -> bin -> ancestry -> bp.
     """
-    import matplotlib.pyplot as plt
-
-    prefix = Path(prefix)
-    tracts_path = prefix.with_name(prefix.name + ".tracts.tsv.gz")
     window_bp = int(window_mb * 1e6)
-
-    # Accumulate per-window ancestry coverage
-    # coverage[chrom][bin_idx][ancestry] = total bp coverage
     coverage: dict[str, dict[int, dict[int, float]]] = {}
     total_bp: dict[str, dict[int, float]] = {}
 
     for t in read_tracts(tracts_path):
         c = normalize_chrom(t.chrom)
-        tract_len = t.end_bp - t.start_bp
-        # Assign tract proportionally to overlapping windows
         bin_start = t.start_bp // window_bp
         bin_end = t.end_bp // window_bp
         for b in range(bin_start, bin_end + 1):
@@ -58,6 +47,32 @@ def plot_ancestry_along_genome(
             total_bp.setdefault(c, {})
             total_bp[c][b] = total_bp[c].get(b, 0) + overlap
 
+    return coverage, total_bp
+
+
+def plot_ancestry_along_genome(
+    prefix: str | Path,
+    *,
+    window_mb: float = 1.0,
+    labels: dict | None = None,
+    figsize: tuple[float, float] = (18, 5),
+) -> "matplotlib.figure.Figure":
+    """Mean ancestry proportion along the genome (Manhattan-style).
+
+    Parameters
+    ----------
+    prefix : path prefix
+    window_mb : window size in Mb for binning
+    labels : optional labels dict from read_labels_json()
+    figsize : figure size
+    """
+    import matplotlib.pyplot as plt
+
+    prefix = Path(prefix)
+    tracts_path = prefix.with_name(prefix.name + ".tracts.tsv.gz")
+
+    coverage, total_bp = _compute_windowed_ancestry(tracts_path, window_mb)
+
     if not coverage:
         raise ValueError("No tracts found")
 
@@ -68,11 +83,24 @@ def plot_ancestry_along_genome(
             all_anc.update(bin_data.keys())
     n_anc = max(all_anc) + 1
     colors = ancestry_colors(n_anc)
+    names = ancestry_names(n_anc, labels)
 
     chroms = sorted(
         [c for c in coverage.keys() if c in CHROM_ORDER],
         key=chrom_sort_key,
     )
+
+    # Compute genome-wide mean proportion per ancestry
+    total_cov = {a: 0.0 for a in range(n_anc)}
+    grand_total = 0.0
+    for chrom in chroms:
+        for b in coverage[chrom]:
+            tot = total_bp[chrom].get(b, 1)
+            grand_total += tot
+            for a in range(n_anc):
+                total_cov[a] += coverage[chrom][b].get(a, 0)
+    genome_means = {a: total_cov[a] / grand_total if grand_total > 0 else 0
+                    for a in range(n_anc)}
 
     with popout_style():
         fig, ax = plt.subplots(figsize=figsize)
@@ -94,8 +122,7 @@ def plot_ancestry_along_genome(
                     xs.append(offset + b * window_mb)
                     tot = total_bp[chrom].get(b, 1)
                     ys.append(coverage[chrom][b].get(a, 0) / tot)
-                ax.plot(xs, ys, color=colors[a], linewidth=0.6,
-                        alpha=0.7 if ci % 2 == 0 else 0.5)
+                ax.plot(xs, ys, color=colors[a], linewidth=1.5, alpha=0.9)
 
             mid = offset + (max_bin * window_mb) / 2
             tick_positions.append(mid)
@@ -103,8 +130,13 @@ def plot_ancestry_along_genome(
 
             # Separator
             sep_x = offset + (max_bin + 1) * window_mb
-            ax.axvline(sep_x, color="#DDDDDD", linewidth=0.3)
+            ax.axvline(sep_x, color="#CCCCCC", linewidth=0.5)
             offset = sep_x + window_mb
+
+        # Genome-wide mean horizontal lines
+        for a in range(n_anc):
+            ax.axhline(genome_means[a], color=colors[a], linestyle="--",
+                       linewidth=0.8, alpha=0.4)
 
         ax.set_xticks(tick_positions)
         ax.set_xticklabels(tick_labels, fontsize=7)
@@ -120,8 +152,7 @@ def plot_ancestry_along_genome(
             for a in range(n_anc)
         ]
         ax.legend(
-            legend_lines,
-            [f"Ancestry {a}" for a in range(n_anc)],
+            legend_lines, names,
             loc="upper right", fontsize=7, ncol=min(n_anc, 4),
         )
 
@@ -135,6 +166,7 @@ def plot_multi_individual(
     *,
     max_individuals: int = 500,
     window_mb: float = 1.0,
+    labels: dict | None = None,
     figsize: tuple[float, float] = (16, 10),
 ) -> "matplotlib.figure.Figure":
     """Multi-individual chromosome painting for one chromosome.
@@ -148,6 +180,7 @@ def plot_multi_individual(
     chrom : chromosome to plot
     max_individuals : maximum individuals to display
     window_mb : window size in Mb
+    labels : optional labels dict from read_labels_json()
     figsize : figure size
     """
     import matplotlib.pyplot as plt
@@ -157,7 +190,6 @@ def plot_multi_individual(
     window_bp = int(window_mb * 1e6)
 
     # Collect per-sample per-window dominant ancestry
-    # sample_data[sample][hap][bin_idx] = {ancestry: bp_coverage}
     sample_data: dict[str, dict[int, dict[int, dict[int, float]]]] = {}
     max_anc = 0
 
@@ -181,6 +213,7 @@ def plot_multi_individual(
 
     n_anc = max_anc + 1
     colors = ancestry_colors(n_anc)
+    names = ancestry_names(n_anc, labels)
 
     samples = sorted(sample_data.keys())
     # Determine global bin range
@@ -190,10 +223,9 @@ def plot_multi_individual(
             all_bins.update(hap_data.keys())
     n_bins = max(all_bins) + 1 if all_bins else 0
 
-    # Build haplotype-level matrix: dominant ancestry per window
-    # Each sample contributes 2 rows (hap 0, hap 1)
+    # Build haplotype-level matrix
     rows = []
-    row_dominant_ancestry = []  # for sorting
+    row_dominant_ancestry = []
     for s in samples:
         for hap in [0, 1]:
             hap_data = sample_data[s].get(hap, {})
@@ -247,8 +279,7 @@ def plot_multi_individual(
             for a in range(n_anc)
         ]
         ax.legend(
-            legend_patches,
-            [f"Ancestry {a}" for a in range(n_anc)],
+            legend_patches, names,
             loc="upper right", fontsize=7, ncol=min(n_anc, 4),
         )
         fig.tight_layout()

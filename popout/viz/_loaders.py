@@ -186,6 +186,22 @@ def read_spectral_npz(path: str | Path) -> dict[str, np.ndarray] | None:
 # File discovery
 # ---------------------------------------------------------------------------
 
+def read_labels_json(path: str | Path) -> dict:
+    """Read ``{prefix}.labels.json`` produced by ``popout label``.
+
+    Returns a dict with keys: label_map, merge_map, correlations, ref_names,
+    n_overlapping_sites.  ``label_map`` keys are converted to ``int``.
+    """
+    path = Path(path)
+    with open(path) as f:
+        raw = json.load(f)
+    # Ensure label_map keys are ints
+    raw["label_map"] = {int(k): v for k, v in raw["label_map"].items()}
+    if "correlations" in raw:
+        raw["correlations"] = np.array(raw["correlations"], dtype=np.float64)
+    return raw
+
+
 def discover_files(prefix: str | Path) -> dict[str, Path]:
     """Discover which output files exist for a given prefix.
 
@@ -200,5 +216,6 @@ def discover_files(prefix: str | Path) -> dict[str, Path]:
         "summary": prefix.with_name(prefix.name + ".summary.json"),
         "stats_jsonl": prefix.with_name(prefix.name + ".stats.jsonl"),
         "spectral_npz": prefix.with_name(prefix.name + ".spectral.npz"),
+        "labels_json": prefix.with_name(prefix.name + ".labels.json"),
     }
     return {k: v for k, v in candidates.items() if v.exists()}

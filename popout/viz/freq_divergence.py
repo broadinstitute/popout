@@ -9,23 +9,25 @@ from pathlib import Path
 
 import numpy as np
 
-from ._style import ancestry_colors, popout_style
+from ._style import ancestry_colors, ancestry_names, popout_style
 from ._loaders import read_model_npz
 
 
 def plot_freq_divergence(
     prefix: str | Path,
     *,
+    labels: dict | None = None,
     figsize: tuple[float, float] = (12, 5),
 ) -> "matplotlib.figure.Figure":
     """Allele frequency divergence between ancestry pairs.
 
-    Left panel: histogram of per-site mean pairwise |freq_a - freq_b|.
-    Right panel: pairwise mean divergence matrix.
+    Left panel: step-histogram of per-site |freq_a - freq_b| per pair.
+    Right panel: pairwise mean divergence heatmap.
 
     Parameters
     ----------
     prefix : path prefix or direct path to .model.npz
+    labels : optional labels dict from read_labels_json()
     figsize : figure size
     """
     import matplotlib.pyplot as plt
@@ -40,6 +42,7 @@ def plot_freq_divergence(
     freq = model["allele_freq"]  # (A, T)
     n_anc, n_sites = freq.shape
     colors = ancestry_colors(n_anc)
+    names = ancestry_names(n_anc, labels)
 
     # Compute pairwise divergence
     pairs = []
@@ -49,7 +52,7 @@ def plot_freq_divergence(
         for j in range(i + 1, n_anc):
             diff = np.abs(freq[i] - freq[j])
             pairs.append(diff)
-            pair_labels.append(f"{i} vs {j}")
+            pair_labels.append(f"{names[i]} vs {names[j]}")
             m = float(diff.mean())
             pair_means[i, j] = m
             pair_means[j, i] = m
@@ -57,11 +60,12 @@ def plot_freq_divergence(
     with popout_style():
         fig, axes = plt.subplots(1, 2, figsize=figsize)
 
-        # Left: histogram of per-site divergence for each pair
+        # Left: step histogram of per-site divergence for each pair
         ax = axes[0]
+        bins = np.linspace(0, 1, 51)
         for idx, (diff, label) in enumerate(zip(pairs, pair_labels)):
-            ax.hist(diff, bins=50, alpha=0.5, label=label,
-                    edgecolor="none", density=True)
+            ax.hist(diff, bins=bins, histtype="step", linewidth=1.5,
+                    label=label, density=True)
         ax.set_xlabel("|freq_a - freq_b|")
         ax.set_ylabel("Density")
         ax.set_title("Per-Site Frequency Divergence")
@@ -72,8 +76,8 @@ def plot_freq_divergence(
         im = ax.imshow(pair_means, cmap="YlOrRd", vmin=0)
         ax.set_xticks(range(n_anc))
         ax.set_yticks(range(n_anc))
-        ax.set_xticklabels([f"Anc {i}" for i in range(n_anc)], fontsize=7)
-        ax.set_yticklabels([f"Anc {i}" for i in range(n_anc)], fontsize=7)
+        ax.set_xticklabels(names, fontsize=7, rotation=45, ha="right")
+        ax.set_yticklabels(names, fontsize=7)
         ax.set_title("Mean Pairwise Divergence")
 
         # Annotate cells

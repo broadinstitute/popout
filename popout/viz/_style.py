@@ -34,6 +34,19 @@ def ancestry_colors(n: int) -> list[str]:
     return ANCESTRY_PALETTE[:n]
 
 
+def ancestry_names(n: int, labels: dict | None = None) -> list[str]:
+    """Return human-readable ancestry names.
+
+    If *labels* (from ``read_labels_json``) is provided and contains a
+    ``label_map``, uses population names (e.g. ``"EUR"``).  Otherwise
+    falls back to ``"Ancestry 0"``, ``"Ancestry 1"``, etc.
+    """
+    if labels and "label_map" in labels:
+        lm = labels["label_map"]
+        return [lm.get(i, lm.get(str(i), f"Ancestry {i}")) for i in range(n)]
+    return [f"Ancestry {i}" for i in range(n)]
+
+
 # GRCh38 autosome lengths (bp). Source: UCSC Genome Browser.
 CHROM_LENGTHS_GRCH38: dict[str, int] = {
     "chr1": 248956422, "chr2": 242193529, "chr3": 198295559,

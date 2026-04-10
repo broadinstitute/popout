@@ -11,7 +11,8 @@ from pathlib import Path
 import numpy as np
 
 from ._style import (
-    CHROM_ORDER, ancestry_colors, chrom_sort_key, normalize_chrom, popout_style,
+    CHROM_ORDER, ancestry_colors, ancestry_names, chrom_sort_key,
+    normalize_chrom, popout_style,
 )
 from ._loaders import (
     collect_tract_lengths_by_ancestry, read_model_text, read_tracts,
@@ -24,9 +25,13 @@ def plot_tract_lengths(
     n_bins: int = 80,
     log_scale: bool = True,
     show_theoretical: bool = True,
+    labels: dict | None = None,
     figsize: tuple[float, float] = (10, 6),
 ) -> "matplotlib.figure.Figure":
     """Tract length distribution per ancestry with optional exponential overlay.
+
+    Uses step histograms (unfilled outlines) so all ancestry distributions
+    are visible without occlusion.
 
     Parameters
     ----------
@@ -34,6 +39,7 @@ def plot_tract_lengths(
     n_bins : number of histogram bins
     log_scale : use log scale on y-axis
     show_theoretical : overlay theoretical exponential from fitted T and mu
+    labels : optional labels dict from read_labels_json()
     figsize : figure size
     """
     import matplotlib.pyplot as plt
@@ -47,6 +53,7 @@ def plot_tract_lengths(
 
     n_anc = max(lengths.keys()) + 1
     colors = ancestry_colors(n_anc)
+    names = ancestry_names(n_anc, labels)
 
     # Load model for theoretical overlay
     model = None
@@ -61,16 +68,14 @@ def plot_tract_lengths(
         all_lengths = np.concatenate([np.array(v) for v in lengths.values()])
         max_len = np.percentile(all_lengths, 99.5)
         bins = np.linspace(0, max_len, n_bins + 1)
-        bin_centers = (bins[:-1] + bins[1:]) / 2
-        bin_width = bins[1] - bins[0]
 
         for a in sorted(lengths.keys()):
             arr = np.array(lengths[a])
-            counts, _ = np.histogram(arr, bins=bins)
-            density = counts / (len(arr) * bin_width) if len(arr) > 0 else counts
-            ax.bar(
-                bin_centers, density, width=bin_width * 0.9,
-                color=colors[a], alpha=0.6, label=f"Ancestry {a} (n={len(arr):,})",
+            mean_len = float(arr.mean())
+            ax.hist(
+                arr, bins=bins, histtype="step", linewidth=2,
+                color=colors[a], density=True,
+                label=f"{names[a]} (n={len(arr):,}, mean={mean_len:.1f} Mb)",
             )
 
         # Theoretical exponential overlay
@@ -81,13 +86,11 @@ def plot_tract_lengths(
                 x = np.linspace(0.01, max_len, 300)
                 for a in sorted(lengths.keys()):
                     if a < len(mu):
-                        # Rate = T * (1 - mu[a]) per Morgan ≈ T * (1-mu[a]) / 100 per Mb
-                        # Tracts are in Mb; genetic distance ≈ 1 cM/Mb ≈ 0.01 M/Mb
                         rate = T * (1 - mu[a]) * 0.01  # per Mb
                         if rate > 0:
                             y = rate * np.exp(-rate * x)
-                            ax.plot(x, y, "--", color=colors[a], linewidth=2,
-                                    alpha=0.8)
+                            ax.plot(x, y, "--", color=colors[a], linewidth=1.5,
+                                    alpha=0.6)
 
         if log_scale:
             ax.set_yscale("log")
@@ -95,7 +98,7 @@ def plot_tract_lengths(
         ax.set_xlabel("Tract Length (Mb)")
         ax.set_ylabel("Density")
         ax.set_title("Ancestry Tract Length Distribution")
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=7)
         fig.tight_layout()
     return fig
 
@@ -104,6 +107,7 @@ def plot_switch_rate(
     prefix: str | Path,
     *,
     window_mb: float = 5.0,
+    labels: dict | None = None,
     figsize: tuple[float, float] = (16, 4),
 ) -> "matplotlib.figure.Figure":
     """Switch rate (ancestry transitions per Mb) along the genome.
@@ -112,6 +116,7 @@ def plot_switch_rate(
     ----------
     prefix : path prefix
     window_mb : window size in Mb for binning switches
+    labels : optional labels dict (unused currently, reserved)
     figsize : figure size
     """
     import matplotlib.pyplot as plt
@@ -142,6 +147,7 @@ def plot_switch_rate(
         offset = 0
         tick_positions = []
         tick_labels = []
+        all_rates = []
 
         for ci, chrom in enumerate(chroms):
             counts = switch_counts[chrom]
@@ -152,17 +158,24 @@ def plot_switch_rate(
             ys = []
             for b in range(max_bin + 1):
                 xs.append(offset + b * window_mb)
-                # Rate = switches per haplotype per Mb
-                ys.append(counts.get(b, 0) / (n_haps * window_mb))
+                rate = counts.get(b, 0) / (n_haps * window_mb)
+                ys.append(rate)
+                all_rates.append(rate)
 
             color = "#4477AA" if ci % 2 == 0 else "#AA3377"
-            ax.fill_between(xs, ys, alpha=0.5, color=color, linewidth=0)
-            ax.plot(xs, ys, color=color, linewidth=0.5, alpha=0.8)
+            ax.plot(xs, ys, color=color, linewidth=1.0, alpha=0.8)
 
             mid = offset + (max_bin * window_mb) / 2
             tick_positions.append(mid)
             tick_labels.append(chrom.replace("chr", ""))
             offset += (max_bin + 2) * window_mb
+
+        # Genome-wide mean switch rate
+        if all_rates:
+            mean_rate = float(np.mean(all_rates))
+            ax.axhline(mean_rate, color="gray", linestyle="--", linewidth=1,
+                       alpha=0.6, label=f"mean={mean_rate:.2f}")
+            ax.legend(fontsize=7)
 
         ax.set_xticks(tick_positions)
         ax.set_xticklabels(tick_labels, fontsize=7)
