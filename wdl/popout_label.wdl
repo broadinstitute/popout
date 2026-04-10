@@ -15,10 +15,10 @@ version 1.0
 
 task build_reference_task {
   input {
-    Array[File] kg_vcfs
-    File?       kg_panel
-    Float       min_maf      = 0.01
-    String      genome       = "GRCh38"
+    Array[File]+ kg_vcfs
+    File?        kg_panel
+    Float        min_maf      = 0.01
+    String       genome       = "GRCh38"
 
     # Runtime
     Int    cpu          = 4
@@ -34,10 +34,16 @@ task build_reference_task {
     set -euo pipefail
 
     echo "=== Building 1KG superpopulation reference ==="
-    echo "Input VCFs: ~{length(kg_vcfs)}"
+
+    # Write VCF paths to a file list for reliable shell handling
+    cat > vcf_list.txt <<'VCFEOF'
+    ~{sep='\n' kg_vcfs}
+    VCFEOF
+    sed -i 's/^[[:space:]]*//' vcf_list.txt
+    echo "Input VCFs: $(wc -l < vcf_list.txt)"
 
     popout build-ref \
-      --vcf ~{sep=' ' kg_vcfs} \
+      --vcf $(cat vcf_list.txt | tr '\n' ' ') \
       ~{if defined(kg_panel) then '--panel ~{kg_panel}' else ''} \
       --min-maf ~{min_maf} \
       --out "1kg_superpop_freq.~{genome}.tsv.gz"
@@ -125,9 +131,9 @@ workflow popout_label {
     File   tracts
 
     # Reference: provide ONE of these
-    File?       reference     # pre-built superpop freq TSV (fast — reuse across runs)
-    Array[File]? kg_vcfs      # 1KG Phase 3 VCFs (builds reference, then labels)
-    File?       kg_panel      # 1KG sample panel (auto-downloaded if omitted)
+    File?        reference     # pre-built superpop freq TSV (fast — reuse across runs)
+    Array[File]? kg_vcfs       # 1KG Phase 3 VCFs (builds reference, then labels)
+    File?        kg_panel      # 1KG sample panel (auto-downloaded if omitted)
 
     String output_prefix = "popout.labeled"
     String genome        = "GRCh38"
@@ -138,10 +144,10 @@ workflow popout_label {
   }
 
   # Build reference from 1KG VCFs if no pre-built reference provided
-  if (!defined(reference)) {
+  if (!defined(reference) && defined(kg_vcfs)) {
     call build_reference_task {
       input:
-        kg_vcfs      = select_first([kg_vcfs, []]),
+        kg_vcfs      = select_first([kg_vcfs]),
         kg_panel     = kg_panel,
         min_maf      = min_maf,
         genome       = genome,
@@ -149,7 +155,14 @@ workflow popout_label {
     }
   }
 
-  File ref_file = select_first([reference, build_reference_task.reference])
+  # Resolve: pre-built reference takes priority, then built reference
+  if (defined(reference)) {
+    File provided_ref = select_first([reference])
+  }
+  if (defined(build_reference_task.reference)) {
+    File built_ref = select_first([build_reference_task.reference])
+  }
+  File ref_file = select_first([provided_ref, built_ref])
 
   call popout_label_task {
     input:
