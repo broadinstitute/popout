@@ -2,13 +2,64 @@ version 1.0
 
 ## Label inferred ancestries using 1KG superpopulation reference frequencies.
 ##
-## Inputs: the .model.npz, .global.tsv, and .tracts.tsv.gz from a popout run,
-## plus a reference frequency file (built by scripts/build_1kg_ref.py).
+## One-stop workflow: provide either a pre-built reference frequency file OR
+## 1000 Genomes VCF(s) and the workflow will build the reference automatically.
+##
+## Inputs:
+##   - .model.npz, .global.tsv, .tracts.tsv.gz from a popout run
+##   - EITHER `reference` (pre-built superpop freq TSV, reusable across runs)
+##     OR `kg_vcfs` (1KG Phase 3 VCFs to build it from)
 ##
 ## Outputs: labeled versions of global and tracts files, plus a labels.json
 ## metadata report with correlation scores and assignment details.
-##
-## This is a CPU-only task — no GPU needed.
+
+task build_reference_task {
+  input {
+    Array[File] kg_vcfs
+    File?       kg_panel
+    Float       min_maf      = 0.01
+    String      genome       = "GRCh38"
+
+    # Runtime
+    Int    cpu          = 4
+    String memory       = "16 GB"
+    Int    extra_disk_gb = 20
+    String docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest"
+  }
+
+  Int vcf_size_gb = ceil(size(kg_vcfs, "GB"))
+  Int disk_size_gb = vcf_size_gb + extra_disk_gb
+
+  command <<<
+    set -euo pipefail
+
+    echo "=== Building 1KG superpopulation reference ==="
+    echo "Input VCFs: ~{length(kg_vcfs)}"
+
+    popout build-ref \
+      --vcf ~{sep=' ' kg_vcfs} \
+      ~{if defined(kg_panel) then '--panel ~{kg_panel}' else ''} \
+      --min-maf ~{min_maf} \
+      --out "1kg_superpop_freq.~{genome}.tsv.gz"
+
+    ls -lh 1kg_superpop_freq.*.tsv.gz
+  >>>
+
+  output {
+    File reference = "1kg_superpop_freq.~{genome}.tsv.gz"
+  }
+
+  runtime {
+    docker: docker_image
+    cpu:    cpu
+    memory: memory
+    disks:  "local-disk ~{disk_size_gb} SSD"
+  }
+
+  meta {
+    description: "Build superpopulation frequency reference from 1KG VCFs"
+  }
+}
 
 task popout_label_task {
   input {
@@ -68,31 +119,46 @@ task popout_label_task {
 
 workflow popout_label {
   input {
+    # popout outputs
     File   model_npz
     File   global_ancestry
     File   tracts
-    File   reference
+
+    # Reference: provide ONE of these
+    File?       reference     # pre-built superpop freq TSV (fast — reuse across runs)
+    Array[File]? kg_vcfs      # 1KG Phase 3 VCFs (builds reference, then labels)
+    File?       kg_panel      # 1KG sample panel (auto-downloaded if omitted)
+
     String output_prefix = "popout.labeled"
     String genome        = "GRCh38"
+    Float  min_maf       = 0.01
 
     # Runtime
-    Int    cpu          = 2
-    String memory       = "16 GB"
-    Int    extra_disk_gb = 20
-    String docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest"
+    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest"
   }
+
+  # Build reference from 1KG VCFs if no pre-built reference provided
+  if (!defined(reference)) {
+    call build_reference_task {
+      input:
+        kg_vcfs      = select_first([kg_vcfs, []]),
+        kg_panel     = kg_panel,
+        min_maf      = min_maf,
+        genome       = genome,
+        docker_image = docker_image
+    }
+  }
+
+  File ref_file = select_first([reference, build_reference_task.reference])
 
   call popout_label_task {
     input:
       model_npz       = model_npz,
       global_ancestry = global_ancestry,
       tracts          = tracts,
-      reference       = reference,
+      reference       = ref_file,
       output_prefix   = output_prefix,
       genome          = genome,
-      cpu             = cpu,
-      memory          = memory,
-      extra_disk_gb   = extra_disk_gb,
       docker_image    = docker_image
   }
 
@@ -100,5 +166,6 @@ workflow popout_label {
     File labeled_global = popout_label_task.labeled_global
     File labeled_tracts = popout_label_task.labeled_tracts
     File labels_json    = popout_label_task.labels_json
+    File? built_reference = build_reference_task.reference
   }
 }
