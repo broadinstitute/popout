@@ -155,14 +155,10 @@ workflow popout_label {
     }
   }
 
-  # Resolve: pre-built reference takes priority, then built reference
-  if (defined(reference)) {
-    File provided_ref = select_first([reference])
-  }
-  if (defined(build_reference_task.reference)) {
-    File built_ref = select_first([build_reference_task.reference])
-  }
-  File ref_file = select_first([provided_ref, built_ref])
+  # Resolve: user-provided reference takes priority; otherwise use the one we just built.
+  # Exactly one will be defined: either `reference` (user gave it) or
+  # `build_reference_task.reference` (we built it from kg_vcfs above).
+  File ref_file = select_first([reference, build_reference_task.reference])
 
   call popout_label_task {
     input:
