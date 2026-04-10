@@ -21,10 +21,14 @@ task popout_label_task {
 
     # Runtime
     Int    cpu          = 2
-    String memory       = "8 GB"
-    Int    disk_size_gb = 50
+    String memory       = "16 GB"
+    Int    extra_disk_gb = 20
     String docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest"
   }
+
+  Int tracts_size_gb = ceil(size(tracts, "GB"))
+  Int ref_size_gb    = ceil(size(reference, "GB"))
+  Int disk_size_gb   = 2 * tracts_size_gb + ref_size_gb + extra_disk_gb
 
   command <<<
     set -euo pipefail
@@ -73,8 +77,8 @@ workflow popout_label {
 
     # Runtime
     Int    cpu          = 2
-    String memory       = "8 GB"
-    Int    disk_size_gb = 50
+    String memory       = "16 GB"
+    Int    extra_disk_gb = 20
     String docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest"
   }
 
@@ -88,7 +92,7 @@ workflow popout_label {
       genome          = genome,
       cpu             = cpu,
       memory          = memory,
-      disk_size_gb    = disk_size_gb,
+      extra_disk_gb   = extra_disk_gb,
       docker_image    = docker_image
   }
 

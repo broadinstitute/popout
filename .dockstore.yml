@@ -17,3 +17,7 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /wdl/popout_report.wdl
     topic: Generate visualization report from popout LAI results
+  - name: popout-label
+    subclass: WDL
+    primaryDescriptorPath: /wdl/popout_label.wdl
+    topic: Label inferred ancestries using 1KG superpopulation reference
