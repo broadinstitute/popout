@@ -105,7 +105,7 @@ task gather_ref_task {
     REFS=(~{sep=' ' chrom_refs})
 
     # Header from first file, then data rows from all files
-    zcat "${REFS[0]}" | head -1 > combined.tsv
+    zgrep -m1 '^' "${REFS[0]}" > combined.tsv
     for f in "${REFS[@]}"; do
       zcat "$f" | tail -n +2 >> combined.tsv
     done
