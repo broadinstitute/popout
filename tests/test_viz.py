@@ -208,6 +208,18 @@ class TestVizPlots:
             assert path.exists()
             assert path.stat().st_size > 0
 
+    def test_gallery_parallel(self, synthetic_run, tmp_path):
+        """Parallel gallery produces the same plots as sequential."""
+        from popout.viz import generate_gallery
+        out_seq = tmp_path / "gallery_seq"
+        out_par = tmp_path / "gallery_par"
+        seq = generate_gallery(synthetic_run, out_seq, sample="SAMPLE_0", workers=1)
+        par = generate_gallery(synthetic_run, out_par, sample="SAMPLE_0", workers=2)
+        assert sorted(p.name for p in seq) == sorted(p.name for p in par)
+        for path in par:
+            assert path.exists()
+            assert path.stat().st_size > 0
+
 
 @pytest.fixture
 def synthetic_k3_run(tmp_path):

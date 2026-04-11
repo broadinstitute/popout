@@ -50,7 +50,7 @@ task popout_report_task {
     ls -lh ~{output_prefix}.*
 
     # ---- Build viz command ----
-    CMD="popout viz --prefix ~{output_prefix} --out report/ --format ~{format} --dpi ~{dpi}"
+    CMD="popout viz --prefix ~{output_prefix} --out report/ --format ~{format} --dpi ~{dpi} --workers ~{cpu}"
     ~{if defined(sample) then 'CMD="$CMD --sample ~{sample}"' else ''}
     ~{if defined(plots)  then 'CMD="$CMD --plots ~{plots}"'   else ''}
 

@@ -35,6 +35,48 @@ PLOT_REGISTRY = {
 }
 
 
+def _render_plot(
+    name: str,
+    module_name: str,
+    func_name: str,
+    prefix: str,
+    out_dir: str,
+    fmt: str,
+    dpi: int,
+    sample: str | None,
+    labels: dict | None,
+) -> str | None:
+    """Import, generate, and save a single plot. Returns output path or None."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)-12s %(levelname)-8s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    _log = logging.getLogger(__name__)
+
+    try:
+        mod = __import__(f"popout.viz.{module_name}", fromlist=[func_name])
+        func = getattr(mod, func_name)
+
+        if name == "karyogram":
+            fig = func(prefix, sample, labels=labels)
+        else:
+            fig = func(prefix, labels=labels)
+
+        out_path = Path(out_dir) / f"{name}.{fmt}"
+        fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
+        plt.close(fig)
+        _log.info("Generated: %s", out_path)
+        return str(out_path)
+    except Exception as e:
+        _log.warning("Failed to generate %s: %s", name, e)
+        return None
+
+
 def generate_gallery(
     prefix: str | Path,
     out_dir: str | Path,
@@ -44,6 +86,7 @@ def generate_gallery(
     plots: list[str] | None = None,
     sample: str | None = None,
     labels_path: str | Path | None = None,
+    workers: int = 1,
 ) -> list[Path]:
     """Generate all applicable plots for a popout run.
 
@@ -56,15 +99,12 @@ def generate_gallery(
     plots : optional list of plot names to generate (default: all applicable)
     sample : sample name for karyogram (required for karyogram, optional for others)
     labels_path : optional path to .labels.json from popout label
+    workers : number of parallel workers (1 = sequential)
 
     Returns
     -------
     List of paths to generated plot files.
     """
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
     prefix = Path(prefix)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -96,8 +136,8 @@ def generate_gallery(
         except Exception:
             pass
 
-    generated: list[Path] = []
-
+    # Filter to applicable plots
+    approved: list[tuple[str, str, str]] = []
     for name in requested:
         if name not in PLOT_REGISTRY:
             log.warning("Unknown plot: %s", name)
@@ -105,45 +145,57 @@ def generate_gallery(
 
         required_files, func_name, module_name = PLOT_REGISTRY[name]
 
-        # Check file requirements
         missing = [f for f in required_files if f not in available]
-        # labels_json requirement can be satisfied by labels param
         if missing == ["labels_json"] and labels is not None:
             missing = []
         if missing:
             log.info("Skipping %s: missing %s", name, ", ".join(missing))
             continue
 
-        # Skip ternary if K != 3
         if name == "ternary" and n_anc is not None and n_anc != 3:
             log.info("Skipping ternary: n_ancestries=%d (need 3)", n_anc)
             continue
 
-        # Skip karyogram if no sample specified
         if name == "karyogram" and sample is None:
             log.info("Skipping karyogram: no --sample specified")
             continue
 
-        try:
-            # Dynamic import
-            mod = __import__(f"popout.viz.{module_name}", fromlist=[func_name])
-            func = getattr(mod, func_name)
+        approved.append((name, func_name, module_name))
 
-            # Call with appropriate args
-            if name == "karyogram":
-                fig = func(prefix, sample, labels=labels)
-            elif name == "label_correlation":
-                fig = func(prefix, labels=labels)
-            else:
-                fig = func(prefix, labels=labels)
+    # Render plots
+    prefix_str = str(prefix)
+    out_dir_str = str(out_dir)
+    generated: list[Path] = []
 
-            out_path = out_dir / f"{name}.{fmt}"
-            fig.savefig(out_path, dpi=dpi, bbox_inches="tight")
-            plt.close(fig)
-            generated.append(out_path)
-            log.info("Generated: %s", out_path)
-        except Exception as e:
-            log.warning("Failed to generate %s: %s", name, e)
+    if workers > 1:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = {}
+            for name, func_name, module_name in approved:
+                future = executor.submit(
+                    _render_plot,
+                    name, module_name, func_name,
+                    prefix_str, out_dir_str, fmt, dpi, sample, labels,
+                )
+                futures[future] = name
+
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    result = future.result()
+                    if result is not None:
+                        generated.append(Path(result))
+                except Exception as e:
+                    log.warning("Failed to generate %s: %s", name, e)
+    else:
+        for name, func_name, module_name in approved:
+            result = _render_plot(
+                name, module_name, func_name,
+                prefix_str, out_dir_str, fmt, dpi, sample, labels,
+            )
+            if result is not None:
+                generated.append(Path(result))
 
     log.info("Generated %d plots in %s/", len(generated), out_dir)
     return generated
@@ -170,6 +222,9 @@ def viz_main(argv: list[str] | None = None) -> None:
     parser.add_argument("--labels", default=None,
                         help="Path to .labels.json from popout label "
                              "(auto-discovered if {prefix}.labels.json exists)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Number of parallel workers for plot generation "
+                             "(default: 1, sequential)")
 
     args = parser.parse_args(argv)
 
@@ -189,4 +244,5 @@ def viz_main(argv: list[str] | None = None) -> None:
         plots=plot_list,
         sample=args.sample,
         labels_path=args.labels,
+        workers=args.workers,
     )
