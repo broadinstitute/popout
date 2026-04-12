@@ -114,9 +114,9 @@ task filter_pgen_task {
 
 workflow filter_pgen {
   input {
-    Array[File] pgens
-    Array[File] pvars
-    Array[File] psams
+    File pgen
+    File pvar
+    File psam
 
     # QC filters
     Boolean apply_qc_filters = true
@@ -134,40 +134,38 @@ workflow filter_pgen {
 
     String  extra_args       = ""
 
-    # Resource overrides (per-task)
+    # Resource overrides
     Int?    cpu_override
     String? memory_override
     String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/vcf2pgen:0.1.0"
   }
 
-  scatter (idx in range(length(pgens))) {
-    call filter_pgen_task {
-      input:
-        pgen             = pgens[idx],
-        pvar             = pvars[idx],
-        psam             = psams[idx],
-        apply_qc_filters = apply_qc_filters,
-        chromosomes      = chromosomes,
-        min_alleles      = min_alleles,
-        max_alleles      = max_alleles,
-        snps_only        = snps_only,
-        var_filter       = var_filter,
-        maf              = maf,
-        geno             = geno,
-        set_all_var_ids  = set_all_var_ids,
-        rm_dup           = rm_dup,
-        extract          = extract,
-        extra_args       = extra_args,
-        cpu_override     = cpu_override,
-        memory_override  = memory_override,
-        docker_image     = docker_image
-    }
+  call filter_pgen_task {
+    input:
+      pgen             = pgen,
+      pvar             = pvar,
+      psam             = psam,
+      apply_qc_filters = apply_qc_filters,
+      chromosomes      = chromosomes,
+      min_alleles      = min_alleles,
+      max_alleles      = max_alleles,
+      snps_only        = snps_only,
+      var_filter       = var_filter,
+      maf              = maf,
+      geno             = geno,
+      set_all_var_ids  = set_all_var_ids,
+      rm_dup           = rm_dup,
+      extract          = extract,
+      extra_args       = extra_args,
+      cpu_override     = cpu_override,
+      memory_override  = memory_override,
+      docker_image     = docker_image
   }
 
   output {
-    Array[File] filtered_pgens = filter_pgen_task.filtered_pgen
-    Array[File] filtered_pvars = filter_pgen_task.filtered_pvar
-    Array[File] filtered_psams = filter_pgen_task.filtered_psam
-    Array[File] logs           = filter_pgen_task.log
+    File filtered_pgen = filter_pgen_task.filtered_pgen
+    File filtered_pvar = filter_pgen_task.filtered_pvar
+    File filtered_psam = filter_pgen_task.filtered_psam
+    File log           = filter_pgen_task.log
   }
 }
