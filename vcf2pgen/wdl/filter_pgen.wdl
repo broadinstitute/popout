@@ -76,7 +76,7 @@ task filter_pgen_task {
         ARGS+=(--var-filter)
       fi
       ARGS+=(--maf ~{maf} --geno ~{geno})
-      if [ -n "~{set_all_var_ids}" ]; then
+      if [ -n '~{set_all_var_ids}' ]; then
         ARGS+=(--set-all-var-ids '~{set_all_var_ids}')
       fi
       if [ -n "~{rm_dup}" ]; then
