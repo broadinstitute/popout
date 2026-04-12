@@ -12,8 +12,7 @@ version 1.0
 ## cpu_override / memory_override if needed.
 ##
 ## Usage on Terra:
-##   - Single chromosome: call vcf_to_pgen_task directly
-##   - All chromosomes: call vcf_to_pgen workflow with Array[File] of VCFs
+##   Scatter across chromosomes via data table rows, one VCF per row.
 
 task vcf_to_pgen_task {
   input {
@@ -119,7 +118,7 @@ task vcf_to_pgen_task {
 
 workflow vcf_to_pgen {
   input {
-    Array[File] vcfs
+    File vcf
 
     # QC filters
     Boolean apply_qc_filters = true
@@ -137,38 +136,36 @@ workflow vcf_to_pgen {
 
     String  extra_args       = ""
 
-    # Resource overrides (per-task)
+    # Resource overrides
     Int?    cpu_override
     String? memory_override
     String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/vcf2pgen:0.1.0"
   }
 
-  scatter (vcf in vcfs) {
-    call vcf_to_pgen_task {
-      input:
-        vcf              = vcf,
-        apply_qc_filters = apply_qc_filters,
-        chromosomes      = chromosomes,
-        min_alleles      = min_alleles,
-        max_alleles      = max_alleles,
-        snps_only        = snps_only,
-        var_filter       = var_filter,
-        maf              = maf,
-        geno             = geno,
-        set_all_var_ids  = set_all_var_ids,
-        rm_dup           = rm_dup,
-        extract          = extract,
-        extra_args       = extra_args,
-        cpu_override     = cpu_override,
-        memory_override  = memory_override,
-        docker_image     = docker_image
-    }
+  call vcf_to_pgen_task {
+    input:
+      vcf              = vcf,
+      apply_qc_filters = apply_qc_filters,
+      chromosomes      = chromosomes,
+      min_alleles      = min_alleles,
+      max_alleles      = max_alleles,
+      snps_only        = snps_only,
+      var_filter       = var_filter,
+      maf              = maf,
+      geno             = geno,
+      set_all_var_ids  = set_all_var_ids,
+      rm_dup           = rm_dup,
+      extract          = extract,
+      extra_args       = extra_args,
+      cpu_override     = cpu_override,
+      memory_override  = memory_override,
+      docker_image     = docker_image
   }
 
   output {
-    Array[File] pgens = vcf_to_pgen_task.pgen
-    Array[File] pvars = vcf_to_pgen_task.pvar
-    Array[File] psams = vcf_to_pgen_task.psam
-    Array[File] logs  = vcf_to_pgen_task.log
+    File pgen = vcf_to_pgen_task.pgen
+    File pvar = vcf_to_pgen_task.pvar
+    File psam = vcf_to_pgen_task.psam
+    File log  = vcf_to_pgen_task.log
   }
 }
