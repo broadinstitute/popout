@@ -17,6 +17,7 @@ task popout_report_task {
     File   summary
     File?  stats_jsonl
     File?  spectral_npz
+    File?  labels_json     # .labels.json from popout label (names ancestries in plots)
     String output_prefix = "popout"
 
     # Visualization options
@@ -45,6 +46,7 @@ task popout_report_task {
 
     ~{if defined(stats_jsonl)   then 'ln -sf ~{stats_jsonl}   ~{output_prefix}.stats.jsonl'   else ''}
     ~{if defined(spectral_npz)  then 'ln -sf ~{spectral_npz}  ~{output_prefix}.spectral.npz'  else ''}
+    ~{if defined(labels_json)   then 'ln -sf ~{labels_json}   ~{output_prefix}.labels.json'   else ''}
 
     echo "=== Input files ==="
     ls -lh ~{output_prefix}.*
@@ -53,6 +55,7 @@ task popout_report_task {
     CMD="popout viz --prefix ~{output_prefix} --out report/ --format ~{format} --dpi ~{dpi} --workers ~{cpu}"
     ~{if defined(sample) then 'CMD="$CMD --sample ~{sample}"' else ''}
     ~{if defined(plots)  then 'CMD="$CMD --plots ~{plots}"'   else ''}
+    ~{if defined(labels_json) then 'CMD="$CMD --labels ~{output_prefix}.labels.json"' else ''}
 
     echo "=== Running: $CMD ==="
     eval "$CMD"
@@ -90,6 +93,7 @@ workflow popout_report {
     File   summary
     File?  stats_jsonl
     File?  spectral_npz
+    File?  labels_json
     String output_prefix = "popout"
 
     # Visualization options
@@ -114,6 +118,7 @@ workflow popout_report {
       summary         = summary,
       stats_jsonl     = stats_jsonl,
       spectral_npz    = spectral_npz,
+      labels_json     = labels_json,
       output_prefix   = output_prefix,
       format          = format,
       dpi             = dpi,
