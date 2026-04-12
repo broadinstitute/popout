@@ -1,24 +1,19 @@
 version 1.0
 
-## Convert phased VCF files to PGEN format for use with popout.
+## Filter existing PGEN files (biallelic SNPs, common variants).
 ##
-## By default, applies strict QC filters during conversion (single plink2 pass):
-##   --chr 1-22 --min-alleles 2 --max-alleles 2 --snps-only just-acgt
-##   --var-filter --maf 0.01 --geno 0.01 --set-all-var-ids @:#:$r:$a
-##   --rm-dup exclude-all
-## Set apply_qc_filters = false for unfiltered conversion.
+## Applies the same QC filters as vcf_to_pgen but reads from --pfile
+## instead of --vcf.  Useful for filtering PGENs that were converted
+## without QC, or for re-filtering with different thresholds.
 ##
-## Resources auto-scale based on VCF file size.  Override with
-## cpu_override / memory_override if needed.
-##
-## Usage on Terra:
-##   - Single chromosome: call vcf_to_pgen_task directly
-##   - All chromosomes: call vcf_to_pgen workflow with Array[File] of VCFs
+## Resources auto-scale based on PGEN file size.
 
-task vcf_to_pgen_task {
+task filter_pgen_task {
   input {
-    File   vcf
-    String output_prefix = basename(vcf, ".vcf.gz")
+    File   pgen
+    File   pvar
+    File   psam
+    String output_prefix = basename(pgen, ".pgen") + ".filtered"
 
     # QC filters — defaults match popout pipeline requirements
     Boolean apply_qc_filters = true
@@ -35,38 +30,39 @@ task vcf_to_pgen_task {
     # Optional variant extraction list
     File?   extract
 
-    # Additional plink2 flags (e.g., --keep)
+    # Additional plink2 flags
     String extra_args = ""
 
-    # Resource overrides — leave unset for auto-scaling by VCF size
+    # Resource overrides — leave unset for auto-scaling by PGEN size
     Int?    cpu_override
     String? memory_override
     String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/vcf2pgen:0.1.0"
   }
 
-  Float vcf_gb = size(vcf, "GB")
+  Float pgen_gb = size(pgen, "GB")
 
-  # Auto-scale: bigger VCFs get more CPU + memory
-  #   < 10 GB  →  8 CPU,  32 GB  (chr20-22)
-  #   10-30 GB → 16 CPU,  64 GB  (chr10-19)
-  #   30-60 GB → 32 CPU, 128 GB  (chr3-9)
-  #   > 60 GB  → 64 CPU, 256 GB  (chr1-2)
-  Int auto_cpu = if vcf_gb > 60.0 then 64
-                 else if vcf_gb > 30.0 then 32
-                 else if vcf_gb > 10.0 then 16
+  Int auto_cpu = if pgen_gb > 60.0 then 64
+                 else if pgen_gb > 30.0 then 32
+                 else if pgen_gb > 10.0 then 16
                  else 8
 
-  String auto_memory = if vcf_gb > 60.0 then "256 GB"
-                       else if vcf_gb > 30.0 then "128 GB"
-                       else if vcf_gb > 10.0 then "64 GB"
+  String auto_memory = if pgen_gb > 60.0 then "256 GB"
+                       else if pgen_gb > 30.0 then "128 GB"
+                       else if pgen_gb > 10.0 then "64 GB"
                        else "32 GB"
 
   Int    cpu         = select_first([cpu_override, auto_cpu])
   String memory      = select_first([memory_override, auto_memory])
-  Int    disk_size_gb = ceil(vcf_gb * 3) + 100
+  Int    disk_size_gb = ceil(pgen_gb * 3) + 100
 
   command <<<
     set -euo pipefail
+
+    # Co-locate pfile triplet (Terra may scatter them across directories)
+    INPUT_PREFIX="input_pfile"
+    ln -sf ~{pgen} "${INPUT_PREFIX}.pgen"
+    ln -sf ~{pvar} "${INPUT_PREFIX}.pvar"
+    ln -sf ~{psam} "${INPUT_PREFIX}.psam"
 
     ARGS=()
 
@@ -89,7 +85,7 @@ task vcf_to_pgen_task {
     fi
 
     plink2 \
-      --vcf ~{vcf} \
+      --pfile "${INPUT_PREFIX}" \
       --make-pgen \
       --out ~{output_prefix} \
       --threads ~{cpu} \
@@ -97,16 +93,15 @@ task vcf_to_pgen_task {
       ~{"--extract " + extract} \
       ~{extra_args}
 
-    # Log output sizes and filter summary
     ls -lh ~{output_prefix}.{pgen,pvar,psam}
     grep -E '(variants loaded|remaining after)' ~{output_prefix}.log || true
   >>>
 
   output {
-    File pgen = "~{output_prefix}.pgen"
-    File pvar = "~{output_prefix}.pvar"
-    File psam = "~{output_prefix}.psam"
-    File log  = "~{output_prefix}.log"
+    File filtered_pgen = "~{output_prefix}.pgen"
+    File filtered_pvar = "~{output_prefix}.pvar"
+    File filtered_psam = "~{output_prefix}.psam"
+    File log           = "~{output_prefix}.log"
   }
 
   runtime {
@@ -117,9 +112,11 @@ task vcf_to_pgen_task {
   }
 }
 
-workflow vcf_to_pgen {
+workflow filter_pgen {
   input {
-    Array[File] vcfs
+    Array[File] pgens
+    Array[File] pvars
+    Array[File] psams
 
     # QC filters
     Boolean apply_qc_filters = true
@@ -143,10 +140,12 @@ workflow vcf_to_pgen {
     String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/vcf2pgen:0.1.0"
   }
 
-  scatter (vcf in vcfs) {
-    call vcf_to_pgen_task {
+  scatter (idx in range(length(pgens))) {
+    call filter_pgen_task {
       input:
-        vcf              = vcf,
+        pgen             = pgens[idx],
+        pvar             = pvars[idx],
+        psam             = psams[idx],
         apply_qc_filters = apply_qc_filters,
         chromosomes      = chromosomes,
         min_alleles      = min_alleles,
@@ -166,9 +165,9 @@ workflow vcf_to_pgen {
   }
 
   output {
-    Array[File] pgens = vcf_to_pgen_task.pgen
-    Array[File] pvars = vcf_to_pgen_task.pvar
-    Array[File] psams = vcf_to_pgen_task.psam
-    Array[File] logs  = vcf_to_pgen_task.log
+    Array[File] filtered_pgens = filter_pgen_task.filtered_pgen
+    Array[File] filtered_pvars = filter_pgen_task.filtered_pvar
+    Array[File] filtered_psams = filter_pgen_task.filtered_psam
+    Array[File] logs           = filter_pgen_task.log
   }
 }

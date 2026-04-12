@@ -79,29 +79,6 @@ task popout_task {
     echo "=== Localized PGEN files ==="
     ls -lh pgen_dir/
 
-    # ---- QC: biallelic SNPs, common variants only ----
-    # pgenlib (v0.94) can't read multiallelic+phased PGENs, and its count()
-    # returns wrong values for plink2-filtered files.  Offload all variant
-    # QC to plink2 which is proven correct at biobank scale.
-    mkdir -p pgen_biallelic
-    for pf in pgen_dir/*.pgen; do
-      base=$(basename "$pf" .pgen)
-      plink2 --pfile "pgen_dir/${base}" \
-             --max-alleles 2 \
-             --snps-only just-acgt \
-             --maf 0.005 \
-             --mac 50 \
-             --make-pgen \
-             --out "pgen_biallelic/${base}" \
-             --threads "$(nproc)" \
-             --memory "$(free -m | awk '/Mem:/{print int($7*0.8)}')"
-    done
-    # Use the filtered files from now on
-    rm -rf pgen_dir
-    mv pgen_biallelic pgen_dir
-    echo "=== After biallelic filter ==="
-    ls -lh pgen_dir/
-
     # ---- GPU check ----
     nvidia-smi || echo "WARNING: nvidia-smi failed"
 
