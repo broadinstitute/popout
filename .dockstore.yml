@@ -1,6 +1,10 @@
 version: 1.2
 
 workflows:
+  - name: filter-pgen
+    subclass: WDL
+    primaryDescriptorPath: /vcf2pgen/wdl/filter_pgen.wdl
+    topic: Filter pre-converted PGEN files for popout
   - name: vcf-to-pgen
     subclass: WDL
     primaryDescriptorPath: /vcf2pgen/wdl/vcf_to_pgen.wdl
