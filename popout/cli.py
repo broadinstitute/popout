@@ -23,6 +23,9 @@ from pathlib import Path
 
 
 def main(argv: list[str] | None = None) -> None:
+    from . import __version__
+    print(f"popout {__version__}", file=sys.stderr)
+
     # Dispatch subcommands before parsing main args
     raw_args = argv if argv is not None else sys.argv[1:]
     if raw_args and raw_args[0] == "report":
@@ -235,9 +238,6 @@ def main(argv: list[str] | None = None) -> None:
         datefmt="%H:%M:%S",
     )
     log = logging.getLogger("popout")
-
-    from . import __version__
-    log.info("popout %s", __version__)
 
     # --- Check JAX backend ---
     import jax
