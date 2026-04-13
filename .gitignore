@@ -1,5 +1,5 @@
 my_notes
 push.sh
 cloud
-popout/_version.py
+build/
 *.egg-info

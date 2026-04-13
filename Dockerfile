@@ -38,7 +38,7 @@ RUN pip install --no-cache-dir --upgrade pip setuptools
 
 # ---- Git version (pass at build time) ----
 # Usage: docker build --build-arg GIT_VERSION=$(git describe --tags --always --dirty | sed 's/^v//') ...
-ARG GIT_VERSION=0.0.0+unknown
+ARG GIT_VERSION
 
 # ---- Install dependencies (cached unless pyproject.toml changes) ----
 # This is the expensive layer (~3 GB for JAX+CUDA wheels).  By installing
@@ -47,15 +47,15 @@ ARG GIT_VERSION=0.0.0+unknown
 WORKDIR /app
 COPY pyproject.toml .
 RUN mkdir -p popout && touch popout/__init__.py \
-    && SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0 \
-       pip install --no-cache-dir ".[dev,monitor]" \
+    && pip install --no-cache-dir ".[dev,monitor]" \
     && rm -rf popout
 
 # ---- Install popout (code-only, fast) ----
 COPY popout/ popout/
-RUN printf '__version__ = version = "%s"\n' "${GIT_VERSION}" > popout/_version.py \
-    && SETUPTOOLS_SCM_PRETEND_VERSION="${GIT_VERSION}" \
-       pip install --no-cache-dir --no-deps .
+RUN if [ -n "${GIT_VERSION}" ]; then \
+        sed -i "s/^__version__ = .*/__version__ = \"${GIT_VERSION}\"/" popout/__init__.py; \
+    fi \
+    && pip install --no-cache-dir --no-deps .
 
 # ---- Runtime config ----
 # Tell JAX to pre-allocate 90% of GPU memory (avoids fragmentation)

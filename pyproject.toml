@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68.0", "setuptools-scm>=8"]
+requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "popout"
-dynamic = ["version"]
+version = "0.3.1"
 description = "GPU-accelerated self-bootstrapping local ancestry inference"
 requires-python = ">=3.10"
 dependencies = [
@@ -25,6 +25,3 @@ popout = "popout.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["popout*"]
-
-[tool.setuptools_scm]
-version_file = "popout/_version.py"
