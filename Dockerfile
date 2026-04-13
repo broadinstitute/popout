@@ -36,6 +36,10 @@ RUN python3 -m venv /opt/popout
 ENV PATH="/opt/popout/bin:$PATH"
 RUN pip install --no-cache-dir --upgrade pip setuptools
 
+# ---- Git version (pass at build time) ----
+ARG SETUPTOOLS_SCM_PRETEND_VERSION=0.0.0+gunknown
+ENV SETUPTOOLS_SCM_PRETEND_VERSION=${SETUPTOOLS_SCM_PRETEND_VERSION}
+
 # ---- Install dependencies (cached unless pyproject.toml changes) ----
 # This is the expensive layer (~3 GB for JAX+CUDA wheels).  By installing
 # deps before copying source code, Docker caches this layer across

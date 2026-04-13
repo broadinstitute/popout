@@ -236,6 +236,9 @@ def main(argv: list[str] | None = None) -> None:
     )
     log = logging.getLogger("popout")
 
+    from . import __version__
+    log.info("popout %s", __version__)
+
     # --- Check JAX backend ---
     import jax
     devices = jax.devices()

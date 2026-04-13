@@ -85,7 +85,10 @@ def plot_admixture(
         )
         ax.set_xlim(0, n_display)
         ax.set_ylim(0, 1)
-        ax.set_xlabel(f"Samples (n={n_samples:,}, sorted by ancestry)")
+        if n_display < n_samples:
+            ax.set_xlabel(f"Samples ({n_display:,} of {n_samples:,}, sorted by ancestry)")
+        else:
+            ax.set_xlabel(f"Samples (n={n_samples:,}, sorted by ancestry)")
         ax.set_ylabel("Ancestry Proportion")
 
         if title is None:
