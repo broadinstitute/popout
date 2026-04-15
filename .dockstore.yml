@@ -1,14 +1,22 @@
 version: 1.2
 
 workflows:
-  - name: filter-pgen
-    subclass: WDL
-    primaryDescriptorPath: /vcf2pgen/wdl/filter_pgen.wdl
-    topic: Filter pre-converted PGEN files for popout
   - name: vcf-to-pgen
     subclass: WDL
     primaryDescriptorPath: /vcf2pgen/wdl/vcf_to_pgen.wdl
-    topic: Convert phased VCF files to PGEN format for popout
+    topic: Convert phased VCF files to PGEN format
+  - name: filter-pgen
+    subclass: WDL
+    primaryDescriptorPath: /vcf2pgen/wdl/filter_pgen.wdl
+    topic: Filter PGEN files with configurable plink2 QC profiles
+  - name: kinship-matrix
+    subclass: WDL
+    primaryDescriptorPath: /vcf2pgen/wdl/kinship_matrix.wdl
+    topic: Compute KING-robust kinship matrix from PGEN files
+  - name: kinship-prune
+    subclass: WDL
+    primaryDescriptorPath: /vcf2pgen/wdl/kinship_prune.wdl
+    topic: Generate sample exclusion list from KING kinship analysis
   - name: gpu-probe
     subclass: WDL
     primaryDescriptorPath: /gpu_probe/wdl/gpu_probe.wdl
