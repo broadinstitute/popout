@@ -41,21 +41,20 @@ RUN pip install --no-cache-dir --upgrade pip setuptools
 ARG GIT_VERSION
 
 # ---- Install dependencies (cached unless pyproject.toml changes) ----
-# This is the expensive layer (~3 GB for JAX+CUDA wheels).  By installing
-# deps before copying source code, Docker caches this layer across
-# code-only changes — turning multi-minute rebuilds into seconds.
+# This is the expensive layer (~3 GB for JAX+CUDA wheels).  Editable
+# install (-e) creates an entry point and .pth that resolves imports
+# from /app/popout/ directly — so the code-only layer below needs no
+# pip install at all, just a COPY.
 WORKDIR /app
 COPY pyproject.toml .
-RUN mkdir -p popout && touch popout/__init__.py \
-    && pip install --no-cache-dir ".[dev,monitor]" \
-    && rm -rf popout
+RUN mkdir -p popout && echo '__version__ = "0.0.0"' > popout/__init__.py \
+    && pip install --no-cache-dir -e ".[dev,monitor]"
 
-# ---- Install popout (code-only, fast) ----
+# ---- Install popout (code-only, instant) ----
 COPY popout/ popout/
 RUN if [ -n "${GIT_VERSION}" ]; then \
         sed -i "s/^__version__ = .*/__version__ = \"${GIT_VERSION}\"/" popout/__init__.py; \
-    fi \
-    && pip install --no-cache-dir --no-deps .
+    fi
 
 # ---- Runtime config ----
 # Tell JAX to pre-allocate 90% of GPU memory (avoids fragmentation)

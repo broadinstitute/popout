@@ -1,12 +1,13 @@
 version 1.0
 
-## Filter existing PGEN files (biallelic SNPs, common variants).
-##
-## Applies the same QC filters as vcf_to_pgen but reads from --pfile
-## instead of --vcf.  Useful for filtering PGENs that were converted
-## without QC, or for re-filtering with different thresholds.
+## Filter PGEN files with plink2.  Each filter is individually optional —
+## undefined inputs are not passed to plink2.  Combine inputs to build
+## different filter profiles for downstream analysis.
 ##
 ## Resources auto-scale based on PGEN file size.
+##
+## Usage on Terra:
+##   Scatter across chromosomes via data table rows, one PGEN per row.
 
 task filter_pgen_task {
   input {
@@ -15,25 +16,36 @@ task filter_pgen_task {
     File   psam
     String output_prefix = basename(pgen, ".pgen") + ".filtered"
 
-    # QC filters — defaults match popout pipeline requirements
-    Boolean apply_qc_filters = true
-    String  chromosomes      = "1-22"
-    Int     min_alleles      = 2
-    Int     max_alleles      = 2
-    String  snps_only        = "just-acgt"
-    Boolean var_filter       = true
-    Float   maf              = 0.01
-    Float   geno             = 0.01
-    String  set_all_var_ids  = "@:#:$r:$a"
-    String  rm_dup           = "exclude-all"
+    # ---- Variant-type filters ----
+    String?  chromosomes                        # --chr, e.g. "1-22"
+    Int?     min_alleles                        # --min-alleles
+    Int?     max_alleles                        # --max-alleles
+    String?  snps_only                          # --snps-only, e.g. "just-acgt"
+    Boolean  exclude_palindromic_snps = false   # --exclude-palindromic-snps
 
-    # Optional variant extraction list
-    File?   extract
+    # ---- Quality filters ----
+    Boolean  var_filter = true                  # --var-filter (exclude FILTER!=PASS)
+    Float?   maf                                # --maf
+    Float?   geno                               # --geno (variant missingness)
+    Float?   mind                               # --mind (sample missingness)
+    Float?   hwe                                # --hwe <threshold> [modifier]
+    String   hwe_modifier = "keep-fewhet"       # modifier for --hwe
 
-    # Additional plink2 flags
+    # ---- Variant ID normalization ----
+    String?  set_all_var_ids                    # --set-all-var-ids, e.g. "@:#:$r:$a"
+    String?  rm_dup                             # --rm-dup, e.g. "exclude-all"
+
+    # ---- Include/exclude lists ----
+    File?        extract                        # --extract <variant list>
+    File?        exclude                        # --exclude <variant list>
+    File?        remove                         # --remove <sample list>
+    File?        keep                           # --keep <sample list>
+    Array[File]  exclude_range_beds = []        # BED files concatenated into --exclude range
+
+    # ---- Escape hatch ----
     String extra_args = ""
 
-    # Resource overrides — leave unset for auto-scaling by PGEN size
+    # ---- Resources ----
     Int?    cpu_override
     String? memory_override
     String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/vcf2pgen:0.1.0"
@@ -66,22 +78,46 @@ task filter_pgen_task {
 
     ARGS=()
 
-    if [ "~{apply_qc_filters}" = "true" ]; then
-      ARGS+=(--chr ~{chromosomes})
-      ARGS+=(--min-alleles ~{min_alleles} --max-alleles ~{max_alleles})
-      if [ -n "~{snps_only}" ]; then
-        ARGS+=(--snps-only '~{snps_only}')
+    # -- Variant-type filters --
+    ~{if defined(chromosomes) then 'ARGS+=(--chr ~{chromosomes})'                     else ''}
+    ~{if defined(min_alleles) then 'ARGS+=(--min-alleles ~{min_alleles})'             else ''}
+    ~{if defined(max_alleles) then 'ARGS+=(--max-alleles ~{max_alleles})'             else ''}
+    ~{if defined(snps_only)   then "ARGS+=(--snps-only '~{snps_only}')"               else ''}
+    ~{if exclude_palindromic_snps then 'ARGS+=(--exclude-palindromic-snps)'           else ''}
+
+    # -- Quality filters --
+    ~{if var_filter    then 'ARGS+=(--var-filter)'    else ''}
+    ~{if defined(maf)  then 'ARGS+=(--maf ~{maf})'   else ''}
+    ~{if defined(geno) then 'ARGS+=(--geno ~{geno})' else ''}
+    ~{if defined(mind) then 'ARGS+=(--mind ~{mind})' else ''}
+
+    # HWE: compound flag (threshold + optional modifier)
+    if [ -n "~{default='' hwe}" ]; then
+      if [ -n "~{hwe_modifier}" ]; then
+        ARGS+=(--hwe ~{hwe} '~{hwe_modifier}')
+      else
+        ARGS+=(--hwe ~{hwe})
       fi
-      if [ "~{var_filter}" = "true" ]; then
-        ARGS+=(--var-filter)
-      fi
-      ARGS+=(--maf ~{maf} --geno ~{geno})
-      if [ -n '~{set_all_var_ids}' ]; then
-        ARGS+=(--set-all-var-ids '~{set_all_var_ids}')
-      fi
-      if [ -n "~{rm_dup}" ]; then
-        ARGS+=(--rm-dup ~{rm_dup})
-      fi
+    fi
+
+    # -- Variant ID normalization --
+    # Single quotes protect $r/$a from bash expansion under set -u
+    if [ -n '~{default="" set_all_var_ids}' ]; then
+      ARGS+=(--set-all-var-ids '~{set_all_var_ids}')
+    fi
+    ~{if defined(rm_dup) then 'ARGS+=(--rm-dup ~{rm_dup})' else ''}
+
+    # -- Include/exclude lists --
+    ~{if defined(extract) then 'ARGS+=(--extract ~{extract})' else ''}
+    ~{if defined(exclude) then 'ARGS+=(--exclude ~{exclude})' else ''}
+    ~{if defined(remove)  then 'ARGS+=(--remove ~{remove})'   else ''}
+    ~{if defined(keep)    then 'ARGS+=(--keep ~{keep})'        else ''}
+
+    # Region exclusion: concatenate multiple BED files for --exclude range
+    BEDS=(~{sep=' ' exclude_range_beds})
+    if [ "${#BEDS[@]}" -gt 0 ]; then
+      cat "${BEDS[@]}" > combined_exclude_ranges.bed
+      ARGS+=(--exclude range combined_exclude_ranges.bed)
     fi
 
     plink2 \
@@ -90,7 +126,6 @@ task filter_pgen_task {
       --out ~{output_prefix} \
       --threads ~{cpu} \
       "${ARGS[@]}" \
-      ~{"--extract " + extract} \
       ~{extra_args}
 
     ls -lh ~{output_prefix}.{pgen,pvar,psam}
@@ -114,27 +149,39 @@ task filter_pgen_task {
 
 workflow filter_pgen {
   input {
-    File pgen
-    File pvar
-    File psam
+    File   pgen
+    File   pvar
+    File   psam
 
-    # QC filters
-    Boolean apply_qc_filters = true
-    String  chromosomes      = "1-22"
-    Int     min_alleles      = 2
-    Int     max_alleles      = 2
-    String  snps_only        = "just-acgt"
-    Boolean var_filter       = true
-    Float   maf              = 0.01
-    Float   geno             = 0.01
-    String  set_all_var_ids  = "@:#:$r:$a"
-    String  rm_dup           = "exclude-all"
+    # Variant-type filters
+    String?  chromosomes
+    Int?     min_alleles
+    Int?     max_alleles
+    String?  snps_only
+    Boolean  exclude_palindromic_snps = false
 
-    File?   extract
+    # Quality filters
+    Boolean  var_filter = true
+    Float?   maf
+    Float?   geno
+    Float?   mind
+    Float?   hwe
+    String   hwe_modifier = "keep-fewhet"
 
-    String  extra_args       = ""
+    # Variant ID normalization
+    String?  set_all_var_ids
+    String?  rm_dup
 
-    # Resource overrides
+    # Include/exclude lists
+    File?        extract
+    File?        exclude
+    File?        remove
+    File?        keep
+    Array[File]  exclude_range_beds = []
+
+    String  extra_args = ""
+
+    # Resources
     Int?    cpu_override
     String? memory_override
     String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/vcf2pgen:0.1.0"
@@ -142,24 +189,31 @@ workflow filter_pgen {
 
   call filter_pgen_task {
     input:
-      pgen             = pgen,
-      pvar             = pvar,
-      psam             = psam,
-      apply_qc_filters = apply_qc_filters,
-      chromosomes      = chromosomes,
-      min_alleles      = min_alleles,
-      max_alleles      = max_alleles,
-      snps_only        = snps_only,
-      var_filter       = var_filter,
-      maf              = maf,
-      geno             = geno,
-      set_all_var_ids  = set_all_var_ids,
-      rm_dup           = rm_dup,
-      extract          = extract,
-      extra_args       = extra_args,
-      cpu_override     = cpu_override,
-      memory_override  = memory_override,
-      docker_image     = docker_image
+      pgen                      = pgen,
+      pvar                      = pvar,
+      psam                      = psam,
+      chromosomes               = chromosomes,
+      min_alleles               = min_alleles,
+      max_alleles               = max_alleles,
+      snps_only                 = snps_only,
+      exclude_palindromic_snps  = exclude_palindromic_snps,
+      var_filter                = var_filter,
+      maf                       = maf,
+      geno                      = geno,
+      mind                      = mind,
+      hwe                       = hwe,
+      hwe_modifier              = hwe_modifier,
+      set_all_var_ids           = set_all_var_ids,
+      rm_dup                    = rm_dup,
+      extract                   = extract,
+      exclude                   = exclude,
+      remove                    = remove,
+      keep                      = keep,
+      exclude_range_beds        = exclude_range_beds,
+      extra_args                = extra_args,
+      cpu_override              = cpu_override,
+      memory_override           = memory_override,
+      docker_image              = docker_image
   }
 
   output {
