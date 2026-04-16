@@ -56,8 +56,9 @@ def test_em_stats_match_full_gamma():
     """Streaming EMStats must match reductions over full gamma."""
     _, geno, model, d_morgan = _make_model(n_samples=100, n_sites=150)
 
-    # Full gamma (ground truth)
-    gamma = forward_backward_batched(geno, model, d_morgan, batch_size=50)
+    # Full gamma (ground truth) — use full forward_backward since
+    # forward_backward_batched refuses to materialize at large H
+    gamma = forward_backward(geno, model, d_morgan)
 
     # Streaming stats with small batch to exercise multiple iterations
     em_stats = forward_backward_em(geno, model, d_morgan, batch_size=50)
@@ -125,7 +126,7 @@ def test_decode_result_matches_full():
     """DecodeResult calls/max_post/global_sums must match full gamma."""
     _, geno, model, d_morgan = _make_model(n_samples=100, n_sites=150)
 
-    gamma = forward_backward_batched(geno, model, d_morgan, batch_size=50)
+    gamma = forward_backward(geno, model, d_morgan)
     decode = forward_backward_decode(geno, model, d_morgan, batch_size=50)
 
     # Hard calls
@@ -155,7 +156,7 @@ def test_allele_freq_from_stats():
     """update_allele_freq_from_stats matches update_allele_freq."""
     _, geno, model, d_morgan = _make_model(n_samples=100, n_sites=100)
 
-    gamma = forward_backward_batched(geno, model, d_morgan, batch_size=50)
+    gamma = forward_backward(geno, model, d_morgan)
     em_stats = forward_backward_em(geno, model, d_morgan, batch_size=50)
 
     freq_full = update_allele_freq(geno, gamma)
@@ -171,7 +172,7 @@ def test_mu_from_stats():
     """update_mu_from_stats matches update_mu."""
     _, geno, model, d_morgan = _make_model(n_samples=100, n_sites=100)
 
-    gamma = forward_backward_batched(geno, model, d_morgan, batch_size=50)
+    gamma = forward_backward(geno, model, d_morgan)
     em_stats = forward_backward_em(geno, model, d_morgan, batch_size=50)
 
     mu_full = update_mu(gamma)
@@ -243,7 +244,7 @@ def test_streaming_em_matches_full():
     )
 
     # Run one EM iteration with full gamma (ground truth)
-    gamma = forward_backward_batched(geno, model, d_morgan, batch_size=200)
+    gamma = forward_backward(geno, model, d_morgan)
     freq_expected = update_allele_freq(geno, gamma)
     mu_expected = update_mu(gamma)
 
