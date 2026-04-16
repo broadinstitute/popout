@@ -460,7 +460,6 @@ def run_em(
     block_size: int = 8,
     detection_method: str = "marchenko-pastur",
     max_ancestries: int = 20,
-    freq_alpha: float = 0.0,
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -557,15 +556,6 @@ def run_em(
     t_update_count = 0
     last_t_update_iter = -999
 
-    # Frequency stabilization: accumulate stats over last iterations to
-    # detect and replace oscillating sites before the final decode.
-    _STABILIZE_WINDOW = 20
-    _STABILIZE_MULT = 100
-    stabilize_start = max(0, n_em_iter - _STABILIZE_WINDOW)
-    freq_sum = jnp.zeros_like(model.allele_freq)
-    freq_sq_sum = jnp.zeros_like(model.allele_freq)
-    stabilize_count = 0
-
     for iteration in range(n_em_iter):
         log.info("--- EM iteration %d/%d ---", iteration + 1, n_em_iter)
 
@@ -610,8 +600,6 @@ def run_em(
         if stats is not None:
             stats.timer_start("m_step")
         new_freq = update_allele_freq_from_stats(em_stats)
-        if freq_alpha > 0 and iteration > 0:
-            new_freq = model.allele_freq + freq_alpha * (new_freq - model.allele_freq)
         new_mu = update_mu_from_stats(em_stats)
 
         # T update: at most _T_MAX_UPDATES times, only after freq converges.
@@ -675,12 +663,6 @@ def run_em(
             )
             log.info("  Re-tuned batch_size for bucketed path: %d", batch_size)
 
-        # Accumulate frequency stats for stabilization
-        if freq_alpha > 0 and iteration >= stabilize_start:
-            freq_sum = freq_sum + new_freq
-            freq_sq_sum = freq_sq_sum + new_freq ** 2
-            stabilize_count += 1
-
         # Free M-step intermediates; force cyclic GC so BFC can coalesce
         del em_stats
         gc.collect()
@@ -711,32 +693,6 @@ def run_em(
         prev_freq = new_freq
         prev_T = new_T
         prev_mean_delta = mean_delta
-
-    # --- Stabilize oscillating sites before final decode ---
-    if freq_alpha > 0 and stabilize_count > 1:
-        freq_mean = freq_sum / stabilize_count
-        freq_var = freq_sq_sum / stabilize_count - freq_mean ** 2
-        site_max_var = freq_var.max(axis=0)
-        median_var = float(jnp.median(site_max_var))
-        threshold = max(median_var * _STABILIZE_MULT, 1e-6)
-        unstable = site_max_var > threshold
-        n_unstable = int(unstable.sum())
-        if n_unstable > 0:
-            stabilized = jnp.where(unstable[None, :], freq_mean, model.allele_freq)
-            model = AncestryModel(
-                n_ancestries=model.n_ancestries,
-                mu=model.mu,
-                gen_since_admix=model.gen_since_admix,
-                allele_freq=stabilized,
-                mismatch=model.mismatch,
-                gen_per_hap=model.gen_per_hap,
-                bucket_centers=model.bucket_centers,
-                bucket_assignments=model.bucket_assignments,
-                pattern_freq=model.pattern_freq,
-                block_data=model.block_data,
-            )
-            log.info("Stabilized %d/%d oscillating sites (var threshold=%.2e)",
-                     n_unstable, stabilized.shape[1], threshold)
 
     # --- Final decode (streaming — no full gamma materialised) ---
     log.info("Final forward-backward pass")
@@ -800,7 +756,6 @@ def run_em_genome(
     block_size: int = 8,
     detection_method: str = "marchenko-pastur",
     max_ancestries: int = 20,
-    freq_alpha: float = 0.0,
 ) -> list[AncestryResult]:
     """Run self-bootstrapping LAI across all chromosomes.
 
@@ -843,7 +798,6 @@ def run_em_genome(
                 block_size=block_size,
                 detection_method=detection_method,
                 max_ancestries=max_ancestries,
-                freq_alpha=freq_alpha,
             )
             fitted_model = result.model
         else:
@@ -887,8 +841,6 @@ def run_em_genome(
             else:
                 em_stats = forward_backward_em(geno, model, d_morgan_j, chrom_batch)
             new_freq = update_allele_freq_from_stats(em_stats)
-            if freq_alpha > 0:
-                new_freq = model.allele_freq + freq_alpha * (new_freq - model.allele_freq)
             model = AncestryModel(
                 n_ancestries=model.n_ancestries,
                 mu=model.mu,

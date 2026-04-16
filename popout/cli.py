@@ -144,11 +144,6 @@ def main(argv: list[str] | None = None) -> None:
         help="SNPs per block for block emissions (default: 8)",
     )
     parser.add_argument(
-        "--freq-damping", type=float, default=0.0,
-        help="Frequency dampening factor (0-1). Blends new allele frequencies "
-             "with prior iteration. 0.75 recommended. 0 = disabled (default: 0)",
-    )
-    parser.add_argument(
         "--probs", action="store_true",
         help="Write posterior probabilities to output files",
     )
@@ -350,7 +345,6 @@ def main(argv: list[str] | None = None) -> None:
             detection_method=args.ancestry_detection,
             max_ancestries=args.max_ancestries,
             block_size=args.block_size,
-            freq_alpha=args.freq_damping,
         )
 
     t_compute = time.perf_counter() - t0
