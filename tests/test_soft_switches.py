@@ -39,12 +39,13 @@ from popout.spectral import seed_ancestry_soft
 def _make_model(n_samples=100, n_sites=100, n_ancestries=3,
                 gen_since_admix=20, chrom_length_cm=100.0, rng_seed=42):
     """Build a small model + data for testing."""
-    chrom_data, true_ancestry = simulate_admixed(
+    chrom_data, true_ancestry, _ = simulate_admixed(
         n_samples=n_samples,
         n_sites=n_sites,
         n_ancestries=n_ancestries,
         gen_since_admix=gen_since_admix,
         chrom_length_cm=chrom_length_cm,
+        pure_fraction=0.0,
         rng_seed=rng_seed,
     )
     geno = jnp.array(chrom_data.geno)
@@ -63,12 +64,13 @@ def _make_known_model(n_haps=200, n_sites=100, n_ancestries=3,
 
     Returns the model used to generate the data, so T is exactly known.
     """
-    chrom_data, true_ancestry = simulate_admixed(
+    chrom_data, true_ancestry, _ = simulate_admixed(
         n_samples=n_haps // 2,
         n_sites=n_sites,
         n_ancestries=n_ancestries,
         gen_since_admix=gen_since_admix,
         chrom_length_cm=chrom_length_cm,
+        pure_fraction=0.0,
         rng_seed=rng_seed,
     )
     geno = jnp.array(chrom_data.geno)
@@ -91,7 +93,6 @@ def _make_known_model(n_haps=200, n_sites=100, n_ancestries=3,
         mu=jnp.array(mu, dtype=jnp.float32),
         gen_since_admix=float(gen_since_admix),
         allele_freq=jnp.array(np.clip(pop_freq, 1e-3, 1 - 1e-3), dtype=jnp.float32),
-        mismatch=jnp.zeros(n_ancestries),
     )
     return chrom_data, geno, model, d_morgan, true_ancestry
 
@@ -213,12 +214,13 @@ def test_density_invariance():
     mean_hard = []
 
     for n_sites in densities:
-        chrom_data, true_ancestry = simulate_admixed(
+        chrom_data, true_ancestry, _ = simulate_admixed(
             n_samples=n_samples,
             n_sites=n_sites,
             n_ancestries=n_ancestries,
             gen_since_admix=gen_since_admix,
             chrom_length_cm=chrom_cm,
+            pure_fraction=0.0,
             rng_seed=rng_seed,
         )
         geno = jnp.array(chrom_data.geno)
@@ -373,7 +375,6 @@ def test_bucketed_em_stats_have_soft_switches():
         mu=model.mu,
         gen_since_admix=model.gen_since_admix,
         allele_freq=model.allele_freq,
-        mismatch=model.mismatch,
         bucket_centers=bucket_centers,
         bucket_assignments=bucket_assignments,
     )
@@ -406,7 +407,6 @@ def test_compute_soft_switches_trivial():
         mu=mu,
         gen_since_admix=0.001,  # nearly zero
         allele_freq=jnp.array(rng.uniform(0.1, 0.9, (A, T)), dtype=jnp.float32),
-        mismatch=jnp.zeros(A),
     )
     d_morgan = jnp.ones(T - 1) * 0.01  # 1 cM per interval
 
@@ -436,7 +436,6 @@ def test_compute_soft_switches_high_T():
         mu=mu,
         gen_since_admix=500.0,
         allele_freq=jnp.array(rng.uniform(0.1, 0.9, (A, T)), dtype=jnp.float32),
-        mismatch=jnp.zeros(A),
     )
     d_morgan = jnp.ones(T - 1) * 0.01
 

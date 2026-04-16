@@ -9,13 +9,13 @@ Feed it phased WGS from a large cohort and ancestry structure falls out of the j
 With 500K+ samples, the data *is* the reference panel.  See [docs/THEORY.md](docs/THEORY.md)
 for the full mathematical treatment.  The pipeline:
 
-1. **SEED** — Randomized SVD on a SNP subset projects all haplotypes into PCA space. GMM assigns soft ancestry labels. Number of ancestries auto-detected via recursive hierarchical splitting (BIC-based binary splits on sub-PCA projections) or eigenvalue gap heuristic.
+1. **SEED** — Randomized SVD on a SNP subset projects all haplotypes into PCA space. GMM assigns soft ancestry labels. Number of ancestries auto-detected via Marchenko-Pastur law (default), recursive hierarchical splitting, or eigenvalue gap heuristic.
 
 2. **INIT** — Allele frequencies per ancestry computed from soft GMM assignments via weighted GEMM. Window-based refinement handles admixed haplotypes.
 
 3. **REFINE** — Two refinement backends, selectable via `--method`:
 
-   - **HMM (default)** — Forward-backward HMM with A states (not K reference haplotypes — just A ancestries). State space is tiny: 8 floats per haplotype. All haplotypes run simultaneously on GPU via gradient-checkpointed scan (O(√T) memory). EM iteration: M-step updates allele frequencies (with optional rare-variant smoothing), ancestry proportions μ, and generations since admixture T (global or per-haplotype). Converges in 2-3 iterations with large samples.
+   - **HMM (default)** — Forward-backward HMM with A states (not K reference haplotypes — just A ancestries). State space is tiny: 8 floats per haplotype. All haplotypes run simultaneously on GPU via gradient-checkpointed scan (O(√T) memory). EM iteration: M-step updates allele frequencies, ancestry proportions μ, and generations since admixture T (global or per-haplotype). Converges in 2-3 iterations with large samples.
 
    - **CNN / CNN-CRF** — 1D dilated convolutional network that processes all sites in parallel and learns multi-site LD patterns via self-supervised pseudo-label refinement. Optional CRF output layer adds learned transition modeling. See [docs/CNN.md](docs/CNN.md).
 
@@ -154,7 +154,7 @@ vcf_io.py      VCF/BCF reader (pysam, for smaller datasets)
 gmap.py        Genetic map loading and chromosome normalization
 spectral.py    Randomized SVD + GMM + hierarchical ancestry detection
 hmm.py         Forward-backward HMM in JAX with gradient checkpointing
-em.py          EM loop: seed → init → iterate → decode, with freq smoothing
+em.py          EM loop: seed → init → iterate → decode
 blocks.py      Block-level haplotype pattern encoding for LD-aware emissions
 cnn/           CNN-CRF refinement backend (--method cnn or cnn-crf)
   model.py       Dilated residual 1D CNN architecture (pure JAX)
@@ -170,6 +170,36 @@ datatypes.py   Core data structures (ChromData, AncestryModel, etc.)
 simulate.py    Simulated admixed data + accuracy evaluation
 demo.py        Standalone demo on simulated data
 ```
+
+## Accuracy
+
+Measured on simulated 4-ancestry admixed data (F_ST 0.05–0.15, T = 20 generations,
+seed = 42).  Oracle accuracy is the Bayes-optimal ceiling — what the HMM achieves
+with perfect allele frequencies, mu, and T.  See `python -m popout.demo --sweep`
+to reproduce and [docs/SWEEP_RESULTS.md](docs/SWEEP_RESULTS.md) for full output.
+
+### Biobank-like cohorts (30% pure-ancestry haplotypes)
+
+Real biobanks contain single-continental-origin individuals that provide dense
+corners in PCA space for spectral initialization.
+
+| Samples | Sites | Oracle | EM | Gap |
+|---------|-------|--------|----|-----|
+| 500     | 2K    | 93.0%  | 92.5% | 0.5 pp |
+| 5K      | 10K   | 97.3%  | **97.1%** | **0.2 pp** |
+| 500     | 10K   | 97.3%  | 96.9% | 0.4 pp |
+
+### Fully-admixed stress test (0% pure-ancestry)
+
+All haplotypes are mosaics — no dense PCA corners for GMM.  This regime does
+not correspond to any known human biobank but exposes the spectral init
+limitation.
+
+| Samples | Sites | Oracle | EM | Gap |
+|---------|-------|--------|----|-----|
+| 500     | 2K    | 90.4%  | 62.2% | 28.2 pp |
+| 50K     | 2K    | 90.4%  | 69.7% | 20.8 pp |
+| 5K      | 10K   | 96.2%  | 42.2% | 54.0 pp |
 
 ## Performance estimates
 
@@ -187,13 +217,11 @@ demo.py        Standalone demo on simulated data
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--method` | `hmm` | Refinement backend: `hmm`, `cnn`, or `cnn-crf` |
-| `--ancestry-detection` | `recursive` | Auto-detection method: `recursive` (hierarchical BIC splitting) or `eigenvalue-gap` |
-| `--per-hap-T` | off | Estimate per-haplotype admixture time instead of a single global T |
+| `--ancestry-detection` | `marchenko-pastur` | Auto-detection method: `marchenko-pastur`, `recursive` (hierarchical BIC splitting), or `eigenvalue-gap` |
+| `--per-hap-T` | off | Estimate per-haplotype admixture time (disabled by default; pass `--per-hap-T` to enable) |
 | `--n-T-buckets` | 20 | Number of transition-matrix buckets for per-haplotype T |
 | `--block-emissions` | off | Use k-SNP haplotype pattern matching instead of single-site Bernoulli |
 | `--block-size` | 8 | SNPs per block when using block emissions |
-| `--smooth-bandwidth-cm` | 0.05 | Gaussian kernel bandwidth (cM) for rare-variant frequency smoothing (0 = disabled) |
-| `--smooth-maf-threshold` | 0.05 | MAF threshold below which frequencies are smoothed |
 | `--thin-cm` | none | Minimum cM spacing for site thinning (recommended: 0.02 for WGS) |
 | `--export-panel` | off | Export reference panel files for downstream tools |
 | `--panel-threshold` | 0.95 | Min posterior for whole-haplotype extraction |

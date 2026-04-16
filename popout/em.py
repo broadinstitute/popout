@@ -102,100 +102,6 @@ def update_allele_freq(
     return freq
 
 
-def smooth_rare_frequencies(
-    freq: jnp.ndarray,
-    pos_cm: jnp.ndarray,
-    bandwidth_cm: float = 0.05,
-    maf_threshold: float = 0.05,
-) -> jnp.ndarray:
-    """Gaussian-kernel smooth allele frequencies at rare variants.
-
-    Rare variants (MAF < threshold) have their per-ancestry frequencies
-    smoothed along the genomic coordinate, borrowing strength from
-    nearby sites.  Common variants are left unchanged.
-
-    Parameters
-    ----------
-    freq : (A, T) — per-ancestry allele frequencies
-    pos_cm : (T,) — genetic positions in centiMorgans
-    bandwidth_cm : Gaussian kernel bandwidth in cM (0 = disabled)
-    maf_threshold : variants with MAF below this are smoothed
-
-    Returns
-    -------
-    freq_smoothed : (A, T)
-    """
-    A, T = freq.shape
-    if bandwidth_cm <= 0 or T <= 1:
-        return freq
-
-    # Identify rare variants by overall MAF (average across ancestries)
-    overall_freq = freq.mean(axis=0)  # (T,)
-    maf = jnp.minimum(overall_freq, 1.0 - overall_freq)
-    is_rare = maf < maf_threshold  # (T,)
-
-    if T <= 20_000:
-        # O(T²) path — simple and fast for moderate site counts
-        d = jnp.abs(pos_cm[:, None] - pos_cm[None, :])  # (T, T)
-        K = jnp.exp(-0.5 * (d / bandwidth_cm) ** 2)      # (T, T)
-        K_norm = K / K.sum(axis=1, keepdims=True)
-        freq_smooth = freq @ K_norm.T  # (A, T)
-    else:
-        # O(T·W) windowed path — scales to any number of sites
-        freq_smooth = _windowed_gaussian_smooth(freq, pos_cm, bandwidth_cm)
-
-    # Blend: keep original at common variants, use smoothed at rare ones
-    result = jnp.where(is_rare[None, :], freq_smooth, freq)
-    return jnp.clip(result, 1e-6, 1.0 - 1e-6)
-
-
-def _windowed_gaussian_smooth(
-    freq: jnp.ndarray,
-    pos_cm: jnp.ndarray,
-    bandwidth_cm: float,
-) -> jnp.ndarray:
-    """Gaussian smoothing using a sliding window over sorted cM positions.
-
-    For each site, only neighbors within ±3σ (99.7% of mass) contribute.
-    Memory is O(T × W) where W is the maximum window width in SNPs,
-    instead of O(T²) for the full pairwise kernel.
-    """
-    A, T = freq.shape
-    half_w_cm = 3.0 * bandwidth_cm  # 99.7% of Gaussian mass
-
-    # --- Build index/weight arrays on CPU (vectorized, no Python loop) ---
-    pos_np = np.asarray(pos_cm)
-    lo = np.searchsorted(pos_np, pos_np - half_w_cm, side="left")   # (T,)
-    hi = np.searchsorted(pos_np, pos_np + half_w_cm, side="right")  # (T,)
-    max_w = int((hi - lo).max())
-
-    # offsets[t, j] = lo[t] + j; valid where < hi[t]
-    offsets = np.arange(max_w)[None, :]          # (1, max_w)
-    raw_idx = lo[:, None] + offsets               # (T, max_w)
-    valid = raw_idx < hi[:, None]                 # (T, max_w) bool
-    indices = np.where(valid, raw_idx, 0)         # clamp invalid to 0
-
-    # Gaussian weights based on cM distance
-    d = np.abs(pos_np[indices] - pos_np[:, None])  # (T, max_w)
-    weights = np.where(valid, np.exp(-0.5 * (d / bandwidth_cm) ** 2), 0.0)
-    row_sums = weights.sum(axis=1, keepdims=True)
-    weights /= np.maximum(row_sums, 1e-10)         # normalize rows
-
-    # --- Chunked gather-and-sum on GPU ---
-    freq_smooth = jnp.zeros((A, T))
-    chunk = 10_000
-    for t0 in range(0, T, chunk):
-        t1 = min(t0 + chunk, T)
-        idx_j = jnp.array(indices[t0:t1])   # (chunk, max_w)
-        w_j = jnp.array(weights[t0:t1])     # (chunk, max_w)
-        gathered = freq[:, idx_j]            # (A, chunk, max_w)
-        freq_smooth = freq_smooth.at[:, t0:t1].set(
-            (gathered * w_j[None, :, :]).sum(axis=2)
-        )
-
-    return freq_smooth
-
-
 def update_mu(gamma: jnp.ndarray) -> jnp.ndarray:
     """Update global ancestry proportions.
 
@@ -461,14 +367,12 @@ def init_model_from_labels(
 
     freq = jnp.clip(freq, 1e-4, 1.0 - 1e-4)
     mu = mu_counts / mu_counts.sum()
-    mismatch = jnp.full(A, 0.001)
 
     return AncestryModel(
         n_ancestries=A,
         mu=mu,
         gen_since_admix=gen_since_admix,
         allele_freq=freq,
-        mismatch=mismatch,
     )
 
 
@@ -525,14 +429,12 @@ def init_model_soft(
 
     mu = resp.mean(axis=0)
     mu = mu / mu.sum()
-    mismatch = jnp.full(A, 0.001)
 
     return AncestryModel(
         n_ancestries=A,
         mu=mu,
         gen_since_admix=gen_since_admix,
         allele_freq=freq,
-        mismatch=mismatch,
     )
 
 
@@ -543,20 +445,17 @@ def init_model_soft(
 def run_em(
     chrom_data: ChromData,
     n_ancestries: Optional[int] = None,
-    n_em_iter: int = 3,
+    n_em_iter: int = 5,
     gen_since_admix: float = 20.0,
     batch_size: int | None = None,
     rng_seed: int = 42,
     stats=None,
-    bandwidth_cm: float = 0.05,
-    maf_threshold: float = 0.05,
     per_hap_T: bool = False,
     n_T_buckets: int = 20,
     use_block_emissions: bool = False,
     block_size: int = 8,
     detection_method: str = "marchenko-pastur",
     max_ancestries: int = 20,
-    freq_alpha: float = 0.0,
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -574,9 +473,6 @@ def run_em(
     gen_since_admix : initial guess for T
     batch_size : haplotypes per forward-backward batch (None = auto-tune)
     rng_seed : random seed
-    bandwidth_cm : Gaussian kernel bandwidth for rare-variant frequency smoothing.
-                   Set to 0 to disable.
-    maf_threshold : MAF threshold below which frequencies are smoothed.
     detection_method : ancestry auto-detection method
     max_ancestries : upper bound for auto-detected ancestry count
 
@@ -611,7 +507,6 @@ def run_em(
     # Transfer to device
     geno = jnp.array(geno_np)
     d_morgan_j = jnp.array(d_morgan)
-    pos_cm_j = jnp.array(chrom_data.pos_cm.astype(np.float32))
 
     # --- Stage 1: Init model from soft assignments + window refinement ---
     log.info("Stage 1: Initializing model from soft assignments")
@@ -630,41 +525,13 @@ def run_em(
         model = AncestryModel(
             n_ancestries=model.n_ancestries, mu=model.mu,
             gen_since_admix=model.gen_since_admix, allele_freq=model.allele_freq,
-            mismatch=model.mismatch, pattern_freq=pf, block_data=bd,
+            pattern_freq=pf, block_data=bd,
         )
 
     # --- Stage 2-3: EM iterations ---
     bucket_centers = compute_bucket_centers(n_T_buckets) if per_hap_T else None
     prev_freq = model.allele_freq
     prev_T = model.gen_since_admix
-
-    # T-update gating: only update T once, after frequencies converge.
-    #
-    # No published LAI tool jointly estimates T and allele frequencies in a
-    # tight EM loop.  HAPMIX/RFMix/ELAI fix T entirely; Ancestry_HMM and
-    # FLARE use reference-panel frequencies (never estimate them); MOSAIC
-    # estimates T in a separate post-hoc step.  Joint iteration creates a
-    # positive feedback loop: uncertain posteriors inflate soft switches →
-    # higher T → more permissive transitions → even more uncertainty.
-    #
-    # Our approach: converge frequencies at fixed T, then do ONE T update
-    # (which is still based on the best-converged posteriors we have), then
-    # re-converge frequencies at the new T.
-    _T_DELTA_THRESHOLD = 0.005   # mean Δ(freq) must drop below this
-    _T_MAX_UPDATES = 1           # update T at most this many times
-    _T_MAX_HOLD = 15             # force first T update by this iteration
-    prev_mean_delta = float('inf')
-    t_update_count = 0
-    last_t_update_iter = -999
-
-    # Frequency stabilization: accumulate stats over last iterations to
-    # detect and replace oscillating sites before the final decode.
-    _STABILIZE_WINDOW = 20
-    _STABILIZE_MULT = 100
-    stabilize_start = max(0, n_em_iter - _STABILIZE_WINDOW)
-    freq_sum = jnp.zeros_like(model.allele_freq)
-    freq_sq_sum = jnp.zeros_like(model.allele_freq)
-    stabilize_count = 0
 
     for iteration in range(n_em_iter):
         log.info("--- EM iteration %d/%d ---", iteration + 1, n_em_iter)
@@ -710,45 +577,26 @@ def run_em(
         if stats is not None:
             stats.timer_start("m_step")
         new_freq = update_allele_freq_from_stats(em_stats)
-        if bandwidth_cm > 0:
-            new_freq = smooth_rare_frequencies(
-                new_freq, pos_cm_j, bandwidth_cm, maf_threshold,
-            )
-        if freq_alpha > 0 and iteration > 0:
-            new_freq = model.allele_freq + freq_alpha * (new_freq - model.allele_freq)
         new_mu = update_mu_from_stats(em_stats)
 
-        # T update: at most _T_MAX_UPDATES times, only after freq converges.
+        # T is held fixed during iteration 0 so frequencies can stabilize from
+        # the spectral init before the switch-rate estimator kicks in. From
+        # iteration 1 onward, T is updated every iteration alongside mu and freq.
         T_per_hap = None
         bucket_assignments = None
-        freq_stable = prev_mean_delta < _T_DELTA_THRESHOLD
-        force_update = (iteration >= _T_MAX_HOLD and t_update_count == 0)
-        budget_left = t_update_count < _T_MAX_UPDATES
-        should_update_T = budget_left and (freq_stable or force_update)
+        should_update_T = iteration > 0
 
         if not should_update_T:
             new_T = model.gen_since_admix
-            if not budget_left:
-                pass  # silent — T is done
-            elif not freq_stable:
-                log.info("  (holding T — freq Δ=%.4f > %.4f)",
-                         prev_mean_delta, _T_DELTA_THRESHOLD)
         elif per_hap_T and bucket_centers is not None:
             T_per_hap, bucket_assignments, new_T = update_generations_per_hap_from_stats(
                 em_stats, d_morgan_j, model.gen_since_admix, new_mu, bucket_centers,
             )
-            t_update_count += 1
-            last_t_update_iter = iteration
-            log.info("  T update %d/%d (per-hap): mean=%.1f, std=%.1f",
-                     t_update_count, _T_MAX_UPDATES,
+            log.info("  T (per-hap): mean=%.1f, std=%.1f",
                      float(jnp.mean(T_per_hap)), float(jnp.std(T_per_hap)))
         else:
             new_T = update_generations_from_stats(em_stats, d_morgan_j, model.gen_since_admix, model.mu)
-            t_update_count += 1
-            last_t_update_iter = iteration
-            log.info("  T update %d/%d: %.1f → %.1f",
-                     t_update_count, _T_MAX_UPDATES,
-                     model.gen_since_admix, new_T)
+            log.info("  T: %.1f → %.1f", model.gen_since_admix, new_T)
 
         if stats is not None:
             stats.timer_stop("m_step", chrom=chrom_data.chrom, iteration=iteration)
@@ -763,7 +611,6 @@ def run_em(
             mu=new_mu,
             gen_since_admix=new_T,
             allele_freq=new_freq,
-            mismatch=model.mismatch,
             gen_per_hap=T_per_hap,
             bucket_centers=bucket_centers,
             bucket_assignments=bucket_assignments,
@@ -778,12 +625,6 @@ def run_em(
                 H=chrom_data.n_haps, bucketed=True,
             )
             log.info("  Re-tuned batch_size for bucketed path: %d", batch_size)
-
-        # Accumulate frequency stats for stabilization
-        if freq_alpha > 0 and iteration >= stabilize_start:
-            freq_sum = freq_sum + new_freq
-            freq_sq_sum = freq_sq_sum + new_freq ** 2
-            stabilize_count += 1
 
         # Free M-step intermediates; force cyclic GC so BFC can coalesce
         del em_stats
@@ -814,33 +655,6 @@ def run_em(
             break
         prev_freq = new_freq
         prev_T = new_T
-        prev_mean_delta = mean_delta
-
-    # --- Stabilize oscillating sites before final decode ---
-    if freq_alpha > 0 and stabilize_count > 1:
-        freq_mean = freq_sum / stabilize_count
-        freq_var = freq_sq_sum / stabilize_count - freq_mean ** 2
-        site_max_var = freq_var.max(axis=0)
-        median_var = float(jnp.median(site_max_var))
-        threshold = max(median_var * _STABILIZE_MULT, 1e-6)
-        unstable = site_max_var > threshold
-        n_unstable = int(unstable.sum())
-        if n_unstable > 0:
-            stabilized = jnp.where(unstable[None, :], freq_mean, model.allele_freq)
-            model = AncestryModel(
-                n_ancestries=model.n_ancestries,
-                mu=model.mu,
-                gen_since_admix=model.gen_since_admix,
-                allele_freq=stabilized,
-                mismatch=model.mismatch,
-                gen_per_hap=model.gen_per_hap,
-                bucket_centers=model.bucket_centers,
-                bucket_assignments=model.bucket_assignments,
-                pattern_freq=model.pattern_freq,
-                block_data=model.block_data,
-            )
-            log.info("Stabilized %d/%d oscillating sites (var threshold=%.2e)",
-                     n_unstable, stabilized.shape[1], threshold)
 
     # --- Final decode (streaming — no full gamma materialised) ---
     log.info("Final forward-backward pass")
@@ -892,21 +706,18 @@ def run_em(
 def run_em_genome(
     chrom_iter,
     n_ancestries: Optional[int] = None,
-    n_em_iter: int = 3,
+    n_em_iter: int = 5,
     gen_since_admix: float = 20.0,
     batch_size: int | None = None,
     rng_seed: int = 42,
     seed_chrom: Optional[str] = None,
     stats=None,
-    bandwidth_cm: float = 0.05,
-    maf_threshold: float = 0.05,
     per_hap_T: bool = False,
     n_T_buckets: int = 20,
     use_block_emissions: bool = False,
     block_size: int = 8,
     detection_method: str = "marchenko-pastur",
     max_ancestries: int = 20,
-    freq_alpha: float = 0.0,
 ) -> list[AncestryResult]:
     """Run self-bootstrapping LAI across all chromosomes.
 
@@ -943,15 +754,12 @@ def run_em_genome(
                 batch_size=batch_size,
                 rng_seed=rng_seed,
                 stats=stats,
-                bandwidth_cm=bandwidth_cm,
-                maf_threshold=maf_threshold,
                 per_hap_T=per_hap_T,
                 n_T_buckets=n_T_buckets,
                 use_block_emissions=use_block_emissions,
                 block_size=block_size,
                 detection_method=detection_method,
                 max_ancestries=max_ancestries,
-                freq_alpha=freq_alpha,
             )
             fitted_model = result.model
         else:
@@ -977,7 +785,6 @@ def run_em_genome(
                 mu=fitted_model.mu,
                 gen_since_admix=fitted_model.gen_since_admix,
                 allele_freq=model.allele_freq,
-                mismatch=fitted_model.mismatch,
                 gen_per_hap=fitted_model.gen_per_hap,
                 bucket_centers=fitted_model.bucket_centers,
                 bucket_assignments=fitted_model.bucket_assignments,
@@ -995,19 +802,11 @@ def run_em_genome(
             else:
                 em_stats = forward_backward_em(geno, model, d_morgan_j, chrom_batch)
             new_freq = update_allele_freq_from_stats(em_stats)
-            if bandwidth_cm > 0:
-                pos_cm_j = jnp.array(chrom_data.pos_cm.astype(np.float32))
-                new_freq = smooth_rare_frequencies(
-                    new_freq, pos_cm_j, bandwidth_cm, maf_threshold,
-                )
-            if freq_alpha > 0:
-                new_freq = model.allele_freq + freq_alpha * (new_freq - model.allele_freq)
             model = AncestryModel(
                 n_ancestries=model.n_ancestries,
                 mu=model.mu,
                 gen_since_admix=model.gen_since_admix,
                 allele_freq=new_freq,
-                mismatch=model.mismatch,
                 gen_per_hap=model.gen_per_hap,
                 bucket_centers=model.bucket_centers,
                 bucket_assignments=model.bucket_assignments,

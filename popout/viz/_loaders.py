@@ -142,7 +142,7 @@ def read_model_text(path: str | Path) -> dict[str, str | float | int]:
                 result[key] = int(val)
             elif key == "gen_since_admix":
                 result[key] = float(val)
-            elif key in ("mu", "mismatch"):
+            elif key == "mu":
                 result[key] = [float(x) for x in val.split(",")]
             else:
                 result[key] = val

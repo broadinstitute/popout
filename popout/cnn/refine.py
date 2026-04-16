@@ -18,7 +18,6 @@ import numpy as np
 from ..datatypes import AncestryModel, AncestryResult, ChromData, DecodeResult
 from ..em import (
     init_model_soft,
-    smooth_rare_frequencies,
     update_allele_freq,
     update_generations,
     update_mu,
@@ -127,8 +126,6 @@ def run_cnn(
     hmm_batch_size: int = 50_000,
     rng_seed: int = 42,
     stats=None,
-    bandwidth_cm: float = 0.05,
-    maf_threshold: float = 0.05,
     # CNN-specific
     n_layers: int = 12,
     hidden_dim: int = 64,
@@ -177,7 +174,6 @@ def run_cnn(
     # Transfer to device
     geno = jnp.array(geno_np)
     d_morgan_j = jnp.array(d_morgan)
-    pos_cm_j = jnp.array(chrom_data.pos_cm.astype(np.float32))
 
     # --- Stage 1: Init model ---
     log.info("Stage 1: Initializing model from soft assignments")
@@ -257,10 +253,6 @@ def run_cnn(
         # M-step: update model from CNN posteriors
         log.info("  M-step: updating parameters")
         new_freq = update_allele_freq(geno, gamma)
-        if bandwidth_cm > 0:
-            new_freq = smooth_rare_frequencies(
-                new_freq, pos_cm_j, bandwidth_cm, maf_threshold,
-            )
         new_mu = update_mu(gamma)
         new_T = update_generations(gamma, d_morgan_j, model.gen_since_admix, model.mu)
 
@@ -269,7 +261,6 @@ def run_cnn(
             mu=new_mu,
             gen_since_admix=new_T,
             allele_freq=new_freq,
-            mismatch=model.mismatch,
         )
         log.info("  mu = %s", np.array(model.mu).round(3))
         log.info("  T = %.1f generations", model.gen_since_admix)
@@ -308,8 +299,6 @@ def run_cnn_genome(
     hmm_batch_size: int = 50_000,
     rng_seed: int = 42,
     stats=None,
-    bandwidth_cm: float = 0.05,
-    maf_threshold: float = 0.05,
     # CNN-specific
     n_layers: int = 12,
     hidden_dim: int = 64,
@@ -352,8 +341,6 @@ def run_cnn_genome(
                 hmm_batch_size=hmm_batch_size,
                 rng_seed=rng_seed,
                 stats=stats,
-                bandwidth_cm=bandwidth_cm,
-                maf_threshold=maf_threshold,
                 n_layers=n_layers,
                 hidden_dim=hidden_dim,
                 n_epochs=n_epochs,
@@ -377,7 +364,6 @@ def run_cnn_genome(
 
             geno = jnp.array(chrom_data.geno)
             d_morgan_j = jnp.array(chrom_data.genetic_distances)
-            pos_cm_j = jnp.array(chrom_data.pos_cm.astype(np.float32))
 
             # Quick spectral init for chromosome-specific allele frequencies
             _labels, resp, n_anc, _proj = seed_ancestry_soft(
@@ -395,7 +381,6 @@ def run_cnn_genome(
                 mu=fitted_model.mu,
                 gen_since_admix=fitted_model.gen_since_admix,
                 allele_freq=model.allele_freq,
-                mismatch=fitted_model.mismatch,
             )
 
             # Build features and run one fine-tuning epoch
@@ -434,16 +419,11 @@ def run_cnn_genome(
 
             # Update allele frequencies from CNN posteriors
             new_freq = update_allele_freq(geno, gamma)
-            if bandwidth_cm > 0:
-                new_freq = smooth_rare_frequencies(
-                    new_freq, pos_cm_j, bandwidth_cm, maf_threshold,
-                )
             model = AncestryModel(
                 n_ancestries=model.n_ancestries,
                 mu=model.mu,
                 gen_since_admix=model.gen_since_admix,
                 allele_freq=new_freq,
-                mismatch=model.mismatch,
             )
 
             # Build decode result from the final gamma without keeping full tensor

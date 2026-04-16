@@ -283,19 +283,17 @@ def write_model(result: AncestryResult, out_path: str, chrom_data: ChromData | N
     """Write model parameters to a human-readable file.
 
     Also saves a companion ``.npz`` archive with full-precision arrays
-    (allele frequencies, mu, mismatch) for potential re-inference.
+    (allele frequencies, mu) for potential re-inference.
     """
     model = result.model
     with open(out_path, "w") as f:
         f.write(f"n_ancestries\t{model.n_ancestries}\n")
         f.write(f"gen_since_admix\t{model.gen_since_admix:.2f}\n")
         f.write(f"mu\t{','.join(f'{x:.4f}' for x in np.array(model.mu))}\n")
-        f.write(f"mismatch\t{','.join(f'{x:.6f}' for x in np.array(model.mismatch))}\n")
 
     save_dict = dict(
         allele_freq=np.array(model.allele_freq),
         mu=np.array(model.mu),
-        mismatch=np.array(model.mismatch),
         n_ancestries=np.array(model.n_ancestries),
         gen_since_admix=np.array(model.gen_since_admix),
     )

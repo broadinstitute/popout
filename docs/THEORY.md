@@ -98,17 +98,18 @@ SEED  →  INIT  →  EM ITERATE  →  DECODE
    avoids the O(min(H,S)²) cost of full SVD, which is intractable at
    biobank scale.
 
-4. **Auto-detect the number of ancestries** via recursive hierarchical
-   splitting (default) or eigenvalue gap heuristic.  The recursive method
-   starts with all haplotypes in one cluster and repeatedly tests for
-   substructure by comparing BIC of a 1-component vs 2-component GMM on
-   the cluster's own top PCs.  Clusters that show significant bimodality
-   are split; the process continues until no cluster can be split or the
-   maximum A (default 12) is reached.  This handles nested population
-   structure (e.g., multiple African subpopulations within a continental-
-   scale cohort) more robustly than the single-pass eigenvalue gap
-   heuristic, which is retained as a `--ancestry-detection eigenvalue-gap`
-   fallback.
+4. **Auto-detect the number of ancestries** via the Marchenko-Pastur law
+   (default), recursive hierarchical splitting, or eigenvalue gap heuristic.
+   The Marchenko-Pastur method counts singular values exceeding the
+   theoretical bulk edge of a random matrix, giving the number of
+   significant PCs + 1 ancestries (Patterson, Price & Reich 2006).
+   The recursive method starts with all haplotypes in one cluster and
+   repeatedly tests for substructure by comparing BIC of a 1-component
+   vs 2-component GMM on the cluster's own top PCs.  Clusters that show
+   significant bimodality are split; the process continues until no
+   cluster can be split or the maximum A (default 20) is reached.
+   The eigenvalue gap heuristic is retained as a
+   `--ancestry-detection eigenvalue-gap` fallback.
 
 5. **Gaussian Mixture Model** with diagonal covariance, fitted on the top
    (A−1) or 2 PCs (whichever is larger).  Multiple random restarts
@@ -356,32 +357,6 @@ soft overlaps for switch counting is more robust when posteriors are diffuse.
 When `--per-hap-T` is enabled, the same formula is applied per-haplotype
 instead of globally (see §4 Transitions above).
 
-### Allele frequency smoothing
-
-At rare variants (MAF < 0.05), per-ancestry frequency estimates can be noisy
-even at biobank scale — a variant present in only 0.1% of the population may
-have only a few hundred weighted observations per ancestry.  After computing
-raw frequencies, a Gaussian kernel smooth is applied along the genomic
-coordinate within each ancestry:
-
-```
-freq_smooth[a, t] = Σ_s K(d(t,s) / σ) · freq_raw[a, s] / Σ_s K(d(t,s) / σ)
-```
-
-where K is a Gaussian kernel, d(t,s) is the genetic distance between sites t
-and s in centiMorgans, and σ is the bandwidth (default 0.05 cM, spanning
-~2–3 sites at thinned array density).
-
-Only variants with overall MAF below the threshold are smoothed; common
-variants are left unchanged.  This borrows strength from neighboring sites
-— justified because ancestry-specific frequencies vary smoothly at fine
-genetic scale due to linkage disequilibrium.  The smoothing is complementary
-to the Beta-Bernoulli pseudocount (which prevents zero frequencies but does
-not exploit spatial structure).
-
-Controlled by `--smooth-bandwidth-cm` (0 = disabled) and
-`--smooth-maf-threshold`.
-
 ---
 
 ## 6. Spectral initialization: the math
@@ -494,7 +469,7 @@ close to the truth immediately.  This is why 2–3 iterations suffice at
 biobank scale — the signal-to-noise ratio is so high that the algorithm
 barely needs to iterate.
 
-At smaller sample sizes, more iterations may be needed (the default is 3),
+At smaller sample sizes, more iterations may be needed (the default is 5),
 and the convergence threshold (max Δfreq < 1e-4) acts as a safety net.
 
 ### Self-consistency
@@ -683,6 +658,41 @@ same generative model the inference algorithm assumes:
 3. **Alleles** are emitted independently from the ancestry-specific frequency
    at each site.
 
+### Cohort composition: pure vs. admixed haplotypes
+
+Real biobank cohorts contain a mix of ancestrally pure individuals
+(first-generation immigrants, single-continental-origin samples) and
+admixed individuals.  The pure individuals form dense corners in PCA space
+that give the GMM spectral initialization reliable purchase on the true
+population structure.
+
+The simulator's `pure_fraction` parameter (default 0.3) controls this mix.
+Pure haplotypes are assigned a single ancestry across all sites — no Markov
+transitions.  They are distributed across ancestries proportionally to μ.
+The remaining haplotypes get the standard admixed treatment.
+
+**Two simulation regimes for validation:**
+
+- **Biobank-like (`pure_fraction=0.3`):** Models cohorts like AoU where
+  >20% of samples have recent single-continental-origin ancestry.  The
+  algorithm reaches near-oracle accuracy (gap < 1pp at 500 samples).
+
+- **Fully-admixed stress test (`pure_fraction=0.0`):** Every haplotype is
+  a mosaic.  The PCA projection has no dense corners, and GMM initialization
+  fails to recover the true population structure.  Accuracy is limited by
+  spectral init quality (gap 20–50pp).  This regime does not correspond to
+  any known human biobank but is useful for identifying algorithm
+  limitations.  Closing the gap in this regime requires a corner-finding
+  init (NMF, archetypal analysis, or SPA) instead of GMM.
+
+### Oracle benchmark
+
+The demo (`python -m popout.demo`) reports both inferred and oracle
+accuracy.  The oracle constructs an `AncestryModel` from the true
+generative parameters and decodes with `forward_backward_decode`.
+Oracle accuracy is the Bayes-optimal ceiling for the given F_ST and
+tract length — the best any method could achieve with perfect parameters.
+
 This allows closed-loop validation: run the inference pipeline on simulated
 data and compare inferred calls to ground truth.  Because inferred ancestry
 labels may be permuted relative to truth, the evaluator tries all
@@ -696,7 +706,7 @@ Genome-wide parameters (μ, T) are shared across chromosomes, but allele
 frequencies are chromosome-specific (different genes, different population
 differentiation patterns).  The pipeline exploits this:
 
-1. **Seed chromosome:** Run full EM (spectral init + 3 iterations) on the
+1. **Seed chromosome:** Run full EM (spectral init + 5 iterations) on the
    first chromosome.  This estimates μ, T, and the number of ancestries.
 
 2. **Remaining chromosomes:** Warm-start with the fitted μ and T.  Compute
@@ -720,7 +730,7 @@ all chromosomes.
 | **Emission model** | Haplotype matching | Window features | Single-site or block-level pattern matching |
 | **GPU acceleration** | No | No | Native (JAX), with gradient checkpointing |
 | **Scales to 500K+** | With effort | No | Yes (designed for it) |
-| **Ancestry count** | User-specified | User-specified | Auto-detected (recursive hierarchical or eigenvalue gap) |
+| **Ancestry count** | User-specified | User-specified | Auto-detected (Marchenko-Pastur, recursive, or eigenvalue gap) |
 | **Admixture time** | Estimated (global) | Not modeled | Estimated (global or per-haplotype) |
 
 ### The A-state tradeoff

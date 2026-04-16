@@ -18,7 +18,7 @@ from popout.spectral import seed_ancestry_soft
 
 def _make_model(n_samples=200, n_sites=100, n_ancestries=3, rng_seed=42):
     """Build a small model + data for testing."""
-    chrom_data, true_ancestry = simulate_admixed(
+    chrom_data, true_ancestry, _ = simulate_admixed(
         n_samples=n_samples,
         n_sites=n_sites,
         n_ancestries=n_ancestries,
@@ -82,7 +82,7 @@ def test_checkpointed_small_T():
         mu = jnp.array([0.4, 0.35, 0.25])
         model = AncestryModel(
             n_ancestries=A, mu=mu, gen_since_admix=20.0,
-            allele_freq=freq, mismatch=jnp.full(A, 0.001),
+            allele_freq=freq,
         )
 
         gamma_full = forward_backward(geno, model, d_morgan, use_checkpointing=False)
@@ -123,7 +123,8 @@ def test_batched_uses_checkpointing():
     geno, model, d_morgan, _ = _make_model(n_samples=100, n_sites=200)
 
     gamma_single = forward_backward(geno, model, d_morgan)
-    gamma_batched = forward_backward_batched(geno, model, d_morgan, batch_size=50)
+    # batch_size=150: H=200 <= 2*150=300, so guard passes; still batches (200 > 150)
+    gamma_batched = forward_backward_batched(geno, model, d_morgan, batch_size=150)
 
     np.testing.assert_allclose(
         np.array(gamma_single), np.array(gamma_batched), atol=1e-5,

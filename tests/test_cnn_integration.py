@@ -49,7 +49,7 @@ class TestRunCNNSimulated:
     """Full CNN pipeline on simulated data."""
 
     def test_produces_valid_result(self):
-        chrom_data, true_ancestry = simulate_admixed(
+        chrom_data, true_ancestry, _ = simulate_admixed(
             n_samples=50, n_sites=200, n_ancestries=3,
             gen_since_admix=20, rng_seed=42,
         )
@@ -88,7 +88,7 @@ class TestRunCNNSimulated:
 
     def test_cnn_crf_runs(self):
         """CNN-CRF pipeline completes on simulated data."""
-        chrom_data, _ = simulate_admixed(
+        chrom_data, _, _ = simulate_admixed(
             n_samples=30, n_sites=100, n_ancestries=3,
             gen_since_admix=20, rng_seed=99,
         )
@@ -120,7 +120,7 @@ class TestOutputFormatMatch:
     """CNN and HMM outputs should have compatible shapes/dtypes."""
 
     def test_matches_hmm_output_format(self):
-        chrom_data, _ = simulate_admixed(
+        chrom_data, _, _ = simulate_admixed(
             n_samples=30, n_sites=100, n_ancestries=3,
             gen_since_admix=20, rng_seed=42,
         )

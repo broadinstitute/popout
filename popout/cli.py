@@ -88,8 +88,8 @@ def main(argv: list[str] | None = None) -> None:
         help="Number of ancestries (default: auto-detect from PCA)",
     )
     parser.add_argument(
-        "--n-em-iter", type=int, default=20,
-        help="Maximum EM iterations on seed chromosome (default: 20; "
+        "--n-em-iter", type=int, default=5,
+        help="Maximum EM iterations on seed chromosome (default: 5; "
              "stops early on convergence)",
     )
     parser.add_argument(
@@ -127,9 +127,9 @@ def main(argv: list[str] | None = None) -> None:
         help="Upper bound for auto-detected ancestry count (default: 20)",
     )
     parser.add_argument(
-        "--per-hap-T", action=argparse.BooleanOptionalAction, default=True,
-        help="Estimate per-haplotype admixture time (default: enabled; "
-             "use --no-per-hap-T for single global T)",
+        "--per-hap-T", action=argparse.BooleanOptionalAction, default=False,
+        help="Estimate per-haplotype admixture time (default: disabled; "
+             "pass --per-hap-T to enable)",
     )
     parser.add_argument(
         "--n-T-buckets", type=int, default=20,
@@ -142,21 +142,6 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--block-size", type=int, default=8,
         help="SNPs per block for block emissions (default: 8)",
-    )
-    parser.add_argument(
-        "--smooth-bandwidth-cm", type=float, default=0.05,
-        help="Gaussian kernel bandwidth (cM) for smoothing rare-variant allele "
-             "frequencies. Set to 0 to disable. (default: 0.05)",
-    )
-    parser.add_argument(
-        "--smooth-maf-threshold", type=float, default=0.05,
-        help="MAF threshold below which allele frequencies are smoothed "
-             "(default: 0.05)",
-    )
-    parser.add_argument(
-        "--freq-damping", type=float, default=0.0,
-        help="Frequency dampening factor (0-1). Blends new allele frequencies "
-             "with prior iteration. 0.75 recommended. 0 = disabled (default: 0)",
     )
     parser.add_argument(
         "--probs", action="store_true",
@@ -336,8 +321,6 @@ def main(argv: list[str] | None = None) -> None:
             hmm_batch_size=args.batch_size,
             rng_seed=args.seed,
             stats=stats,
-            bandwidth_cm=args.smooth_bandwidth_cm,
-            maf_threshold=args.smooth_maf_threshold,
             n_layers=args.cnn_layers,
             hidden_dim=args.cnn_channels,
             n_epochs=args.cnn_epochs,
@@ -356,15 +339,12 @@ def main(argv: list[str] | None = None) -> None:
             batch_size=args.batch_size,
             rng_seed=args.seed,
             stats=stats,
-            bandwidth_cm=args.smooth_bandwidth_cm,
-            maf_threshold=args.smooth_maf_threshold,
             per_hap_T=args.per_hap_T,
             n_T_buckets=args.n_T_buckets,
             use_block_emissions=args.block_emissions,
             detection_method=args.ancestry_detection,
             max_ancestries=args.max_ancestries,
             block_size=args.block_size,
-            freq_alpha=args.freq_damping,
         )
 
     t_compute = time.perf_counter() - t0

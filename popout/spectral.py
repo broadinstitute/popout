@@ -58,7 +58,7 @@ def seed_ancestry_soft(
     gmm_restarts: int = 5,
     rng_seed: int = 42,
     stats=None,
-    detection_method: str = "recursive",
+    detection_method: str = "marchenko-pastur",
     max_haps_svd: int = 100_000,
     projection_batch: int = 50_000,
 ) -> tuple[jnp.ndarray, jnp.ndarray, int, np.ndarray]:

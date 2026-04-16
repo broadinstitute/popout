@@ -61,7 +61,6 @@ def synthetic_run(tmp_path):
         f.write(f"n_ancestries\t{n_anc}\n")
         f.write(f"gen_since_admix\t25.00\n")
         f.write(f"mu\t{','.join(f'{x:.4f}' for x in mu)}\n")
-        f.write(f"mismatch\t{','.join('0.001000' for _ in range(n_anc))}\n")
 
     # ---- model.npz ----
     allele_freq = rng.uniform(0.01, 0.99, size=(n_anc, n_sites)).astype(np.float32)
@@ -71,7 +70,6 @@ def synthetic_run(tmp_path):
         f"{prefix}.model.npz",
         allele_freq=allele_freq,
         mu=mu,
-        mismatch=np.full(n_anc, 0.001, dtype=np.float32),
         n_ancestries=np.array(n_anc),
         gen_since_admix=np.array(25.0),
         gen_per_hap=gen_per_hap,
