@@ -43,6 +43,7 @@ def run_demo(
     n_em_iter: int = 5,
     batch_size: int = 10_000,
     seed: int = 42,
+    pure_fraction: float = 0.3,
 ):
     import jax
     log.info("JAX devices: %s", jax.devices())
@@ -57,6 +58,7 @@ def run_demo(
         n_sites=n_sites,
         n_ancestries=n_ancestries,
         gen_since_admix=gen_since_admix,
+        pure_fraction=pure_fraction,
         rng_seed=seed,
     )
     t_sim = time.perf_counter() - t0
@@ -148,7 +150,7 @@ def run_demo(
 
 
 def run_sweep():
-    """Run oracle vs EM comparison across a grid of configurations."""
+    """Run oracle vs EM comparison across two simulation regimes."""
     configs = [
         (500,   2000),
         (5000,  2000),
@@ -157,39 +159,45 @@ def run_sweep():
         (5000,  10000),
     ]
 
-    rows = []
-    for n_samples, n_sites in configs:
+    for pure_frac, label in [(0.3, "biobank-like (30% pure)"),
+                              (0.0, "fully-admixed stress test")]:
+        all_rows = []
         log.info("\n" + "=" * 60)
-        log.info("CONFIG: n_samples=%d, n_sites=%d", n_samples, n_sites)
+        log.info("REGIME: %s", label)
         log.info("=" * 60)
-        result, metrics, oracle_metrics = run_demo(
-            n_samples=n_samples,
-            n_sites=n_sites,
-            n_ancestries=4,
-            gen_since_admix=20,
-            n_em_iter=20,
-            seed=42,
-        )
-        rows.append({
-            "samples": n_samples,
-            "sites": n_sites,
-            "oracle": oracle_metrics["overall_accuracy"],
-            "em": metrics["overall_accuracy"],
-            "gap": oracle_metrics["overall_accuracy"] - metrics["overall_accuracy"],
-            "T_inf": float(result.model.gen_since_admix),
-        })
 
-    log.info("\n" + "=" * 60)
-    log.info("SWEEP SUMMARY (seed=42, A=4, T_true=20, n_em_iter=20)")
-    log.info("=" * 60)
-    log.info("%-10s %-8s %-10s %-10s %-8s %-8s",
-             "samples", "sites", "oracle%", "em%", "gap_pp", "T_inf")
-    log.info("-" * 54)
-    for r in rows:
-        log.info("%-10d %-8d %-10.1f %-10.1f %-8.1f %-8.1f",
-                 r["samples"], r["sites"],
-                 100 * r["oracle"], 100 * r["em"],
-                 100 * r["gap"], r["T_inf"])
+        for n_samples, n_sites in configs:
+            log.info("\n--- n_samples=%d, n_sites=%d ---", n_samples, n_sites)
+            result, metrics, oracle_metrics = run_demo(
+                n_samples=n_samples,
+                n_sites=n_sites,
+                n_ancestries=4,
+                gen_since_admix=20,
+                n_em_iter=20,
+                seed=42,
+                pure_fraction=pure_frac,
+            )
+            all_rows.append({
+                "samples": n_samples,
+                "sites": n_sites,
+                "oracle": oracle_metrics["overall_accuracy"],
+                "em": metrics["overall_accuracy"],
+                "gap": oracle_metrics["overall_accuracy"] - metrics["overall_accuracy"],
+                "T_inf": float(result.model.gen_since_admix),
+            })
+
+        log.info("\n" + "=" * 60)
+        log.info("SWEEP SUMMARY — %s (seed=42, A=4, T_true=20, n_em_iter=20)",
+                 label)
+        log.info("=" * 60)
+        log.info("%-10s %-8s %-10s %-10s %-8s %-8s",
+                 "samples", "sites", "oracle%", "em%", "gap_pp", "T_inf")
+        log.info("-" * 54)
+        for r in all_rows:
+            log.info("%-10d %-8d %-10.1f %-10.1f %-8.1f %-8.1f",
+                     r["samples"], r["sites"],
+                     100 * r["oracle"], 100 * r["em"],
+                     100 * r["gap"], r["T_inf"])
 
 
 def main():
@@ -201,6 +209,8 @@ def main():
     parser.add_argument("--n-em-iter", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=10_000)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--pure-fraction", type=float, default=0.3,
+                        help="Fraction of haplotypes that are single-ancestry (default: 0.3)")
     parser.add_argument("--sweep", action="store_true",
                         help="Run multi-config sweep instead of single demo")
     args = parser.parse_args()
@@ -216,6 +226,7 @@ def main():
             n_em_iter=args.n_em_iter,
             batch_size=args.batch_size,
             seed=args.seed,
+            pure_fraction=args.pure_fraction,
         )
 
 

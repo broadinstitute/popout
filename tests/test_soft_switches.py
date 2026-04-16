@@ -45,6 +45,7 @@ def _make_model(n_samples=100, n_sites=100, n_ancestries=3,
         n_ancestries=n_ancestries,
         gen_since_admix=gen_since_admix,
         chrom_length_cm=chrom_length_cm,
+        pure_fraction=0.0,
         rng_seed=rng_seed,
     )
     geno = jnp.array(chrom_data.geno)
@@ -69,6 +70,7 @@ def _make_known_model(n_haps=200, n_sites=100, n_ancestries=3,
         n_ancestries=n_ancestries,
         gen_since_admix=gen_since_admix,
         chrom_length_cm=chrom_length_cm,
+        pure_fraction=0.0,
         rng_seed=rng_seed,
     )
     geno = jnp.array(chrom_data.geno)
@@ -218,6 +220,7 @@ def test_density_invariance():
             n_ancestries=n_ancestries,
             gen_since_admix=gen_since_admix,
             chrom_length_cm=chrom_cm,
+            pure_fraction=0.0,
             rng_seed=rng_seed,
         )
         geno = jnp.array(chrom_data.geno)
