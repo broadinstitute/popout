@@ -537,25 +537,6 @@ def run_em(
     prev_freq = model.allele_freq
     prev_T = model.gen_since_admix
 
-    # T-update gating: only update T once, after frequencies converge.
-    #
-    # No published LAI tool jointly estimates T and allele frequencies in a
-    # tight EM loop.  HAPMIX/RFMix/ELAI fix T entirely; Ancestry_HMM and
-    # FLARE use reference-panel frequencies (never estimate them); MOSAIC
-    # estimates T in a separate post-hoc step.  Joint iteration creates a
-    # positive feedback loop: uncertain posteriors inflate soft switches →
-    # higher T → more permissive transitions → even more uncertainty.
-    #
-    # Our approach: converge frequencies at fixed T, then do ONE T update
-    # (which is still based on the best-converged posteriors we have), then
-    # re-converge frequencies at the new T.
-    _T_DELTA_THRESHOLD = 0.005   # mean Δ(freq) must drop below this
-    _T_MAX_UPDATES = 1           # update T at most this many times
-    _T_MAX_HOLD = 15             # force first T update by this iteration
-    prev_mean_delta = float('inf')
-    t_update_count = 0
-    last_t_update_iter = -999
-
     for iteration in range(n_em_iter):
         log.info("--- EM iteration %d/%d ---", iteration + 1, n_em_iter)
 
@@ -602,37 +583,24 @@ def run_em(
         new_freq = update_allele_freq_from_stats(em_stats)
         new_mu = update_mu_from_stats(em_stats)
 
-        # T update: at most _T_MAX_UPDATES times, only after freq converges.
+        # T is held fixed during iteration 0 so frequencies can stabilize from
+        # the spectral init before the switch-rate estimator kicks in. From
+        # iteration 1 onward, T is updated every iteration alongside mu and freq.
         T_per_hap = None
         bucket_assignments = None
-        freq_stable = prev_mean_delta < _T_DELTA_THRESHOLD
-        force_update = (iteration >= _T_MAX_HOLD and t_update_count == 0)
-        budget_left = t_update_count < _T_MAX_UPDATES
-        should_update_T = budget_left and (freq_stable or force_update)
+        should_update_T = iteration > 0
 
         if not should_update_T:
             new_T = model.gen_since_admix
-            if not budget_left:
-                pass  # silent — T is done
-            elif not freq_stable:
-                log.info("  (holding T — freq Δ=%.4f > %.4f)",
-                         prev_mean_delta, _T_DELTA_THRESHOLD)
         elif per_hap_T and bucket_centers is not None:
             T_per_hap, bucket_assignments, new_T = update_generations_per_hap_from_stats(
                 em_stats, d_morgan_j, model.gen_since_admix, new_mu, bucket_centers,
             )
-            t_update_count += 1
-            last_t_update_iter = iteration
-            log.info("  T update %d/%d (per-hap): mean=%.1f, std=%.1f",
-                     t_update_count, _T_MAX_UPDATES,
+            log.info("  T (per-hap): mean=%.1f, std=%.1f",
                      float(jnp.mean(T_per_hap)), float(jnp.std(T_per_hap)))
         else:
             new_T = update_generations_from_stats(em_stats, d_morgan_j, model.gen_since_admix, model.mu)
-            t_update_count += 1
-            last_t_update_iter = iteration
-            log.info("  T update %d/%d: %.1f → %.1f",
-                     t_update_count, _T_MAX_UPDATES,
-                     model.gen_since_admix, new_T)
+            log.info("  T: %.1f → %.1f", model.gen_since_admix, new_T)
 
         if stats is not None:
             stats.timer_stop("m_step", chrom=chrom_data.chrom, iteration=iteration)
@@ -692,7 +660,6 @@ def run_em(
             break
         prev_freq = new_freq
         prev_T = new_T
-        prev_mean_delta = mean_delta
 
     # --- Final decode (streaming — no full gamma materialised) ---
     log.info("Final forward-backward pass")
