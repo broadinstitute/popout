@@ -25,13 +25,12 @@ task popout_task {
     Int?    n_ancestries
     String  ancestry_detection = "marchenko-pastur"
     Int     max_ancestries     = 20
-    Int     n_em_iter          = 20
+    Int     n_em_iter          = 5
     Float?  thin_cm
     String  method             = "hmm"
     Float   gen_since_admix    = 20.0
     Boolean export_panel       = false
     Boolean block_emissions    = false
-    Float   freq_damping       = 0.0
     Int     phase_groups       = 0          # 0=auto, 1=legacy (no streaming), 2+=explicit
     String  extra_args         = ""
 
@@ -95,7 +94,6 @@ task popout_task {
     ~{if defined(thin_cm) then 'CMD="$CMD --thin-cm ~{thin_cm}"' else ''}
     ~{if export_panel then 'CMD="$CMD --export-panel"' else ''}
     ~{if block_emissions then 'CMD="$CMD --block-emissions"' else ''}
-    if awk "BEGIN{exit !(~{freq_damping} > 0)}"; then CMD="$CMD --freq-damping ~{freq_damping}"; fi
     CMD="$CMD --phase-groups ~{phase_groups}"
     if [ -n "$WANDB_RAW" ]; then CMD="$CMD --monitor wandb"; fi
 
@@ -151,13 +149,12 @@ workflow popout {
     Int?    n_ancestries
     String  ancestry_detection = "marchenko-pastur"
     Int     max_ancestries     = 20
-    Int     n_em_iter          = 20
+    Int     n_em_iter          = 5
     Float?  thin_cm
     String  method             = "hmm"
     Float   gen_since_admix    = 20.0
     Boolean export_panel       = false
     Boolean block_emissions    = false
-    Float   freq_damping       = 0.0
     Int     phase_groups       = 0
     String  extra_args         = ""
 
@@ -188,7 +185,6 @@ workflow popout {
       gen_since_admix = gen_since_admix,
       export_panel    = export_panel,
       block_emissions = block_emissions,
-      freq_damping    = freq_damping,
       phase_groups    = phase_groups,
       extra_args      = extra_args,
       wandb_key       = wandb_key,
