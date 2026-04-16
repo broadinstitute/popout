@@ -98,17 +98,18 @@ SEED  →  INIT  →  EM ITERATE  →  DECODE
    avoids the O(min(H,S)²) cost of full SVD, which is intractable at
    biobank scale.
 
-4. **Auto-detect the number of ancestries** via recursive hierarchical
-   splitting (default) or eigenvalue gap heuristic.  The recursive method
-   starts with all haplotypes in one cluster and repeatedly tests for
-   substructure by comparing BIC of a 1-component vs 2-component GMM on
-   the cluster's own top PCs.  Clusters that show significant bimodality
-   are split; the process continues until no cluster can be split or the
-   maximum A (default 12) is reached.  This handles nested population
-   structure (e.g., multiple African subpopulations within a continental-
-   scale cohort) more robustly than the single-pass eigenvalue gap
-   heuristic, which is retained as a `--ancestry-detection eigenvalue-gap`
-   fallback.
+4. **Auto-detect the number of ancestries** via the Marchenko-Pastur law
+   (default), recursive hierarchical splitting, or eigenvalue gap heuristic.
+   The Marchenko-Pastur method counts singular values exceeding the
+   theoretical bulk edge of a random matrix, giving the number of
+   significant PCs + 1 ancestries (Patterson, Price & Reich 2006).
+   The recursive method starts with all haplotypes in one cluster and
+   repeatedly tests for substructure by comparing BIC of a 1-component
+   vs 2-component GMM on the cluster's own top PCs.  Clusters that show
+   significant bimodality are split; the process continues until no
+   cluster can be split or the maximum A (default 20) is reached.
+   The eigenvalue gap heuristic is retained as a
+   `--ancestry-detection eigenvalue-gap` fallback.
 
 5. **Gaussian Mixture Model** with diagonal covariance, fitted on the top
    (A−1) or 2 PCs (whichever is larger).  Multiple random restarts
@@ -694,7 +695,7 @@ all chromosomes.
 | **Emission model** | Haplotype matching | Window features | Single-site or block-level pattern matching |
 | **GPU acceleration** | No | No | Native (JAX), with gradient checkpointing |
 | **Scales to 500K+** | With effort | No | Yes (designed for it) |
-| **Ancestry count** | User-specified | User-specified | Auto-detected (recursive hierarchical or eigenvalue gap) |
+| **Ancestry count** | User-specified | User-specified | Auto-detected (Marchenko-Pastur, recursive, or eigenvalue gap) |
 | **Admixture time** | Estimated (global) | Not modeled | Estimated (global or per-haplotype) |
 
 ### The A-state tradeoff

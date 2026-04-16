@@ -9,7 +9,7 @@ Feed it phased WGS from a large cohort and ancestry structure falls out of the j
 With 500K+ samples, the data *is* the reference panel.  See [docs/THEORY.md](docs/THEORY.md)
 for the full mathematical treatment.  The pipeline:
 
-1. **SEED** — Randomized SVD on a SNP subset projects all haplotypes into PCA space. GMM assigns soft ancestry labels. Number of ancestries auto-detected via recursive hierarchical splitting (BIC-based binary splits on sub-PCA projections) or eigenvalue gap heuristic.
+1. **SEED** — Randomized SVD on a SNP subset projects all haplotypes into PCA space. GMM assigns soft ancestry labels. Number of ancestries auto-detected via Marchenko-Pastur law (default), recursive hierarchical splitting, or eigenvalue gap heuristic.
 
 2. **INIT** — Allele frequencies per ancestry computed from soft GMM assignments via weighted GEMM. Window-based refinement handles admixed haplotypes.
 
@@ -187,7 +187,7 @@ demo.py        Standalone demo on simulated data
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--method` | `hmm` | Refinement backend: `hmm`, `cnn`, or `cnn-crf` |
-| `--ancestry-detection` | `recursive` | Auto-detection method: `recursive` (hierarchical BIC splitting) or `eigenvalue-gap` |
+| `--ancestry-detection` | `marchenko-pastur` | Auto-detection method: `marchenko-pastur`, `recursive` (hierarchical BIC splitting), or `eigenvalue-gap` |
 | `--per-hap-T` | off | Estimate per-haplotype admixture time (disabled by default; pass `--per-hap-T` to enable) |
 | `--n-T-buckets` | 20 | Number of transition-matrix buckets for per-haplotype T |
 | `--block-emissions` | off | Use k-SNP haplotype pattern matching instead of single-site Bernoulli |
