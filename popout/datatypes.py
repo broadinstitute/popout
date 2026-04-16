@@ -122,6 +122,14 @@ class AncestryModel:
         # Diagonal terms: log((1-p) + p*mu[i])
         log_diag = jnp.logaddexp(log_1mp, log_p + log_mu[None, None, :])
 
+        # Note: log_off and log_diag both carry log_mu[j] on the last axis.
+        # For off-diagonal entries (i != j), we want log(p * mu[j]) — correct.
+        # For diagonal entries (i == j), we want logaddexp(log(1-p), log(p * mu[i])).
+        # The jnp.where selects per-position: at (i, i), it picks from log_diag,
+        # whose last-axis value at index j=i is exactly log(p * mu[i]).
+        # DO NOT rewrite this to compute off/diag on different axes without
+        # verifying the diagonal is still log(p * mu[i]), not log(p * mu[j]) for
+        # some arbitrary j.
         log_trans = jnp.where(
             eye[None, :, :],
             jnp.broadcast_to(log_diag, (d_morgan.shape[0], A, A)),
@@ -150,6 +158,14 @@ class AncestryModel:
             log_1mp = jnp.log(1.0 - p_switch + 1e-30)[:, None, None]
             log_off = log_p + log_mu[None, None, :]
             log_diag = jnp.logaddexp(log_1mp, log_p + log_mu[None, None, :])
+            # Note: log_off and log_diag both carry log_mu[j] on the last axis.
+            # For off-diagonal entries (i != j), we want log(p * mu[j]) — correct.
+            # For diagonal entries (i == j), we want logaddexp(log(1-p), log(p * mu[i])).
+            # The jnp.where selects per-position: at (i, i), it picks from log_diag,
+            # whose last-axis value at index j=i is exactly log(p * mu[i]).
+            # DO NOT rewrite this to compute off/diag on different axes without
+            # verifying the diagonal is still log(p * mu[i]), not log(p * mu[j]) for
+            # some arbitrary j.
             return jnp.where(
                 eye[None, :, :],
                 jnp.broadcast_to(log_diag, (d_morgan.shape[0], A, A)),
