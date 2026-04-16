@@ -36,7 +36,6 @@ def _make_result(posteriors: np.ndarray, chrom: str = "1") -> AncestryResult:
         mu=jnp.ones(A) / A,
         gen_since_admix=20.0,
         allele_freq=jnp.full((A, T), 0.5),
-        mismatch=jnp.zeros(A),
     )
     return AncestryResult(posteriors=gamma, calls=calls, model=model, chrom=chrom)
 
@@ -273,7 +272,6 @@ class TestOutputWriters:
             mu=jnp.ones(A) / A,
             gen_since_admix=20.0,
             allele_freq=jnp.array(freq, dtype=jnp.float32),
-            mismatch=jnp.zeros(A),
         )
         posteriors = jnp.full((H, T, A), 1.0 / A)
         result = AncestryResult(

@@ -269,7 +269,6 @@ def run_cnn(
             mu=new_mu,
             gen_since_admix=new_T,
             allele_freq=new_freq,
-            mismatch=model.mismatch,
         )
         log.info("  mu = %s", np.array(model.mu).round(3))
         log.info("  T = %.1f generations", model.gen_since_admix)
@@ -395,7 +394,6 @@ def run_cnn_genome(
                 mu=fitted_model.mu,
                 gen_since_admix=fitted_model.gen_since_admix,
                 allele_freq=model.allele_freq,
-                mismatch=fitted_model.mismatch,
             )
 
             # Build features and run one fine-tuning epoch
@@ -443,7 +441,6 @@ def run_cnn_genome(
                 mu=model.mu,
                 gen_since_admix=model.gen_since_admix,
                 allele_freq=new_freq,
-                mismatch=model.mismatch,
             )
 
             # Build decode result from the final gamma without keeping full tensor

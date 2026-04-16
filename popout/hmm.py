@@ -691,7 +691,6 @@ def forward_backward_bucketed(
             mu=model.mu,
             gen_since_admix=float(model.bucket_centers[b]),
             allele_freq=model.allele_freq,
-            mismatch=model.mismatch,
         )
 
         # Run in sub-batches if n_b is large
@@ -827,7 +826,6 @@ def forward_backward_bucketed_em(
             mu=model.mu,
             gen_since_admix=float(model.bucket_centers[b]),
             allele_freq=model.allele_freq,
-            mismatch=model.mismatch,
         )
 
         for s in range(0, n_b, batch_size):
@@ -953,7 +951,6 @@ def forward_backward_bucketed_decode(
             mu=model.mu,
             gen_since_admix=float(model.bucket_centers[b]),
             allele_freq=model.allele_freq,
-            mismatch=model.mismatch,
         )
 
         for s in range(0, n_b, batch_size):

@@ -29,7 +29,6 @@ def _make_model_npz(tmp_path: Path, freq: np.ndarray, chrom: str = "chr20") -> P
         pos_cm=np.linspace(0, 50, T),
         chrom=np.array(chrom),
         mu=np.ones(K) / K,
-        mismatch=np.zeros(K),
         n_ancestries=K,
         gen_since_admix=20.0,
     )

@@ -367,14 +367,12 @@ def init_model_from_labels(
 
     freq = jnp.clip(freq, 1e-4, 1.0 - 1e-4)
     mu = mu_counts / mu_counts.sum()
-    mismatch = jnp.full(A, 0.001)
 
     return AncestryModel(
         n_ancestries=A,
         mu=mu,
         gen_since_admix=gen_since_admix,
         allele_freq=freq,
-        mismatch=mismatch,
     )
 
 
@@ -431,14 +429,12 @@ def init_model_soft(
 
     mu = resp.mean(axis=0)
     mu = mu / mu.sum()
-    mismatch = jnp.full(A, 0.001)
 
     return AncestryModel(
         n_ancestries=A,
         mu=mu,
         gen_since_admix=gen_since_admix,
         allele_freq=freq,
-        mismatch=mismatch,
     )
 
 
@@ -529,7 +525,7 @@ def run_em(
         model = AncestryModel(
             n_ancestries=model.n_ancestries, mu=model.mu,
             gen_since_admix=model.gen_since_admix, allele_freq=model.allele_freq,
-            mismatch=model.mismatch, pattern_freq=pf, block_data=bd,
+            pattern_freq=pf, block_data=bd,
         )
 
     # --- Stage 2-3: EM iterations ---
@@ -615,7 +611,6 @@ def run_em(
             mu=new_mu,
             gen_since_admix=new_T,
             allele_freq=new_freq,
-            mismatch=model.mismatch,
             gen_per_hap=T_per_hap,
             bucket_centers=bucket_centers,
             bucket_assignments=bucket_assignments,
@@ -790,7 +785,6 @@ def run_em_genome(
                 mu=fitted_model.mu,
                 gen_since_admix=fitted_model.gen_since_admix,
                 allele_freq=model.allele_freq,
-                mismatch=fitted_model.mismatch,
                 gen_per_hap=fitted_model.gen_per_hap,
                 bucket_centers=fitted_model.bucket_centers,
                 bucket_assignments=fitted_model.bucket_assignments,
@@ -813,7 +807,6 @@ def run_em_genome(
                 mu=model.mu,
                 gen_since_admix=model.gen_since_admix,
                 allele_freq=new_freq,
-                mismatch=model.mismatch,
                 gen_per_hap=model.gen_per_hap,
                 bucket_centers=model.bucket_centers,
                 bucket_assignments=model.bucket_assignments,

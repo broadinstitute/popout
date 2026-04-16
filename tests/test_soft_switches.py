@@ -91,7 +91,6 @@ def _make_known_model(n_haps=200, n_sites=100, n_ancestries=3,
         mu=jnp.array(mu, dtype=jnp.float32),
         gen_since_admix=float(gen_since_admix),
         allele_freq=jnp.array(np.clip(pop_freq, 1e-3, 1 - 1e-3), dtype=jnp.float32),
-        mismatch=jnp.zeros(n_ancestries),
     )
     return chrom_data, geno, model, d_morgan, true_ancestry
 
@@ -373,7 +372,6 @@ def test_bucketed_em_stats_have_soft_switches():
         mu=model.mu,
         gen_since_admix=model.gen_since_admix,
         allele_freq=model.allele_freq,
-        mismatch=model.mismatch,
         bucket_centers=bucket_centers,
         bucket_assignments=bucket_assignments,
     )
@@ -406,7 +404,6 @@ def test_compute_soft_switches_trivial():
         mu=mu,
         gen_since_admix=0.001,  # nearly zero
         allele_freq=jnp.array(rng.uniform(0.1, 0.9, (A, T)), dtype=jnp.float32),
-        mismatch=jnp.zeros(A),
     )
     d_morgan = jnp.ones(T - 1) * 0.01  # 1 cM per interval
 
@@ -436,7 +433,6 @@ def test_compute_soft_switches_high_T():
         mu=mu,
         gen_since_admix=500.0,
         allele_freq=jnp.array(rng.uniform(0.1, 0.9, (A, T)), dtype=jnp.float32),
-        mismatch=jnp.zeros(A),
     )
     d_morgan = jnp.ones(T - 1) * 0.01
 

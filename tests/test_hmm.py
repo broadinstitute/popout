@@ -82,7 +82,7 @@ def test_checkpointed_small_T():
         mu = jnp.array([0.4, 0.35, 0.25])
         model = AncestryModel(
             n_ancestries=A, mu=mu, gen_since_admix=20.0,
-            allele_freq=freq, mismatch=jnp.full(A, 0.001),
+            allele_freq=freq,
         )
 
         gamma_full = forward_backward(geno, model, d_morgan, use_checkpointing=False)

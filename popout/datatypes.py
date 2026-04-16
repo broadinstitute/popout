@@ -78,15 +78,12 @@ class AncestryModel:
         Estimated generations since admixture (T).
     allele_freq : jnp.ndarray, shape (A, n_sites)
         Per-ancestry allele frequencies at each site.
-    mismatch : jnp.ndarray, shape (A,)
-        Per-ancestry mismatch/error rate.
     """
 
     n_ancestries: int
     mu: jnp.ndarray
     gen_since_admix: float
     allele_freq: jnp.ndarray
-    mismatch: jnp.ndarray = field(default_factory=lambda: jnp.array([]))
     # Per-haplotype T (optional — None means scalar T for all haplotypes)
     gen_per_hap: Optional[jnp.ndarray] = None       # (H,)
     bucket_centers: Optional[jnp.ndarray] = None     # (B,)
