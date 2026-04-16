@@ -39,7 +39,7 @@ from popout.spectral import seed_ancestry_soft
 def _make_model(n_samples=100, n_sites=100, n_ancestries=3,
                 gen_since_admix=20, chrom_length_cm=100.0, rng_seed=42):
     """Build a small model + data for testing."""
-    chrom_data, true_ancestry = simulate_admixed(
+    chrom_data, true_ancestry, _ = simulate_admixed(
         n_samples=n_samples,
         n_sites=n_sites,
         n_ancestries=n_ancestries,
@@ -63,7 +63,7 @@ def _make_known_model(n_haps=200, n_sites=100, n_ancestries=3,
 
     Returns the model used to generate the data, so T is exactly known.
     """
-    chrom_data, true_ancestry = simulate_admixed(
+    chrom_data, true_ancestry, _ = simulate_admixed(
         n_samples=n_haps // 2,
         n_sites=n_sites,
         n_ancestries=n_ancestries,
@@ -212,7 +212,7 @@ def test_density_invariance():
     mean_hard = []
 
     for n_sites in densities:
-        chrom_data, true_ancestry = simulate_admixed(
+        chrom_data, true_ancestry, _ = simulate_admixed(
             n_samples=n_samples,
             n_sites=n_sites,
             n_ancestries=n_ancestries,

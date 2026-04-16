@@ -32,7 +32,7 @@ from popout.spectral import seed_ancestry_soft
 
 def _make_model(n_samples=200, n_sites=100, n_ancestries=3, rng_seed=42):
     """Build a small model + data for testing."""
-    chrom_data, true_ancestry = simulate_admixed(
+    chrom_data, true_ancestry, _ = simulate_admixed(
         n_samples=n_samples,
         n_sites=n_sites,
         n_ancestries=n_ancestries,
@@ -269,7 +269,7 @@ def test_streaming_em_matches_full():
 
 def test_moderate_scale():
     """Test at moderate scale (10K haps) to exercise multi-batch streaming."""
-    chrom_data, _true = simulate_admixed(
+    chrom_data, _true, _ = simulate_admixed(
         n_samples=5000, n_sites=200, n_ancestries=4, rng_seed=99,
     )
     geno = jnp.array(chrom_data.geno)

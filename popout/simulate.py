@@ -25,7 +25,7 @@ def simulate_admixed(
     chrom_length_cm: float = 100.0,
     fst_range: tuple[float, float] = (0.05, 0.15),
     rng_seed: int = 42,
-) -> tuple[ChromData, np.ndarray]:
+) -> tuple[ChromData, np.ndarray, dict]:
     """Generate simulated admixed haplotype data.
 
     Parameters
@@ -42,6 +42,8 @@ def simulate_admixed(
     -------
     chrom_data : ChromData with simulated genotypes
     true_ancestry : array (n_haps, n_sites) — ground truth ancestry labels
+    true_params : dict with keys 'pop_freq' (A, n_sites), 'mu' (A,),
+        'gen_since_admix' (int) — generative parameters for oracle comparison
     """
     rng = np.random.default_rng(rng_seed)
     A = n_ancestries
@@ -106,7 +108,12 @@ def simulate_admixed(
         prop = (true_ancestry == a).mean()
         log.info("  True ancestry %d: %.1f%%", a, 100 * prop)
 
-    return chrom_data, true_ancestry
+    true_params = {
+        "pop_freq": pop_freq,
+        "mu": mu,
+        "gen_since_admix": T,
+    }
+    return chrom_data, true_ancestry, true_params
 
 
 def evaluate_accuracy(
