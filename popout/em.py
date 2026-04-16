@@ -102,100 +102,6 @@ def update_allele_freq(
     return freq
 
 
-def smooth_rare_frequencies(
-    freq: jnp.ndarray,
-    pos_cm: jnp.ndarray,
-    bandwidth_cm: float = 0.05,
-    maf_threshold: float = 0.05,
-) -> jnp.ndarray:
-    """Gaussian-kernel smooth allele frequencies at rare variants.
-
-    Rare variants (MAF < threshold) have their per-ancestry frequencies
-    smoothed along the genomic coordinate, borrowing strength from
-    nearby sites.  Common variants are left unchanged.
-
-    Parameters
-    ----------
-    freq : (A, T) — per-ancestry allele frequencies
-    pos_cm : (T,) — genetic positions in centiMorgans
-    bandwidth_cm : Gaussian kernel bandwidth in cM (0 = disabled)
-    maf_threshold : variants with MAF below this are smoothed
-
-    Returns
-    -------
-    freq_smoothed : (A, T)
-    """
-    A, T = freq.shape
-    if bandwidth_cm <= 0 or T <= 1:
-        return freq
-
-    # Identify rare variants by overall MAF (average across ancestries)
-    overall_freq = freq.mean(axis=0)  # (T,)
-    maf = jnp.minimum(overall_freq, 1.0 - overall_freq)
-    is_rare = maf < maf_threshold  # (T,)
-
-    if T <= 20_000:
-        # O(T²) path — simple and fast for moderate site counts
-        d = jnp.abs(pos_cm[:, None] - pos_cm[None, :])  # (T, T)
-        K = jnp.exp(-0.5 * (d / bandwidth_cm) ** 2)      # (T, T)
-        K_norm = K / K.sum(axis=1, keepdims=True)
-        freq_smooth = freq @ K_norm.T  # (A, T)
-    else:
-        # O(T·W) windowed path — scales to any number of sites
-        freq_smooth = _windowed_gaussian_smooth(freq, pos_cm, bandwidth_cm)
-
-    # Blend: keep original at common variants, use smoothed at rare ones
-    result = jnp.where(is_rare[None, :], freq_smooth, freq)
-    return jnp.clip(result, 1e-6, 1.0 - 1e-6)
-
-
-def _windowed_gaussian_smooth(
-    freq: jnp.ndarray,
-    pos_cm: jnp.ndarray,
-    bandwidth_cm: float,
-) -> jnp.ndarray:
-    """Gaussian smoothing using a sliding window over sorted cM positions.
-
-    For each site, only neighbors within ±3σ (99.7% of mass) contribute.
-    Memory is O(T × W) where W is the maximum window width in SNPs,
-    instead of O(T²) for the full pairwise kernel.
-    """
-    A, T = freq.shape
-    half_w_cm = 3.0 * bandwidth_cm  # 99.7% of Gaussian mass
-
-    # --- Build index/weight arrays on CPU (vectorized, no Python loop) ---
-    pos_np = np.asarray(pos_cm)
-    lo = np.searchsorted(pos_np, pos_np - half_w_cm, side="left")   # (T,)
-    hi = np.searchsorted(pos_np, pos_np + half_w_cm, side="right")  # (T,)
-    max_w = int((hi - lo).max())
-
-    # offsets[t, j] = lo[t] + j; valid where < hi[t]
-    offsets = np.arange(max_w)[None, :]          # (1, max_w)
-    raw_idx = lo[:, None] + offsets               # (T, max_w)
-    valid = raw_idx < hi[:, None]                 # (T, max_w) bool
-    indices = np.where(valid, raw_idx, 0)         # clamp invalid to 0
-
-    # Gaussian weights based on cM distance
-    d = np.abs(pos_np[indices] - pos_np[:, None])  # (T, max_w)
-    weights = np.where(valid, np.exp(-0.5 * (d / bandwidth_cm) ** 2), 0.0)
-    row_sums = weights.sum(axis=1, keepdims=True)
-    weights /= np.maximum(row_sums, 1e-10)         # normalize rows
-
-    # --- Chunked gather-and-sum on GPU ---
-    freq_smooth = jnp.zeros((A, T))
-    chunk = 10_000
-    for t0 in range(0, T, chunk):
-        t1 = min(t0 + chunk, T)
-        idx_j = jnp.array(indices[t0:t1])   # (chunk, max_w)
-        w_j = jnp.array(weights[t0:t1])     # (chunk, max_w)
-        gathered = freq[:, idx_j]            # (A, chunk, max_w)
-        freq_smooth = freq_smooth.at[:, t0:t1].set(
-            (gathered * w_j[None, :, :]).sum(axis=2)
-        )
-
-    return freq_smooth
-
-
 def update_mu(gamma: jnp.ndarray) -> jnp.ndarray:
     """Update global ancestry proportions.
 
@@ -548,8 +454,6 @@ def run_em(
     batch_size: int | None = None,
     rng_seed: int = 42,
     stats=None,
-    bandwidth_cm: float = 0.05,
-    maf_threshold: float = 0.05,
     per_hap_T: bool = False,
     n_T_buckets: int = 20,
     use_block_emissions: bool = False,
@@ -574,9 +478,6 @@ def run_em(
     gen_since_admix : initial guess for T
     batch_size : haplotypes per forward-backward batch (None = auto-tune)
     rng_seed : random seed
-    bandwidth_cm : Gaussian kernel bandwidth for rare-variant frequency smoothing.
-                   Set to 0 to disable.
-    maf_threshold : MAF threshold below which frequencies are smoothed.
     detection_method : ancestry auto-detection method
     max_ancestries : upper bound for auto-detected ancestry count
 
@@ -611,7 +512,6 @@ def run_em(
     # Transfer to device
     geno = jnp.array(geno_np)
     d_morgan_j = jnp.array(d_morgan)
-    pos_cm_j = jnp.array(chrom_data.pos_cm.astype(np.float32))
 
     # --- Stage 1: Init model from soft assignments + window refinement ---
     log.info("Stage 1: Initializing model from soft assignments")
@@ -710,10 +610,6 @@ def run_em(
         if stats is not None:
             stats.timer_start("m_step")
         new_freq = update_allele_freq_from_stats(em_stats)
-        if bandwidth_cm > 0:
-            new_freq = smooth_rare_frequencies(
-                new_freq, pos_cm_j, bandwidth_cm, maf_threshold,
-            )
         if freq_alpha > 0 and iteration > 0:
             new_freq = model.allele_freq + freq_alpha * (new_freq - model.allele_freq)
         new_mu = update_mu_from_stats(em_stats)
@@ -898,8 +794,6 @@ def run_em_genome(
     rng_seed: int = 42,
     seed_chrom: Optional[str] = None,
     stats=None,
-    bandwidth_cm: float = 0.05,
-    maf_threshold: float = 0.05,
     per_hap_T: bool = False,
     n_T_buckets: int = 20,
     use_block_emissions: bool = False,
@@ -943,8 +837,6 @@ def run_em_genome(
                 batch_size=batch_size,
                 rng_seed=rng_seed,
                 stats=stats,
-                bandwidth_cm=bandwidth_cm,
-                maf_threshold=maf_threshold,
                 per_hap_T=per_hap_T,
                 n_T_buckets=n_T_buckets,
                 use_block_emissions=use_block_emissions,
@@ -995,11 +887,6 @@ def run_em_genome(
             else:
                 em_stats = forward_backward_em(geno, model, d_morgan_j, chrom_batch)
             new_freq = update_allele_freq_from_stats(em_stats)
-            if bandwidth_cm > 0:
-                pos_cm_j = jnp.array(chrom_data.pos_cm.astype(np.float32))
-                new_freq = smooth_rare_frequencies(
-                    new_freq, pos_cm_j, bandwidth_cm, maf_threshold,
-                )
             if freq_alpha > 0:
                 new_freq = model.allele_freq + freq_alpha * (new_freq - model.allele_freq)
             model = AncestryModel(

@@ -144,16 +144,6 @@ def main(argv: list[str] | None = None) -> None:
         help="SNPs per block for block emissions (default: 8)",
     )
     parser.add_argument(
-        "--smooth-bandwidth-cm", type=float, default=0.05,
-        help="Gaussian kernel bandwidth (cM) for smoothing rare-variant allele "
-             "frequencies. Set to 0 to disable. (default: 0.05)",
-    )
-    parser.add_argument(
-        "--smooth-maf-threshold", type=float, default=0.05,
-        help="MAF threshold below which allele frequencies are smoothed "
-             "(default: 0.05)",
-    )
-    parser.add_argument(
         "--freq-damping", type=float, default=0.0,
         help="Frequency dampening factor (0-1). Blends new allele frequencies "
              "with prior iteration. 0.75 recommended. 0 = disabled (default: 0)",
@@ -336,8 +326,6 @@ def main(argv: list[str] | None = None) -> None:
             hmm_batch_size=args.batch_size,
             rng_seed=args.seed,
             stats=stats,
-            bandwidth_cm=args.smooth_bandwidth_cm,
-            maf_threshold=args.smooth_maf_threshold,
             n_layers=args.cnn_layers,
             hidden_dim=args.cnn_channels,
             n_epochs=args.cnn_epochs,
@@ -356,8 +344,6 @@ def main(argv: list[str] | None = None) -> None:
             batch_size=args.batch_size,
             rng_seed=args.seed,
             stats=stats,
-            bandwidth_cm=args.smooth_bandwidth_cm,
-            maf_threshold=args.smooth_maf_threshold,
             per_hap_T=args.per_hap_T,
             n_T_buckets=args.n_T_buckets,
             use_block_emissions=args.block_emissions,

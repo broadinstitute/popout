@@ -356,32 +356,6 @@ soft overlaps for switch counting is more robust when posteriors are diffuse.
 When `--per-hap-T` is enabled, the same formula is applied per-haplotype
 instead of globally (see §4 Transitions above).
 
-### Allele frequency smoothing
-
-At rare variants (MAF < 0.05), per-ancestry frequency estimates can be noisy
-even at biobank scale — a variant present in only 0.1% of the population may
-have only a few hundred weighted observations per ancestry.  After computing
-raw frequencies, a Gaussian kernel smooth is applied along the genomic
-coordinate within each ancestry:
-
-```
-freq_smooth[a, t] = Σ_s K(d(t,s) / σ) · freq_raw[a, s] / Σ_s K(d(t,s) / σ)
-```
-
-where K is a Gaussian kernel, d(t,s) is the genetic distance between sites t
-and s in centiMorgans, and σ is the bandwidth (default 0.05 cM, spanning
-~2–3 sites at thinned array density).
-
-Only variants with overall MAF below the threshold are smoothed; common
-variants are left unchanged.  This borrows strength from neighboring sites
-— justified because ancestry-specific frequencies vary smoothly at fine
-genetic scale due to linkage disequilibrium.  The smoothing is complementary
-to the Beta-Bernoulli pseudocount (which prevents zero frequencies but does
-not exploit spatial structure).
-
-Controlled by `--smooth-bandwidth-cm` (0 = disabled) and
-`--smooth-maf-threshold`.
-
 ---
 
 ## 6. Spectral initialization: the math

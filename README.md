@@ -15,7 +15,7 @@ for the full mathematical treatment.  The pipeline:
 
 3. **REFINE** — Two refinement backends, selectable via `--method`:
 
-   - **HMM (default)** — Forward-backward HMM with A states (not K reference haplotypes — just A ancestries). State space is tiny: 8 floats per haplotype. All haplotypes run simultaneously on GPU via gradient-checkpointed scan (O(√T) memory). EM iteration: M-step updates allele frequencies (with optional rare-variant smoothing), ancestry proportions μ, and generations since admixture T (global or per-haplotype). Converges in 2-3 iterations with large samples.
+   - **HMM (default)** — Forward-backward HMM with A states (not K reference haplotypes — just A ancestries). State space is tiny: 8 floats per haplotype. All haplotypes run simultaneously on GPU via gradient-checkpointed scan (O(√T) memory). EM iteration: M-step updates allele frequencies, ancestry proportions μ, and generations since admixture T (global or per-haplotype). Converges in 2-3 iterations with large samples.
 
    - **CNN / CNN-CRF** — 1D dilated convolutional network that processes all sites in parallel and learns multi-site LD patterns via self-supervised pseudo-label refinement. Optional CRF output layer adds learned transition modeling. See [docs/CNN.md](docs/CNN.md).
 
@@ -154,7 +154,7 @@ vcf_io.py      VCF/BCF reader (pysam, for smaller datasets)
 gmap.py        Genetic map loading and chromosome normalization
 spectral.py    Randomized SVD + GMM + hierarchical ancestry detection
 hmm.py         Forward-backward HMM in JAX with gradient checkpointing
-em.py          EM loop: seed → init → iterate → decode, with freq smoothing
+em.py          EM loop: seed → init → iterate → decode
 blocks.py      Block-level haplotype pattern encoding for LD-aware emissions
 cnn/           CNN-CRF refinement backend (--method cnn or cnn-crf)
   model.py       Dilated residual 1D CNN architecture (pure JAX)
@@ -192,8 +192,6 @@ demo.py        Standalone demo on simulated data
 | `--n-T-buckets` | 20 | Number of transition-matrix buckets for per-haplotype T |
 | `--block-emissions` | off | Use k-SNP haplotype pattern matching instead of single-site Bernoulli |
 | `--block-size` | 8 | SNPs per block when using block emissions |
-| `--smooth-bandwidth-cm` | 0.05 | Gaussian kernel bandwidth (cM) for rare-variant frequency smoothing (0 = disabled) |
-| `--smooth-maf-threshold` | 0.05 | MAF threshold below which frequencies are smoothed |
 | `--thin-cm` | none | Minimum cM spacing for site thinning (recommended: 0.02 for WGS) |
 | `--export-panel` | off | Export reference panel files for downstream tools |
 | `--panel-threshold` | 0.95 | Min posterior for whole-haplotype extraction |
