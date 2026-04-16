@@ -658,6 +658,41 @@ same generative model the inference algorithm assumes:
 3. **Alleles** are emitted independently from the ancestry-specific frequency
    at each site.
 
+### Cohort composition: pure vs. admixed haplotypes
+
+Real biobank cohorts contain a mix of ancestrally pure individuals
+(first-generation immigrants, single-continental-origin samples) and
+admixed individuals.  The pure individuals form dense corners in PCA space
+that give the GMM spectral initialization reliable purchase on the true
+population structure.
+
+The simulator's `pure_fraction` parameter (default 0.3) controls this mix.
+Pure haplotypes are assigned a single ancestry across all sites — no Markov
+transitions.  They are distributed across ancestries proportionally to μ.
+The remaining haplotypes get the standard admixed treatment.
+
+**Two simulation regimes for validation:**
+
+- **Biobank-like (`pure_fraction=0.3`):** Models cohorts like AoU where
+  >20% of samples have recent single-continental-origin ancestry.  The
+  algorithm reaches near-oracle accuracy (gap < 1pp at 500 samples).
+
+- **Fully-admixed stress test (`pure_fraction=0.0`):** Every haplotype is
+  a mosaic.  The PCA projection has no dense corners, and GMM initialization
+  fails to recover the true population structure.  Accuracy is limited by
+  spectral init quality (gap 20–50pp).  This regime does not correspond to
+  any known human biobank but is useful for identifying algorithm
+  limitations.  Closing the gap in this regime requires a corner-finding
+  init (NMF, archetypal analysis, or SPA) instead of GMM.
+
+### Oracle benchmark
+
+The demo (`python -m popout.demo`) reports both inferred and oracle
+accuracy.  The oracle constructs an `AncestryModel` from the true
+generative parameters and decodes with `forward_backward_decode`.
+Oracle accuracy is the Bayes-optimal ceiling for the given F_ST and
+tract length — the best any method could achieve with perfect parameters.
+
 This allows closed-loop validation: run the inference pipeline on simulated
 data and compare inferred calls to ground truth.  Because inferred ancestry
 labels may be permuted relative to truth, the evaluator tries all
