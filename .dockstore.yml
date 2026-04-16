@@ -17,6 +17,10 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /vcf2pgen/wdl/kinship_prune.wdl
     topic: Generate sample exclusion list from KING kinship analysis
+  - name: hap-ibd
+    subclass: WDL
+    primaryDescriptorPath: /plink2/hap_ibd/wdl/hap_ibd.wdl
+    topic: PBWT-based haplotype IBD segment detection via custom plink2 fork
   - name: gpu-probe
     subclass: WDL
     primaryDescriptorPath: /gpu_probe/wdl/gpu_probe.wdl
