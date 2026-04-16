@@ -612,6 +612,17 @@ def forward_backward_batched(
     gamma : (H, T, A) posterior probabilities
     """
     H = geno.shape[0]
+
+    # Guard: this function materializes the full (H, T, A) gamma. At biobank
+    # scale use forward_backward_em (sufficient-statistics streaming) or
+    # forward_backward_decode (hard-call streaming) instead.
+    if H > 2 * batch_size:
+        raise RuntimeError(
+            f"forward_backward_batched would materialize a ({H}, T, A) tensor "
+            f"for H={H} > 2*batch_size={2*batch_size}. Use forward_backward_em "
+            f"for EM or forward_backward_decode for decoding."
+        )
+
     if H <= batch_size:
         return forward_backward(geno, model, d_morgan)
 
