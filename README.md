@@ -188,7 +188,7 @@ demo.py        Standalone demo on simulated data
 |------|---------|-------------|
 | `--method` | `hmm` | Refinement backend: `hmm`, `cnn`, or `cnn-crf` |
 | `--ancestry-detection` | `recursive` | Auto-detection method: `recursive` (hierarchical BIC splitting) or `eigenvalue-gap` |
-| `--per-hap-T` | off | Estimate per-haplotype admixture time instead of a single global T |
+| `--per-hap-T` | off | Estimate per-haplotype admixture time (disabled by default; pass `--per-hap-T` to enable) |
 | `--n-T-buckets` | 20 | Number of transition-matrix buckets for per-haplotype T |
 | `--block-emissions` | off | Use k-SNP haplotype pattern matching instead of single-site Bernoulli |
 | `--block-size` | 8 | SNPs per block when using block emissions |
