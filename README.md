@@ -171,6 +171,36 @@ simulate.py    Simulated admixed data + accuracy evaluation
 demo.py        Standalone demo on simulated data
 ```
 
+## Accuracy
+
+Measured on simulated 4-ancestry admixed data (F_ST 0.05–0.15, T = 20 generations,
+seed = 42).  Oracle accuracy is the Bayes-optimal ceiling — what the HMM achieves
+with perfect allele frequencies, mu, and T.  See `python -m popout.demo --sweep`
+to reproduce and [docs/SWEEP_RESULTS.md](docs/SWEEP_RESULTS.md) for full output.
+
+### Biobank-like cohorts (30% pure-ancestry haplotypes)
+
+Real biobanks contain single-continental-origin individuals that provide dense
+corners in PCA space for spectral initialization.
+
+| Samples | Sites | Oracle | EM | Gap |
+|---------|-------|--------|----|-----|
+| 500     | 2K    | 93.0%  | 92.5% | 0.5 pp |
+| 5K      | 10K   | 97.3%  | **97.1%** | **0.2 pp** |
+| 500     | 10K   | 97.3%  | 96.9% | 0.4 pp |
+
+### Fully-admixed stress test (0% pure-ancestry)
+
+All haplotypes are mosaics — no dense PCA corners for GMM.  This regime does
+not correspond to any known human biobank but exposes the spectral init
+limitation.
+
+| Samples | Sites | Oracle | EM | Gap |
+|---------|-------|--------|----|-----|
+| 500     | 2K    | 90.4%  | 62.2% | 28.2 pp |
+| 50K     | 2K    | 90.4%  | 69.7% | 20.8 pp |
+| 5K      | 10K   | 96.2%  | 42.2% | 54.0 pp |
+
 ## Performance estimates
 
 | Samples | Device | Wall clock (22 chroms) |
