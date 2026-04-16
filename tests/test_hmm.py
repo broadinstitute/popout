@@ -123,7 +123,8 @@ def test_batched_uses_checkpointing():
     geno, model, d_morgan, _ = _make_model(n_samples=100, n_sites=200)
 
     gamma_single = forward_backward(geno, model, d_morgan)
-    gamma_batched = forward_backward_batched(geno, model, d_morgan, batch_size=50)
+    # batch_size=150: H=200 <= 2*150=300, so guard passes; still batches (200 > 150)
+    gamma_batched = forward_backward_batched(geno, model, d_morgan, batch_size=150)
 
     np.testing.assert_allclose(
         np.array(gamma_single), np.array(gamma_batched), atol=1e-5,
