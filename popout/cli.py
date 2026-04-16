@@ -88,8 +88,8 @@ def main(argv: list[str] | None = None) -> None:
         help="Number of ancestries (default: auto-detect from PCA)",
     )
     parser.add_argument(
-        "--n-em-iter", type=int, default=20,
-        help="Maximum EM iterations on seed chromosome (default: 20; "
+        "--n-em-iter", type=int, default=5,
+        help="Maximum EM iterations on seed chromosome (default: 5; "
              "stops early on convergence)",
     )
     parser.add_argument(

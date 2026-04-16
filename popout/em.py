@@ -449,7 +449,7 @@ def init_model_soft(
 def run_em(
     chrom_data: ChromData,
     n_ancestries: Optional[int] = None,
-    n_em_iter: int = 3,
+    n_em_iter: int = 5,
     gen_since_admix: float = 20.0,
     batch_size: int | None = None,
     rng_seed: int = 42,
@@ -711,7 +711,7 @@ def run_em(
 def run_em_genome(
     chrom_iter,
     n_ancestries: Optional[int] = None,
-    n_em_iter: int = 3,
+    n_em_iter: int = 5,
     gen_since_admix: float = 20.0,
     batch_size: int | None = None,
     rng_seed: int = 42,

@@ -468,7 +468,7 @@ close to the truth immediately.  This is why 2–3 iterations suffice at
 biobank scale — the signal-to-noise ratio is so high that the algorithm
 barely needs to iterate.
 
-At smaller sample sizes, more iterations may be needed (the default is 3),
+At smaller sample sizes, more iterations may be needed (the default is 5),
 and the convergence threshold (max Δfreq < 1e-4) acts as a safety net.
 
 ### Self-consistency
@@ -670,7 +670,7 @@ Genome-wide parameters (μ, T) are shared across chromosomes, but allele
 frequencies are chromosome-specific (different genes, different population
 differentiation patterns).  The pipeline exploits this:
 
-1. **Seed chromosome:** Run full EM (spectral init + 3 iterations) on the
+1. **Seed chromosome:** Run full EM (spectral init + 5 iterations) on the
    first chromosome.  This estimates μ, T, and the number of ancestries.
 
 2. **Remaining chromosomes:** Warm-start with the fitted μ and T.  Compute
