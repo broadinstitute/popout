@@ -33,9 +33,11 @@ task popout_task {
     Boolean block_emissions    = false
 
     # Recursive seeding (--seed-method recursive)
-    String  seed_method           = "gmm"
-    Int     freeze_anchors_iters  = 0
-    String  extra_args            = ""
+    String  seed_method              = "gmm"
+    Int     freeze_anchors_iters     = 0
+    Float   recursive_merge_hellinger = 0.08
+    Int     recursive_max_leaves     = 20
+    String  extra_args               = ""
 
     # Weights & Biases — API key string or gs:// URL to a file containing it
     String? wandb_key
@@ -99,6 +101,8 @@ task popout_task {
     ~{if block_emissions then 'CMD="$CMD --block-emissions"' else ''}
 
     CMD="$CMD --seed-method ~{seed_method}"
+    CMD="$CMD --recursive-merge-hellinger ~{recursive_merge_hellinger}"
+    CMD="$CMD --recursive-max-leaves ~{recursive_max_leaves}"
     if [ "~{freeze_anchors_iters}" -gt 0 ]; then
       CMD="$CMD --freeze-anchors-iters ~{freeze_anchors_iters}"
     fi
@@ -130,6 +134,11 @@ task popout_task {
     File? panel_segments    = "~{output_prefix}.panel.segments.tsv.gz"
     File? panel_frequencies = "~{output_prefix}.panel.frequencies.tsv.gz"
     File? panel_proportions = "~{output_prefix}.panel.proportions.tsv"
+
+    # Pre-merge dump (produced when seed_method = recursive)
+    File? recursive_leaves     = "~{output_prefix}.recursive_pre_merge.leaves.tsv"
+    File? recursive_leaf_meta  = "~{output_prefix}.recursive_pre_merge.leaf_meta.tsv"
+    File? recursive_leaf_freqs = "~{output_prefix}.recursive_pre_merge.leaf_freqs.npz"
   }
 
   runtime {
@@ -165,9 +174,11 @@ workflow popout {
     Boolean block_emissions    = false
 
     # Recursive seeding
-    String  seed_method           = "gmm"
-    Int     freeze_anchors_iters  = 0
-    String  extra_args            = ""
+    String  seed_method              = "gmm"
+    Int     freeze_anchors_iters     = 0
+    Float   recursive_merge_hellinger = 0.08
+    Int     recursive_max_leaves     = 20
+    String  extra_args               = ""
 
     # Weights & Biases
     String? wandb_key
@@ -196,9 +207,11 @@ workflow popout {
       gen_since_admix = gen_since_admix,
       export_panel    = export_panel,
       block_emissions = block_emissions,
-      seed_method          = seed_method,
-      freeze_anchors_iters = freeze_anchors_iters,
-      extra_args      = extra_args,
+      seed_method               = seed_method,
+      freeze_anchors_iters      = freeze_anchors_iters,
+      recursive_merge_hellinger = recursive_merge_hellinger,
+      recursive_max_leaves      = recursive_max_leaves,
+      extra_args                = extra_args,
       wandb_key       = wandb_key,
       machine_type    = machine_type,
       gpu_type        = gpu_type,
@@ -220,5 +233,9 @@ workflow popout {
     File? panel_segments    = popout_task.panel_segments
     File? panel_frequencies = popout_task.panel_frequencies
     File? panel_proportions = popout_task.panel_proportions
+
+    File? recursive_leaves     = popout_task.recursive_leaves
+    File? recursive_leaf_meta  = popout_task.recursive_leaf_meta
+    File? recursive_leaf_freqs = popout_task.recursive_leaf_freqs
   }
 }
