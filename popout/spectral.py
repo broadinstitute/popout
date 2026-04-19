@@ -433,7 +433,7 @@ def _detect_n_ancestries_recursive(
     max_a: int,
     key: jax.Array,
     min_cluster_size: int = 100,
-    bic_threshold: float = 5.0,
+    bic_per_sample: float = 0.01,
 ) -> int:
     """Detect number of ancestries via recursive BIC-based binary splitting.
 
@@ -447,7 +447,7 @@ def _detect_n_ancestries_recursive(
     max_a : maximum number of ancestries
     key : JAX PRNG key
     min_cluster_size : don't split clusters smaller than this
-    bic_threshold : BIC(1-GMM) - BIC(2-GMM) must exceed this to split
+    bic_per_sample : per-sample BIC improvement required to split
 
     Returns
     -------
@@ -473,9 +473,9 @@ def _detect_n_ancestries_recursive(
         subset = X_proj[mask]
         sub_proj = _sub_pca(subset, n_components=2)
 
-        # BIC split test
+        # BIC split test (per-sample scaled threshold)
         key, subkey = jax.random.split(key)
-        should_split, labels = _bic_split_test(sub_proj, subkey, bic_threshold)
+        should_split, labels = _bic_split_test(sub_proj, subkey, bic_per_sample)
 
         if should_split and labels is not None:
             mask_np = np.array(mask)
@@ -514,11 +514,13 @@ def _sub_pca(
 def _bic_split_test(
     X: jnp.ndarray,
     key: jax.Array,
-    threshold: float = 5.0,
+    per_sample_threshold: float = 0.01,
 ) -> tuple[bool, jnp.ndarray | None]:
     """Test whether a cluster should be split using BIC comparison.
 
     Compares BIC of 1-component vs 2-component diagonal GMM.
+    The threshold scales with cluster size: a split is accepted when
+    BIC(1) - BIC(2) > per_sample_threshold * N.
 
     Returns
     -------
@@ -542,7 +544,7 @@ def _bic_split_test(
     k2 = 4 * d + 1  # 2 means + 2 variances + 1 mixing weight
     bic2 = -2 * ll2 + k2 * np.log(n)
 
-    should_split = (bic1 - bic2) > threshold
+    should_split = (bic1 - bic2) > per_sample_threshold * n
     return should_split, labels if should_split else None
 
 

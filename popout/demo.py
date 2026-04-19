@@ -35,6 +35,36 @@ logging.basicConfig(
 log = logging.getLogger("popout.demo")
 
 
+def leaf_purity(calls, true_ancestry, n_true_ancestries):
+    """Per-leaf purity: max fraction sharing the same true ancestry.
+
+    Returns (mean_purity, min_purity, per_leaf_purity_array).
+    """
+    n_leaves = int(calls.max()) + 1
+    purities = np.zeros(n_leaves)
+    for leaf in range(n_leaves):
+        in_leaf = (calls.flatten() == leaf) if calls.ndim == 1 else np.any(calls == leaf, axis=1)
+        # Use per-haplotype majority ancestry
+        if calls.ndim == 2:
+            in_leaf_haps = np.where(in_leaf)[0]
+            if len(in_leaf_haps) == 0:
+                purities[leaf] = 1.0
+                continue
+            hap_majority = np.array([
+                np.bincount(true_ancestry[h], minlength=n_true_ancestries).argmax()
+                for h in in_leaf_haps
+            ])
+            counts = np.bincount(hap_majority, minlength=n_true_ancestries)
+        else:
+            mask = calls == leaf
+            if mask.sum() == 0:
+                purities[leaf] = 1.0
+                continue
+            counts = np.bincount(true_ancestry[mask], minlength=n_true_ancestries)
+        purities[leaf] = counts.max() / counts.sum()
+    return float(purities.mean()), float(purities.min()), purities
+
+
 def run_demo(
     n_samples: int = 500,
     n_sites: int = 2000,
@@ -44,6 +74,8 @@ def run_demo(
     batch_size: int = 10_000,
     seed: int = 42,
     pure_fraction: float = 0.3,
+    seed_method: str = "gmm",
+    freeze_anchors_iters: int = 0,
 ):
     import jax
     log.info("JAX devices: %s", jax.devices())
@@ -110,22 +142,51 @@ def run_demo(
 
     # --- Run EM pipeline ---
     t0 = time.perf_counter()
+    seed_resp = None
+    em_n_ancestries = n_ancestries
+
+    if seed_method == "recursive":
+        from .recursive_seed import recursive_split_seed
+        leaf_labels, leaf_info = recursive_split_seed(
+            chrom_data.geno,
+            min_cluster_size=max(100, n_samples * 2 // 20),
+            bic_per_sample=0.01,
+            max_depth=6,
+            max_leaves=12,
+            em_iter_per_split=3,
+            rng_seed=seed,
+            chrom_data=chrom_data,
+            gen_since_admix=float(gen_since_admix),
+        )
+        n_leaves = len(leaf_info)
+        log.info("Recursive seed: discovered K=%d (true K=%d)", n_leaves, n_ancestries)
+        seed_resp = jnp.zeros((chrom_data.n_haps, n_leaves), dtype=jnp.float32)
+        seed_resp = seed_resp.at[
+            jnp.arange(chrom_data.n_haps), jnp.array(leaf_labels)
+        ].set(1.0)
+        em_n_ancestries = n_leaves
+
     result = run_em(
         chrom_data,
-        n_ancestries=n_ancestries,
+        n_ancestries=em_n_ancestries,
         n_em_iter=n_em_iter,
         gen_since_admix=float(gen_since_admix),
         batch_size=batch_size,
         rng_seed=seed,
+        seed_responsibilities=seed_resp,
+        freeze_anchors_iters=freeze_anchors_iters,
     )
     t_em = time.perf_counter() - t0
-    log.info("EM pipeline: %.1f seconds", t_em)
+    log.info("EM pipeline (%s seed): %.1f seconds", seed_method, t_em)
 
     # --- Evaluate ---
-    metrics = evaluate_accuracy(result.calls, true_ancestry, n_ancestries)
+    inferred_K = result.model.n_ancestries
+    metrics = evaluate_accuracy(result.calls, true_ancestry, inferred_K)
     log.info("=" * 50)
-    log.info("RESULTS")
+    log.info("RESULTS (%s seed)", seed_method)
     log.info("=" * 50)
+    if seed_method == "recursive":
+        log.info("Discovered K:    %d (true K=%d)", inferred_K, n_ancestries)
     log.info("Oracle accuracy: %.1f%%", 100 * oracle_metrics["overall_accuracy"])
     log.info("EM accuracy:     %.1f%%", 100 * metrics["overall_accuracy"])
     log.info("Gap:             %.1f pp",
@@ -133,6 +194,14 @@ def run_demo(
     log.info("Best permutation: %s", metrics["best_permutation"])
     for a, acc in metrics["per_ancestry_accuracy"].items():
         log.info("  Ancestry %d: %.1f%%", a, 100 * acc)
+
+    # --- Per-leaf purity ---
+    mean_pur, min_pur, per_leaf = leaf_purity(
+        result.calls, true_ancestry, n_ancestries,
+    )
+    log.info("Per-leaf purity: mean=%.3f, min=%.3f", mean_pur, min_pur)
+    for i, p in enumerate(per_leaf):
+        log.info("  Leaf %d: purity=%.3f", i, p)
 
     # --- Model recovery ---
     log.info("True mu:     %s", np.array(true_params["mu"]).round(3))
@@ -211,6 +280,10 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--pure-fraction", type=float, default=0.3,
                         help="Fraction of haplotypes that are single-ancestry (default: 0.3)")
+    parser.add_argument("--seed-method", choices=["gmm", "recursive"], default="gmm",
+                        help="Seeding strategy (default: gmm)")
+    parser.add_argument("--freeze-anchors-iters", type=int, default=0,
+                        help="Freeze seed responsibilities for first N EM iters (default: 0)")
     parser.add_argument("--sweep", action="store_true",
                         help="Run multi-config sweep instead of single demo")
     args = parser.parse_args()
@@ -227,6 +300,8 @@ def main():
             batch_size=args.batch_size,
             seed=args.seed,
             pure_fraction=args.pure_fraction,
+            seed_method=args.seed_method,
+            freeze_anchors_iters=args.freeze_anchors_iters,
         )
 
 

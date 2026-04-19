@@ -123,6 +123,66 @@ often highly imbalanced (e.g., 70% European, 15% African, 10% Native
 American, 5% East Asian in a Latin American cohort).  GMM's soft assignments
 and explicit mixture weights handle this naturally.
 
+### Alternative: recursive K=2 splitting (`--seed-method recursive`)
+
+The flat GMM seed has basin-of-attraction problems.  Small populations
+(low cohort fraction or low pairwise F_ST to a neighbour) get absorbed
+into nearby larger clusters because the GMM objective rewards explaining
+variance, and small clusters contribute little.
+
+Recursive K=2 splitting solves this by attacking the *easiest* split at
+each level and re-computing PCA within each subset:
+
+1. **Start** with all H haplotypes in one cluster.
+
+2. **For each cluster** in the BFS queue, decide whether to split:
+   - If the cluster is smaller than 2 × `min_cluster_size`, it is a leaf.
+   - Otherwise, compute a Patterson-normalised sub-PCA (top 2 PCs) on the
+     cluster's own genotypes.  Run a BIC comparison: fit a 1-component and
+     a 2-component diagonal GMM on the sub-PCA projection.  If BIC(1) −
+     BIC(2) > c × N (where c = `bic_per_sample`, default 0.05, and N is
+     the cluster size), the cluster has substructure.  The per-sample
+     scaling ensures the threshold grows with N — a constant threshold
+     would be under-calibrated at biobank scale because BIC improvements
+     scale with cluster size.
+
+3. **Split** by running K=2 popout EM on the cluster's haplotypes (spectral
+   init + a few EM iterations using the full HMM forward-backward).
+   Collapse the per-site posteriors to per-haplotype mean responsibilities
+   and take argmax to get hard 0/1 labels.  These define two children.
+
+4. **Enqueue** both children and continue until the queue is empty,
+   `max_depth` is reached, or the total number of leaves plus queued
+   clusters reaches `max_leaves`.
+
+5. **Assign** flat integer labels 0..(n_leaves − 1) to leaves in
+   finalisation order.  Convert to one-hot (H, K) responsibilities and
+   pass to `run_em` as `seed_responsibilities`.  The rest of the
+   pipeline is unchanged — `init_model_soft` builds allele frequencies
+   from the leaf responsibilities, and EM refines them.
+
+The BFS order ensures that the most informative splits (at the top of the
+tree, where BIC delta is largest) happen before the `max_leaves` cap
+cuts off further recursion.
+
+**Post-hoc Hellinger merge** (`--recursive-merge-hellinger`, default 0.04):
+after recursion finishes, pairwise Hellinger distances are computed between
+leaves' allele-frequency profiles.  Leaf pairs with distance below the
+threshold are iteratively merged (closest pair first).  This catches
+noise splits that even a well-calibrated BIC misses — within-ancestry
+sub-structure (LD, relatedness) can produce BIC deltas comparable to
+real inter-ancestry splits, but the resulting leaves will have nearly
+identical allele frequencies and thus low Hellinger distance.  Continental
+F_ST is typically 0.05-0.15 Hellinger; sub-continental 0.02-0.05; noise
+splits < 0.01.  The default threshold of 0.04 is conservative enough to
+preserve real sub-continental structure.
+
+**Anchor freezing** (`--freeze-anchors-iters N`): for the first N EM
+iterations, the M-step overrides the E-step-derived allele frequencies
+with frequencies computed from the frozen seed responsibilities.  This
+gives small clusters time to establish their identity before competing
+with larger neighbours.  Default is 0 (no freezing).
+
 ### Stage 1: INIT — build the initial model
 
 Convert soft GMM responsibilities into a working `AncestryModel`:

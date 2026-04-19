@@ -30,7 +30,7 @@ def test_bic_split_unimodal():
     rng = np.random.default_rng(42)
     X = jnp.array(rng.normal(0, 1, size=(500, 3)))
     key = jax.random.PRNGKey(0)
-    should_split, labels = _bic_split_test(X, key, threshold=5.0)
+    should_split, labels = _bic_split_test(X, key, per_sample_threshold=0.01)
     assert not should_split
 
 
@@ -38,7 +38,7 @@ def test_bic_split_bimodal():
     """BIC test should split two well-separated clusters."""
     X = _make_clustered_data(2, n_per_cluster=300, d=3, separation=10.0)
     key = jax.random.PRNGKey(0)
-    should_split, labels = _bic_split_test(X, key, threshold=5.0)
+    should_split, labels = _bic_split_test(X, key, per_sample_threshold=0.01)
     assert should_split
     assert labels is not None
     assert labels.shape == (600,)

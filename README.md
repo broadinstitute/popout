@@ -253,6 +253,48 @@ limitation.
 | `--cnn-pseudo-rounds` | 2 | Number of self-training rounds |
 | `--cnn-lr` | 1e-3 | CNN learning rate |
 | `--cnn-batch-size` | 512 | Haplotypes per CNN training/inference batch |
+| `--seed-method` | `gmm` | Seeding strategy: `gmm` (single-pass PCA+GMM) or `recursive` (K=2 EM splitting) |
+| `--recursive-min-cluster-size` | 1000 | Minimum cluster size for further splitting |
+| `--recursive-max-depth` | 6 | Maximum recursion depth for K=2 splitting |
+| `--recursive-max-leaves` | 12 | Maximum leaf populations from recursive splitting |
+| `--recursive-bic-per-sample` | 0.05 | Per-sample BIC improvement floor for splits (scales with N) |
+| `--recursive-em-iter` | 3 | EM iterations per K=2 split |
+| `--recursive-merge-hellinger` | 0.04 | Merge leaves with Hellinger distance below this (0 = disable) |
+| `--freeze-anchors-iters` | 0 | Freeze seed responsibilities for first N EM iterations |
+
+## Recursive seeding
+
+With `--seed-method recursive`, popout replaces the single-pass PCA + GMM
+seed with a recursive K=2 EM splitting strategy.  At each level, BIC
+compares a 1-component vs 2-component GMM on the cluster's own sub-PCA.
+If the split is justified, K=2 popout EM runs on the cluster's haplotypes,
+and argmax of per-haplotype mean posteriors partitions them into two children.
+Recursion continues until no more splits pass BIC, clusters are too small,
+or `--recursive-max-leaves` is reached.
+
+This is useful when small populations (low cohort fraction) or closely
+related populations (low pairwise F_ST) get absorbed by the flat GMM seed.
+Recursive splitting attacks the easiest split at each level and re-computes
+PCA within each subset, so within-subset structure is not washed out by
+global axes.
+
+```bash
+# Recursive seeding — discovers K automatically
+popout --pgen /path/to/pgens/ \
+       --map plink.GRCh38.map \
+       --out results/cohort \
+       --seed-method recursive
+
+# With anchor freezing to protect small leaves
+popout --pgen /path/to/pgens/ \
+       --map plink.GRCh38.map \
+       --out results/cohort \
+       --seed-method recursive \
+       --freeze-anchors-iters 5
+```
+
+Note: `--seed-method recursive` and `--n-ancestries` are incompatible —
+the recursion discovers K from the data.
 
 ## CNN refinement backend
 

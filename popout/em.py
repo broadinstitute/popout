@@ -456,6 +456,8 @@ def run_em(
     block_size: int = 8,
     detection_method: str = "marchenko-pastur",
     max_ancestries: int = 20,
+    seed_responsibilities: Optional[jnp.ndarray] = None,
+    freeze_anchors_iters: int = 0,
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -486,16 +488,23 @@ def run_em(
     log.info("=== EM on chromosome %s: %d haps × %d sites ===",
              chrom_data.chrom, chrom_data.n_haps, chrom_data.n_sites)
 
-    # --- Stage 0: Spectral seed (soft GMM) ---
-    log.info("Stage 0: Spectral initialization (GMM)")
-    if stats is not None:
-        stats.timer_start("spectral")
-    labels, responsibilities, n_anc, pca_proj = seed_ancestry_soft(
-        geno_np, n_ancestries=n_ancestries, rng_seed=rng_seed, stats=stats,
-        detection_method=detection_method, max_ancestries=max_ancestries,
-    )
-    if stats is not None:
-        stats.timer_stop("spectral", chrom=chrom_data.chrom)
+    # --- Stage 0: Seed ---
+    if seed_responsibilities is not None:
+        log.info("Stage 0: Using pre-computed seed responsibilities")
+        responsibilities = seed_responsibilities
+        n_anc = responsibilities.shape[1]
+        labels = jnp.argmax(responsibilities, axis=1).astype(jnp.int32)
+        pca_proj = None
+    else:
+        log.info("Stage 0: Spectral initialization (GMM)")
+        if stats is not None:
+            stats.timer_start("spectral")
+        labels, responsibilities, n_anc, pca_proj = seed_ancestry_soft(
+            geno_np, n_ancestries=n_ancestries, rng_seed=rng_seed, stats=stats,
+            detection_method=detection_method, max_ancestries=max_ancestries,
+        )
+        if stats is not None:
+            stats.timer_stop("spectral", chrom=chrom_data.chrom)
 
     # Auto-tune batch_size now that we know A
     batch_size = _auto_batch_size(
@@ -578,6 +587,22 @@ def run_em(
             stats.timer_start("m_step")
         new_freq = update_allele_freq_from_stats(em_stats)
         new_mu = update_mu_from_stats(em_stats)
+
+        # Anchor freezing: override frequencies with seed-derived values
+        if (seed_responsibilities is not None
+                and freeze_anchors_iters > 0
+                and iteration < freeze_anchors_iters):
+            log.info("  Anchor freeze: overriding frequencies (iter %d/%d)",
+                     iteration + 1, freeze_anchors_iters)
+            _FREEZE_BATCH = 50_000
+            H_f, T_f = geno.shape
+            A_f = seed_responsibilities.shape[1]
+            frozen_wc = jnp.zeros((A_f, T_f))
+            for fs in range(0, H_f, _FREEZE_BATCH):
+                fe = min(fs + _FREEZE_BATCH, H_f)
+                frozen_wc += seed_responsibilities[fs:fe].T @ geno[fs:fe].astype(jnp.float32)
+            frozen_totals = seed_responsibilities.sum(axis=0)[:, None]
+            new_freq = (frozen_wc + 0.5) / (frozen_totals + 1.0)
 
         # T is held fixed during iteration 0 so frequencies can stabilize from
         # the spectral init before the switch-rate estimator kicks in. From
@@ -718,6 +743,9 @@ def run_em_genome(
     block_size: int = 8,
     detection_method: str = "marchenko-pastur",
     max_ancestries: int = 20,
+    seed_method: str = "gmm",
+    recursive_kwargs: Optional[dict] = None,
+    freeze_anchors_iters: int = 0,
 ) -> list[AncestryResult]:
     """Run self-bootstrapping LAI across all chromosomes.
 
@@ -746,9 +774,32 @@ def run_em_genome(
         if fitted_model is None:
             # First chromosome: full EM
             log.info("=== Seed chromosome: %s (full EM) ===", chrom_data.chrom)
+
+            # Recursive seeding: run before run_em, pass responsibilities in
+            seed_resp = None
+            em_n_ancestries = n_ancestries
+            if seed_method == "recursive":
+                from .recursive_seed import recursive_split_seed
+                rkw = recursive_kwargs or {}
+                leaf_labels, leaf_info = recursive_split_seed(
+                    chrom_data.geno,
+                    chrom_data=chrom_data,
+                    gen_since_admix=gen_since_admix,
+                    rng_seed=rng_seed,
+                    stats=stats,
+                    **rkw,
+                )
+                n_leaves = len(leaf_info)
+                # Convert to one-hot responsibilities
+                seed_resp = jnp.zeros((chrom_data.n_haps, n_leaves), dtype=jnp.float32)
+                seed_resp = seed_resp.at[
+                    jnp.arange(chrom_data.n_haps), jnp.array(leaf_labels)
+                ].set(1.0)
+                em_n_ancestries = n_leaves
+
             result = run_em(
                 chrom_data,
-                n_ancestries=n_ancestries,
+                n_ancestries=em_n_ancestries,
                 n_em_iter=n_em_iter,
                 gen_since_admix=gen_since_admix,
                 batch_size=batch_size,
@@ -760,6 +811,8 @@ def run_em_genome(
                 block_size=block_size,
                 detection_method=detection_method,
                 max_ancestries=max_ancestries,
+                seed_responsibilities=seed_resp,
+                freeze_anchors_iters=freeze_anchors_iters,
             )
             fitted_model = result.model
         else:

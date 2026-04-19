@@ -31,7 +31,11 @@ task popout_task {
     Float   gen_since_admix    = 20.0
     Boolean export_panel       = false
     Boolean block_emissions    = false
-    String  extra_args         = ""
+
+    # Recursive seeding (--seed-method recursive)
+    String  seed_method           = "gmm"
+    Int     freeze_anchors_iters  = 0
+    String  extra_args            = ""
 
     # Weights & Biases — API key string or gs:// URL to a file containing it
     String? wandb_key
@@ -93,6 +97,12 @@ task popout_task {
     ~{if defined(thin_cm) then 'CMD="$CMD --thin-cm ~{thin_cm}"' else ''}
     ~{if export_panel then 'CMD="$CMD --export-panel"' else ''}
     ~{if block_emissions then 'CMD="$CMD --block-emissions"' else ''}
+
+    CMD="$CMD --seed-method ~{seed_method}"
+    if [ "~{freeze_anchors_iters}" -gt 0 ]; then
+      CMD="$CMD --freeze-anchors-iters ~{freeze_anchors_iters}"
+    fi
+
     if [ -n "$WANDB_RAW" ]; then CMD="$CMD --monitor wandb"; fi
 
     if [ -n "~{extra_args}" ]; then
@@ -153,7 +163,11 @@ workflow popout {
     Float   gen_since_admix    = 20.0
     Boolean export_panel       = false
     Boolean block_emissions    = false
-    String  extra_args         = ""
+
+    # Recursive seeding
+    String  seed_method           = "gmm"
+    Int     freeze_anchors_iters  = 0
+    String  extra_args            = ""
 
     # Weights & Biases
     String? wandb_key
@@ -182,6 +196,8 @@ workflow popout {
       gen_since_admix = gen_since_admix,
       export_panel    = export_panel,
       block_emissions = block_emissions,
+      seed_method          = seed_method,
+      freeze_anchors_iters = freeze_anchors_iters,
       extra_args      = extra_args,
       wandb_key       = wandb_key,
       machine_type    = machine_type,

@@ -162,13 +162,14 @@ def evaluate_accuracy(
     """Evaluate ancestry inference accuracy.
 
     Since inferred labels may be permuted relative to true labels,
-    finds the best permutation match.
+    finds the best permutation match.  Handles the case where
+    n_ancestries (inferred K) differs from the true K.
 
     Parameters
     ----------
     calls : (H, T) inferred ancestry labels
     true_ancestry : (H, T) true ancestry labels
-    n_ancestries : A
+    n_ancestries : A — number of inferred ancestries
 
     Returns
     -------
@@ -176,13 +177,23 @@ def evaluate_accuracy(
     """
     from itertools import permutations
 
-    A = n_ancestries
+    A_inferred = n_ancestries
+    A_true = int(true_ancestry.max()) + 1
+
+    # Build confusion matrix: (A_inferred, A_true)
+    confusion = np.zeros((A_inferred, A_true), dtype=np.int64)
+    for i in range(A_inferred):
+        mask = calls == i
+        if mask.any():
+            for j in range(A_true):
+                confusion[i, j] = int(((calls == i) & (true_ancestry == j)).sum())
+
     best_acc = 0.0
     best_perm = None
 
-    # For small A, try all permutations
-    if A <= 8:
-        for perm in permutations(range(A)):
+    if A_inferred == A_true and A_inferred <= 8:
+        # Exact: try all permutations
+        for perm in permutations(range(A_inferred)):
             remapped = np.zeros_like(calls)
             for i, j in enumerate(perm):
                 remapped[calls == i] = j
@@ -190,14 +201,38 @@ def evaluate_accuracy(
             if acc > best_acc:
                 best_acc = acc
                 best_perm = perm
+    else:
+        # Greedy assignment: map each inferred cluster to its best true ancestry
+        # This handles both A_inferred != A_true and large A
+        assigned_true = set()
+        mapping = {}
+        # Sort inferred clusters by size (largest first) for greedy stability
+        cluster_sizes = [(confusion[i].sum(), i) for i in range(A_inferred)]
+        cluster_sizes.sort(reverse=True)
 
-    # Per-ancestry accuracy under best permutation
+        for _, i in cluster_sizes:
+            # Find the true ancestry with highest overlap not yet assigned
+            scores = confusion[i].copy().astype(float)
+            # Prefer unassigned, but allow duplicates if needed
+            for j in assigned_true:
+                scores[j] *= 0.5  # penalise but don't prohibit
+            best_j = int(scores.argmax())
+            mapping[i] = best_j
+            assigned_true.add(best_j)
+
+        remapped = np.zeros_like(calls)
+        for i, j in mapping.items():
+            remapped[calls == i] = j
+        best_acc = float((remapped == true_ancestry).mean())
+        best_perm = tuple(mapping.get(i, 0) for i in range(A_inferred))
+
+    # Per-ancestry accuracy under best mapping
     per_anc = {}
     remapped = np.zeros_like(calls)
     for i, j in enumerate(best_perm):
         remapped[calls == i] = j
 
-    for a in range(A):
+    for a in range(A_true):
         mask = true_ancestry == a
         if mask.sum() > 0:
             per_anc[a] = float((remapped[mask] == a).mean())
