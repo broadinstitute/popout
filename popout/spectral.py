@@ -74,43 +74,16 @@ def seed_ancestry_soft(
     key = jax.random.PRNGKey(rng_seed)
     n_haps, n_sites = geno.shape
 
-    # --- Subsample SNPs if needed (columns) ---
-    if n_sites > max_snps:
-        key, subkey = jax.random.split(key)
-        idx = jax.random.choice(subkey, n_sites, shape=(max_snps,), replace=False)
-        idx = np.array(jnp.sort(idx))
-        geno_sub = geno[:, idx]
-    else:
-        geno_sub = geno
+    log.info("Spectral init: %d haplotypes × %d SNPs%s",
+             n_haps, min(n_sites, max_snps),
+             f" (SVD on {max_haps_svd} subsample)" if n_haps > max_haps_svd else "")
 
-    n_snps_used = geno_sub.shape[1]
-    need_batched_proj = n_haps > max_haps_svd
-
-    # --- Subsample haplotypes for SVD if needed (rows) ---
-    if need_batched_proj:
-        key, subkey = jax.random.split(key)
-        hap_idx = np.array(jax.random.choice(
-            subkey, n_haps, shape=(max_haps_svd,), replace=False,
-        ))
-        hap_idx.sort()
-        X = jnp.array(geno_sub[hap_idx], dtype=jnp.float32)
-        log.info("Spectral init: %d haplotypes × %d SNPs (SVD on %d subsample)",
-                 n_haps, n_snps_used, max_haps_svd)
-    else:
-        X = jnp.array(geno_sub, dtype=jnp.float32)
-        log.info("Spectral init: %d haplotypes × %d SNPs", n_haps, n_snps_used)
-
-    # --- Patterson-style normalization ---
-    mean = X.mean(axis=0)
-    X = X - mean
-    p = jnp.clip(mean, 0.01, 0.99)
-    scale = jnp.sqrt(p * (1.0 - p))
-    X = X / scale
-
-    # --- Randomized SVD ---
-    key, subkey = jax.random.split(key)
-    U, S, Vt = _randomized_svd(X, n_components, subkey)
-    del X  # free GPU memory before projection
+    # --- PCA projection (subsample-safe) ---
+    proj_np, S, key = _genotypes_to_pca_projection(
+        geno, n_components, key,
+        max_snps=max_snps, max_haps_svd=max_haps_svd,
+        projection_batch=projection_batch,
+    )
     log.info("Top singular values: %s", np.array(S[:min(10, len(S))]).round(1))
     if stats is not None:
         sv = np.array(S[:min(20, len(S))])
@@ -119,20 +92,7 @@ def seed_ancestry_soft(
             ratios = (sv[:-1] / (sv[1:] + 1e-10)).tolist()
             stats.emit("spectral/gap_ratios", ratios)
 
-    # --- Project ALL haplotypes ---
-    if need_batched_proj:
-        # U is only for the subsample; project all haplotypes via Vt
-        # proj = normalized(geno_sub) @ Vt.T, done in GPU batches
-        proj_np = np.empty((n_haps, n_components), dtype=np.float32)
-        for start in range(0, n_haps, projection_batch):
-            end = min(start + projection_batch, n_haps)
-            batch = jnp.array(geno_sub[start:end], dtype=jnp.float32)
-            batch = (batch - mean) / scale
-            proj_np[start:end] = np.array(batch @ Vt.T)
-        proj_all = jnp.array(proj_np)
-        del proj_np
-    else:
-        proj_all = U * S  # equivalent to X @ Vt.T
+    proj_all = jnp.array(proj_np)
 
     # --- Auto-detect A ---
     if n_ancestries is None:
@@ -332,6 +292,96 @@ def _gmm_log_prob(
             -0.5 * (d * log_2pi + log_det + mahal) + log_w[c]
         )
     return log_probs
+
+
+# ---------------------------------------------------------------------------
+# Genotype → PCA projection (reusable, memory-safe)
+# ---------------------------------------------------------------------------
+
+def _genotypes_to_pca_projection(
+    geno: np.ndarray,
+    n_components: int,
+    key: jax.Array,
+    max_snps: int = 10_000,
+    max_haps_svd: int = 100_000,
+    projection_batch: int = 50_000,
+) -> tuple[np.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Patterson-normalised PCA projection of a genotype matrix.
+
+    Handles biobank-scale inputs by subsampling haplotypes for SVD
+    and projecting all haplotypes in GPU-memory-safe batches.
+
+    Parameters
+    ----------
+    geno : (H, T) uint8 genotype matrix (host memory)
+    n_components : number of PCs to compute
+    key : JAX PRNG key
+    max_snps : subsample columns if T exceeds this
+    max_haps_svd : subsample rows for SVD if H exceeds this
+    projection_batch : rows per GPU batch when projecting via Vt
+
+    Returns
+    -------
+    proj : (H, n_components) float32 numpy array — PCA projection
+    S : (n_components,) singular values
+    key : consumed key (for caller to continue splitting)
+    """
+    H, T = geno.shape
+
+    # Subsample SNPs if needed
+    if T > max_snps:
+        key, subkey = jax.random.split(key)
+        idx = np.array(jnp.sort(
+            jax.random.choice(subkey, T, shape=(max_snps,), replace=False)
+        ))
+        geno_sub = geno[:, idx]
+    else:
+        geno_sub = geno
+
+    need_batched = H > max_haps_svd
+
+    # Subsample haplotypes for SVD if needed
+    if need_batched:
+        key, subkey = jax.random.split(key)
+        hap_idx = np.array(jax.random.choice(
+            subkey, H, shape=(max_haps_svd,), replace=False,
+        ))
+        hap_idx.sort()
+        X = jnp.array(geno_sub[hap_idx], dtype=jnp.float32)
+    else:
+        X = jnp.array(geno_sub, dtype=jnp.float32)
+
+    # Patterson normalisation
+    mean = X.mean(axis=0)
+    X = X - mean
+    p = jnp.clip(mean, 0.01, 0.99)
+    scale = jnp.sqrt(p * (1.0 - p))
+    X = X / scale
+
+    # SVD — exact for small matrices, randomized for larger
+    n_pc = min(n_components, X.shape[0], X.shape[1])
+    if not need_batched and H < 2000 and X.shape[1] < 5000:
+        U, S, _ = jnp.linalg.svd(X, full_matrices=False)
+        del X
+        proj = np.array(U[:, :n_pc] * S[:n_pc])
+        return proj, S[:n_pc], key
+
+    key, subkey = jax.random.split(key)
+    U, S, Vt = _randomized_svd(X, n_pc, subkey)
+    del X  # free GPU memory before projection
+
+    # Project ALL haplotypes
+    if need_batched:
+        proj = np.empty((H, n_pc), dtype=np.float32)
+        for start in range(0, H, projection_batch):
+            end = min(start + projection_batch, H)
+            batch = jnp.array(geno_sub[start:end], dtype=jnp.float32)
+            batch = (batch - mean) / scale
+            proj[start:end] = np.array(batch @ Vt.T)
+    else:
+        proj = np.array(U * S)
+
+    return proj, S, key
 
 
 # ---------------------------------------------------------------------------

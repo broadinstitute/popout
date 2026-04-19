@@ -28,7 +28,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .datatypes import ChromData
-from .spectral import _bic_split_test, _randomized_svd
+from .spectral import _bic_split_test, _genotypes_to_pca_projection
 
 log = logging.getLogger(__name__)
 
@@ -50,47 +50,29 @@ def _geno_sub_pca(
     geno: np.ndarray,
     n_components: int = 2,
     max_snps: int = 10_000,
+    max_haps_svd: int = 100_000,
+    projection_batch: int = 50_000,
     key: jax.Array | None = None,
 ) -> jnp.ndarray:
     """Patterson-normalised PCA on a genotype subset.
 
-    Unlike spectral._sub_pca (which operates on an already-PCA'd projection),
-    this takes raw genotypes and performs the full normalisation pipeline.
+    Delegates to the shared _genotypes_to_pca_projection helper in
+    spectral.py, which handles biobank-scale inputs by subsampling
+    haplotypes for SVD and projecting all haplotypes in batches.
 
     Returns
     -------
     proj : (H_sub, n_components) — PCA projection
     """
-    H, T = geno.shape
-
-    # Subsample SNPs if needed
-    if T > max_snps and key is not None:
-        key, subkey = jax.random.split(key)
-        idx = np.array(jnp.sort(
-            jax.random.choice(subkey, T, shape=(max_snps,), replace=False)
-        ))
-        geno = geno[:, idx]
-
-    X = jnp.array(geno, dtype=jnp.float32)
-
-    # Patterson normalisation
-    mean = X.mean(axis=0)
-    X = X - mean
-    p = jnp.clip(mean, 0.01, 0.99)
-    scale = jnp.sqrt(p * (1.0 - p))
-    X = X / scale
-
-    # For small subsets, exact SVD is fine; for larger ones, use randomized
-    if H < 2000 and X.shape[1] < 5000:
-        U, S, _ = jnp.linalg.svd(X, full_matrices=False)
-        n_pc = min(n_components, U.shape[1])
-        return U[:, :n_pc] * S[:n_pc]
-    else:
-        if key is None:
-            key = jax.random.PRNGKey(0)
-        key, subkey = jax.random.split(key)
-        U, S, _Vt = _randomized_svd(X, n_components, subkey)
-        return U * S
+    if key is None:
+        key = jax.random.PRNGKey(0)
+    proj, _S, _key = _genotypes_to_pca_projection(
+        geno, n_components, key,
+        max_snps=max_snps,
+        max_haps_svd=max_haps_svd,
+        projection_batch=projection_batch,
+    )
+    return jnp.array(proj)
 
 
 # ---------------------------------------------------------------------------
@@ -125,6 +107,8 @@ def recursive_split_seed(
     merge_hellinger_threshold: float = 0.08,
     split_restarts: int = 5,
     balance_bic_tolerance: float = 0.10,
+    max_haps_svd: int = 100_000,
+    projection_batch: int = 50_000,
 ) -> tuple[np.ndarray, list[LeafInfo]]:
     """Recursively split haplotypes via K=2 EM.
 
@@ -214,7 +198,10 @@ def recursive_split_seed(
         # Sub-PCA on this cluster's raw genotypes
         key, subkey = jax.random.split(key)
         sub_geno = geno[node.indices]
-        sub_proj = _geno_sub_pca(sub_geno, n_components=2, key=subkey)
+        sub_proj = _geno_sub_pca(
+            sub_geno, n_components=2, key=subkey,
+            max_haps_svd=max_haps_svd, projection_batch=projection_batch,
+        )
 
         # BIC split test (gates whether we attempt a split at all)
         key, subkey = jax.random.split(key)
