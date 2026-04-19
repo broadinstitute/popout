@@ -164,7 +164,7 @@ def main(argv: list[str] | None = None) -> None:
         help="Maximum recursion depth for K=2 splitting (default: 6)",
     )
     parser.add_argument(
-        "--recursive-max-leaves", type=int, default=12,
+        "--recursive-max-leaves", type=int, default=20,
         help="Maximum number of leaf populations from recursive splitting "
              "(default: 12). Caps both the recursion and the resulting K.",
     )
@@ -434,6 +434,7 @@ def main(argv: list[str] | None = None) -> None:
             seed_method=args.seed_method,
             recursive_kwargs=recursive_kwargs,
             freeze_anchors_iters=args.freeze_anchors_iters,
+            out_prefix=args.out,
         )
 
     t_compute = time.perf_counter() - t0

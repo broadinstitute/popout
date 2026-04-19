@@ -746,6 +746,7 @@ def run_em_genome(
     seed_method: str = "gmm",
     recursive_kwargs: Optional[dict] = None,
     freeze_anchors_iters: int = 0,
+    out_prefix: Optional[str] = None,
 ) -> list[AncestryResult]:
     """Run self-bootstrapping LAI across all chromosomes.
 
@@ -781,6 +782,8 @@ def run_em_genome(
             if seed_method == "recursive":
                 from .recursive_seed import recursive_split_seed
                 rkw = recursive_kwargs or {}
+                if out_prefix is not None and "dump_pre_merge_path" not in rkw:
+                    rkw["dump_pre_merge_path"] = f"{out_prefix}.recursive_pre_merge"
                 leaf_labels, leaf_info = recursive_split_seed(
                     chrom_data.geno,
                     chrom_data=chrom_data,

@@ -98,7 +98,7 @@ def recursive_split_seed(
     min_cluster_size: int = 1000,
     bic_per_sample: float = 0.01,
     max_depth: int = 6,
-    max_leaves: int = 12,
+    max_leaves: int = 20,
     em_iter_per_split: int = 3,
     rng_seed: int = 42,
     stats=None,
@@ -109,6 +109,7 @@ def recursive_split_seed(
     balance_bic_tolerance: float = 0.10,
     max_haps_svd: int = 100_000,
     projection_batch: int = 50_000,
+    dump_pre_merge_path: Optional[str] = None,
 ) -> tuple[np.ndarray, list[LeafInfo]]:
     """Recursively split haplotypes via K=2 EM.
 
@@ -296,6 +297,15 @@ def recursive_split_seed(
                  np.mean(balances), len(balances))
     _log_leaf_summary(leaf_info, H)
 
+    # Pre-merge dump (always write if path is set — cheap insurance)
+    if dump_pre_merge_path is not None:
+        try:
+            _dump_pre_merge(geno, leaf_labels, leaf_info, dump_pre_merge_path)
+            log.info("Pre-merge dump written to %s.{leaves,leaf_meta,leaf_freqs}",
+                     dump_pre_merge_path)
+        except Exception as e:
+            log.warning("Failed to write pre-merge dump: %s", e)
+
     # Post-hoc merge of similar leaves
     if merge_hellinger_threshold > 0 and len(leaf_info) > 1:
         n_before = len(leaf_info)
@@ -347,29 +357,33 @@ def _merge_close_leaves(
 ) -> tuple[np.ndarray, list[LeafInfo]]:
     """Merge sibling leaf pairs whose allele-frequency Hellinger distance is below threshold.
 
-    Only considers pairs that are siblings or near-siblings in the recursion
-    tree (paths differ in the last 1-2 characters). This prevents merging
-    cousin populations that were correctly separated early in recursion.
+    Only considers sibling pairs (same parent in the recursion tree).
+    Frequencies are computed once and updated incrementally on each merge
+    to avoid re-scanning the full genotype array.
     """
     labels = leaf_labels.copy()
     info = list(leaf_info)
+    T = geno.shape[1]
+
+    # Compute frequencies once — O(T) memory per leaf, not O(n_masked × T).
+    # numpy.sum(dtype=float64) accumulates without materializing a cast copy.
+    n_leaves = len(info)
+    freq = np.zeros((n_leaves, T), dtype=np.float64)
+    counts = np.zeros(n_leaves, dtype=np.int64)
+    for i, li in enumerate(info):
+        mask = labels == li.label
+        counts[i] = int(mask.sum())
+        if counts[i] > 0:
+            freq[i] = (geno[mask].sum(axis=0, dtype=np.float64) + pseudocount) / (counts[i] + 2 * pseudocount)
 
     while len(info) > 1:
-        n_leaves = len(info)
-        T = geno.shape[1]
-        freq = np.zeros((n_leaves, T), dtype=np.float64)
-        for i, li in enumerate(info):
-            mask = labels == li.label
-            count = mask.sum()
-            if count > 0:
-                freq[i] = (geno[mask].astype(np.float64).sum(axis=0) + pseudocount) / (count + 2 * pseudocount)
-
+        # Find the closest sibling pair
         sqrt_p = np.sqrt(np.clip(freq, 0, 1))
         sqrt_1mp = np.sqrt(np.clip(1 - freq, 0, 1))
         best_dist = float('inf')
         best_i, best_j = -1, -1
-        for i in range(n_leaves):
-            for j in range(i + 1, n_leaves):
+        for i in range(len(info)):
+            for j in range(i + 1, len(info)):
                 if not _are_merge_candidates(info[i].path, info[j].path):
                     continue
                 d2 = 0.5 * (
@@ -392,9 +406,19 @@ def _merge_close_leaves(
                  li_i.label, li_i.path, li_i.n_haps, best_dist)
 
         labels[labels == li_j.label] = li_i.label
-        # Set merged path to the common prefix (parent node in the tree).
-        # This prevents cascading merges from treating the merged node as
-        # a near-sibling of distant branches.
+
+        # Update frequencies incrementally: un-normalize, add raw counts, re-normalize.
+        new_count = counts[best_i] + counts[best_j]
+        raw_i = freq[best_i] * (counts[best_i] + 2 * pseudocount) - pseudocount
+        raw_j = freq[best_j] * (counts[best_j] + 2 * pseudocount) - pseudocount
+        freq[best_i] = (raw_i + raw_j + pseudocount) / (new_count + 2 * pseudocount)
+        counts[best_i] = new_count
+
+        # Drop row best_j from freq/counts arrays
+        freq = np.delete(freq, best_j, axis=0)
+        counts = np.delete(counts, best_j, axis=0)
+
+        # Update info: merged path is common prefix
         shared = 0
         for k in range(min(len(li_i.path), len(li_j.path))):
             if li_i.path[k] == li_j.path[k]:
@@ -402,14 +426,13 @@ def _merge_close_leaves(
             else:
                 break
         merged_path = li_i.path[:shared]
-        merged_info = LeafInfo(
+        info[best_i] = LeafInfo(
             label=li_i.label,
             n_haps=li_i.n_haps + li_j.n_haps,
             depth=min(li_i.depth, li_j.depth),
             path=merged_path,
             bic_score=li_i.bic_score,
         )
-        info[best_i] = merged_info
         info.pop(best_j)
 
     # Remap labels to contiguous 0..n_new-1
@@ -596,6 +619,50 @@ def _compute_bic_delta(X: jnp.ndarray, key: jax.Array) -> float:
 # ---------------------------------------------------------------------------
 # Tree visualisation logging
 # ---------------------------------------------------------------------------
+
+def _dump_pre_merge(
+    geno: np.ndarray,
+    leaf_labels: np.ndarray,
+    leaf_info: list[LeafInfo],
+    path_prefix: str,
+    pseudocount: float = 0.5,
+) -> None:
+    """Write pre-merge leaf state to disk for post-mortem analysis."""
+    H, T = geno.shape
+
+    # 1. Per-haplotype leaf assignments
+    with open(f"{path_prefix}.leaves.tsv", "w") as f:
+        f.write("hap_idx\tleaf_label\tleaf_path\tleaf_depth\n")
+        # Build lookup from label to info
+        label_to_info = {li.label: li for li in leaf_info}
+        for h in range(H):
+            lbl = int(leaf_labels[h])
+            li = label_to_info[lbl]
+            f.write(f"{h}\t{lbl}\t{li.path}\t{li.depth}\n")
+
+    # 2. Leaf metadata
+    with open(f"{path_prefix}.leaf_meta.tsv", "w") as f:
+        f.write("label\tpath\tdepth\tn_haps\tbic_score\n")
+        for li in leaf_info:
+            f.write(f"{li.label}\t{li.path}\t{li.depth}\t{li.n_haps}\t{li.bic_score:.1f}\n")
+
+    # 3. Leaf allele frequencies (memory-safe: no float64 materialization)
+    n_leaves = len(leaf_info)
+    allele_freq = np.zeros((n_leaves, T), dtype=np.float32)
+    labels_arr = np.array([li.label for li in leaf_info])
+    paths_arr = np.array([li.path for li in leaf_info])
+    for i, li in enumerate(leaf_info):
+        mask = leaf_labels == li.label
+        count = int(mask.sum())
+        if count > 0:
+            allele_freq[i] = (geno[mask].sum(axis=0, dtype=np.float64) + pseudocount) / (count + 2 * pseudocount)
+    np.savez_compressed(
+        f"{path_prefix}.leaf_freqs.npz",
+        labels=labels_arr,
+        paths=paths_arr,
+        allele_freq=allele_freq,
+    )
+
 
 def _log_tree(split_log: list[dict], total_haps: int) -> None:
     """Log a text tree of the recursive splitting process."""

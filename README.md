@@ -256,7 +256,7 @@ limitation.
 | `--seed-method` | `gmm` | Seeding strategy: `gmm` (single-pass PCA+GMM) or `recursive` (K=2 EM splitting) |
 | `--recursive-min-cluster-size` | 1000 | Minimum cluster size for further splitting |
 | `--recursive-max-depth` | 6 | Maximum recursion depth for K=2 splitting |
-| `--recursive-max-leaves` | 12 | Maximum leaf populations from recursive splitting |
+| `--recursive-max-leaves` | 20 | Maximum leaf populations from recursive splitting |
 | `--recursive-bic-per-sample` | 0.05 | Per-sample BIC improvement floor for splits (scales with N) |
 | `--recursive-em-iter` | 3 | EM iterations per K=2 split |
 | `--recursive-merge-hellinger` | 0.04 | Merge leaves with Hellinger distance below this (0 = disable) |
