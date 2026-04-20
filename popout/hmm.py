@@ -477,6 +477,44 @@ def forward_backward_blocks(
     return posteriors(log_alphas, log_betas)
 
 
+def forward_backward_blocks_batched(
+    model: AncestryModel,
+    block_data,
+    batch_size: int,
+) -> jnp.ndarray:
+    """Batched forward_backward_blocks: chunks over haplotypes.
+
+    At large K the full block posterior tensor (H, n_blocks, A) may
+    exceed GPU memory. This runs the existing scan on chunks of
+    batch_size haplotypes and concatenates the results.
+
+    Returns
+    -------
+    gamma_block : (H, n_blocks, A)
+    """
+    H = block_data.pattern_indices.shape[0]
+    if batch_size >= H:
+        return forward_backward_blocks(model, block_data)
+
+    from .blocks import BlockData
+    chunks = []
+    for start in range(0, H, batch_size):
+        end = min(start + batch_size, H)
+        bd_chunk = BlockData(
+            pattern_indices=block_data.pattern_indices[start:end],
+            block_starts=block_data.block_starts,
+            block_ends=block_data.block_ends,
+            block_distances=block_data.block_distances,
+            pattern_counts=block_data.pattern_counts,
+            max_patterns=block_data.max_patterns,
+            block_size=block_data.block_size,
+        )
+        gamma_chunk = forward_backward_blocks(model, bd_chunk)
+        chunks.append(_np.array(gamma_chunk))
+
+    return jnp.array(_np.concatenate(chunks, axis=0))
+
+
 # ---------------------------------------------------------------------------
 # Main entry points
 # ---------------------------------------------------------------------------

@@ -150,43 +150,41 @@ def init_pattern_freq(
 
     freq = np.array(allele_freq)
     freq = np.clip(freq, 1e-6, 1.0 - 1e-6)
+    log_f1 = np.log(freq)        # (A, T)
+    log_f0 = np.log(1.0 - freq)  # (A, T)
 
     pf = np.full((n_blocks, max_p, A), pseudocount, dtype=np.float32)
 
     for b in range(n_blocks):
-        if b % 10 == 0:
-            _ipf_log.info("init_pattern_freq: block %d/%d (patterns_this_block=%d)",
-                          b, n_blocks, block_data.pattern_counts[b])
-        s = block_data.block_starts[b]
-        e = block_data.block_ends[b]
-        n_p = block_data.pattern_counts[b]
+        if b % 50 == 0:
+            _ipf_log.info("init_pattern_freq: block %d/%d", b, n_blocks)
+        s = int(block_data.block_starts[b])
+        e = int(block_data.block_ends[b])
+        n_p = int(block_data.pattern_counts[b])
 
-        # Get the unique patterns in this block
-        block_geno = geno[:, s:e]  # (H, w)
-        pat_idx = block_data.pattern_indices[:, b]  # (H,)
+        pat_idx = block_data.pattern_indices[:, b]
 
-        # For each unique pattern, compute P(pattern | ancestry a)
-        for p in range(n_p):
-            # Find a haplotype with this pattern
-            exemplar = np.where(pat_idx == p)[0][0]
-            bits = block_geno[exemplar]  # (w,) uint8
+        # First occurrence of each pattern — O(H) once per block
+        _, first_idx = np.unique(pat_idx, return_index=True)
 
-            for a in range(A):
-                log_prob = 0.0
-                for i, bit in enumerate(bits):
-                    f = freq[a, s + i]
-                    log_prob += np.log(f) if bit == 1 else np.log(1.0 - f)
-                pf[b, p, a] = np.exp(log_prob)
+        # Pattern bits: (n_p, w) float32
+        pb = geno[first_idx, s:e].astype(np.float32)
+
+        # Vectorized log-probs: (n_p, w) @ (w, A) -> (n_p, A)
+        log_odds = (log_f1[:, s:e] - log_f0[:, s:e]).T  # (w, A)
+        log_const = log_f0[:, s:e].sum(axis=1)           # (A,)
+        log_prob = pb @ log_odds + log_const              # (n_p, A)
+
+        pf[b, :n_p, :] = np.exp(log_prob).astype(np.float32)
 
     _ipf_log.info("init_pattern_freq: main loop done, starting normalization")
 
-    # Normalize per block per ancestry
+    # Normalize per block per ancestry (vectorized across patterns)
     for b in range(n_blocks):
-        n_p = block_data.pattern_counts[b]
-        for a in range(A):
-            total = pf[b, :n_p, a].sum()
-            if total > 0:
-                pf[b, :n_p, a] /= total
+        n_p = int(block_data.pattern_counts[b])
+        totals = pf[b, :n_p, :].sum(axis=0, keepdims=True)  # (1, A)
+        safe_totals = np.where(totals > 0, totals, 1.0)
+        pf[b, :n_p, :] /= safe_totals
 
     _ipf_log.info("init_pattern_freq: normalization done, converting to jnp")
     result = jnp.array(pf)

@@ -109,6 +109,83 @@ def test_k1_equals_bernoulli():
     # This is a sanity check that the init works for degenerate block size
 
 
+def test_forward_backward_blocks_batched_matches_unbatched():
+    """Batched and unbatched forward_backward_blocks must agree."""
+    from popout.hmm import forward_backward_blocks, forward_backward_blocks_batched
+    from popout.datatypes import AncestryModel
+
+    rng = np.random.default_rng(42)
+    H, T, A = 500, 256, 4
+    block_size = 8
+    geno = rng.integers(0, 2, size=(H, T), dtype=np.uint8)
+    bd = pack_blocks(geno, block_size=block_size)
+    allele_freq = jnp.array(rng.uniform(0.1, 0.9, (A, T)).astype(np.float32))
+    pf = init_pattern_freq(allele_freq, bd, geno)
+    model = AncestryModel(
+        n_ancestries=A,
+        mu=jnp.full(A, 1.0 / A),
+        gen_since_admix=20.0,
+        allele_freq=allele_freq,
+        pattern_freq=pf,
+        block_data=bd,
+    )
+
+    gamma_unbatched = forward_backward_blocks(model, bd)
+    gamma_batched = forward_backward_blocks_batched(model, bd, batch_size=100)
+
+    np.testing.assert_allclose(
+        np.array(gamma_unbatched), np.array(gamma_batched),
+        rtol=1e-4, atol=1e-6,
+    )
+
+
+def _scalar_reference_init_pattern_freq(allele_freq, block_data, geno, pseudocount=0.01):
+    """Original scalar implementation for equivalence testing."""
+    A = allele_freq.shape[0]
+    n_blocks = block_data.n_blocks
+    max_p = block_data.max_patterns
+    freq = np.array(allele_freq)
+    freq = np.clip(freq, 1e-6, 1.0 - 1e-6)
+    pf = np.full((n_blocks, max_p, A), pseudocount, dtype=np.float32)
+    for b in range(n_blocks):
+        s = block_data.block_starts[b]
+        e = block_data.block_ends[b]
+        n_p = block_data.pattern_counts[b]
+        block_geno = geno[:, s:e]
+        pat_idx = block_data.pattern_indices[:, b]
+        for p in range(n_p):
+            exemplar = np.where(pat_idx == p)[0][0]
+            bits = block_geno[exemplar]
+            for a in range(A):
+                log_prob = 0.0
+                for i, bit in enumerate(bits):
+                    f = freq[a, s + i]
+                    log_prob += np.log(f) if bit == 1 else np.log(1.0 - f)
+                pf[b, p, a] = np.exp(log_prob)
+    for b in range(n_blocks):
+        n_p = block_data.pattern_counts[b]
+        for a in range(A):
+            total = pf[b, :n_p, a].sum()
+            if total > 0:
+                pf[b, :n_p, a] /= total
+    return pf
+
+
+def test_init_pattern_freq_matches_scalar_reference():
+    """Vectorized init_pattern_freq must match scalar reference."""
+    rng = np.random.default_rng(42)
+    H, T, A = 100, 64, 4
+    block_size = 8
+    geno = rng.integers(0, 2, size=(H, T), dtype=np.uint8)
+    allele_freq = jnp.array(rng.uniform(0.1, 0.9, size=(A, T)).astype(np.float32))
+    bd = pack_blocks(geno, block_size=block_size)
+
+    pf_vec = np.array(init_pattern_freq(allele_freq, bd, geno))
+    pf_ref = _scalar_reference_init_pattern_freq(allele_freq, bd, geno)
+
+    np.testing.assert_allclose(pf_vec, pf_ref, rtol=1e-5, atol=1e-7)
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

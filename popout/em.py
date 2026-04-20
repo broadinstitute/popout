@@ -20,6 +20,7 @@ from .hmm import (
     forward_backward_batched,
     forward_backward_bucketed,
     forward_backward_blocks,
+    forward_backward_blocks_batched,
     forward_backward_em,
     forward_backward_bucketed_em,
     forward_backward_decode,
@@ -62,6 +63,20 @@ def _auto_batch_size(
     if bucketed:
         batch_size = max(256, int(batch_size * 0.6))
     return batch_size
+
+
+def _auto_batch_size_blocks(
+    n_blocks: int, A: int, H: int,
+    target_bytes: int = 4 * 1024**3,
+) -> int:
+    """Pick batch size for block-emissions forward-backward.
+
+    Peak memory per haplotype is approximately n_blocks × A × 4 bytes
+    for the emission tensor. Target ~4 GB peak.
+    """
+    bytes_per_hap = n_blocks * A * 4
+    batch = max(1000, target_bytes // max(bytes_per_hap, 1))
+    return int(min(batch, H))
 
 
 # ---------------------------------------------------------------------------
@@ -558,27 +573,61 @@ def run_em(
 
         gamma_block = None  # only set for block-emissions path
         if bd is not None and model.pattern_freq is not None:
-            # Block emissions: small (H, n_blocks, A) — no streaming needed
-            gamma_block = forward_backward_blocks(model, bd)
-            gamma = expand_block_posteriors(gamma_block, bd, chrom_data.n_sites)
-            # Build EMStats from full gamma for this (small) path
-            geno_f = geno.astype(jnp.float32)
-            calls_tmp = jnp.argmax(gamma, axis=2)
-            switches_tmp = (calls_tmp[:, 1:] != calls_tmp[:, :-1]) if gamma.shape[1] > 1 else jnp.zeros((gamma.shape[0], 0), dtype=bool)
-            em_stats = EMStats(
-                weighted_counts=jnp.einsum('hta,ht->at', gamma, geno_f),
-                total_weights=gamma.sum(axis=0).T,
-                mu_sum=gamma.sum(axis=(0, 1)),
-                switch_sum=switches_tmp.sum(axis=0).astype(jnp.float32),
-                switches_per_hap=np.array(switches_tmp.sum(axis=1), dtype=np.int32),
-                # Block emissions path: use hard switches as proxy (xi not available)
-                soft_switches_per_hap=np.array(
-                    switches_tmp.sum(axis=1), dtype=np.float32,
-                ),
-                n_haps=gamma.shape[0],
-                n_sites=gamma.shape[1],
+            # Block emissions: batched over haplotypes to avoid OOM at large K
+            from .blocks import BlockData
+            block_batch = _auto_batch_size_blocks(
+                bd.n_blocks, n_anc, chrom_data.n_haps,
             )
-            del gamma  # free the expanded block gamma
+            log.info("  Block E-step: batch_size=%d (n_blocks=%d, A=%d, H=%d)",
+                     block_batch, bd.n_blocks, n_anc, chrom_data.n_haps)
+            T_sites = chrom_data.n_sites
+            H_total = chrom_data.n_haps
+            weighted_counts = jnp.zeros((n_anc, T_sites))
+            total_weights = jnp.zeros((n_anc, T_sites))
+            mu_sum = jnp.zeros(n_anc)
+            switch_sum = jnp.zeros(max(T_sites - 1, 0))
+            all_switches_per_hap = []
+            all_gamma_block_chunks = []
+
+            for bs in range(0, H_total, block_batch):
+                be = min(bs + block_batch, H_total)
+                bd_chunk = BlockData(
+                    pattern_indices=bd.pattern_indices[bs:be],
+                    block_starts=bd.block_starts,
+                    block_ends=bd.block_ends,
+                    block_distances=bd.block_distances,
+                    pattern_counts=bd.pattern_counts,
+                    max_patterns=bd.max_patterns,
+                    block_size=bd.block_size,
+                )
+                gb_chunk = forward_backward_blocks(model, bd_chunk)
+                all_gamma_block_chunks.append(np.array(gb_chunk))
+                gamma_chunk = expand_block_posteriors(gb_chunk, bd, T_sites)
+                geno_chunk = geno[bs:be].astype(jnp.float32)
+
+                weighted_counts += jnp.einsum('hta,ht->at', gamma_chunk, geno_chunk)
+                total_weights += gamma_chunk.sum(axis=0).T
+                mu_sum += gamma_chunk.sum(axis=(0, 1))
+
+                calls_c = jnp.argmax(gamma_chunk, axis=2)
+                sw_c = (calls_c[:, 1:] != calls_c[:, :-1]) if T_sites > 1 else jnp.zeros((calls_c.shape[0], 0), dtype=bool)
+                switch_sum += sw_c.sum(axis=0).astype(jnp.float32)
+                all_switches_per_hap.append(np.array(sw_c.sum(axis=1), dtype=np.int32))
+                del gamma_chunk, geno_chunk, gb_chunk
+
+            switches_per_hap = np.concatenate(all_switches_per_hap)
+            gamma_block = jnp.array(np.concatenate(all_gamma_block_chunks, axis=0))
+
+            em_stats = EMStats(
+                weighted_counts=weighted_counts,
+                total_weights=total_weights,
+                mu_sum=mu_sum,
+                switch_sum=switch_sum,
+                switches_per_hap=switches_per_hap,
+                soft_switches_per_hap=switches_per_hap.astype(np.float32),
+                n_haps=H_total,
+                n_sites=T_sites,
+            )
         elif model.bucket_assignments is not None:
             em_stats = forward_backward_bucketed_em(geno, model, d_morgan_j, batch_size)
         else:
@@ -690,19 +739,41 @@ def run_em(
     # --- Final decode (streaming — no full gamma materialised) ---
     log.info("Final forward-backward pass")
     if bd is not None and model.pattern_freq is not None:
-        # Block emissions: small tensor, use legacy path
-        gamma_block = forward_backward_blocks(model, bd)
-        gamma = expand_block_posteriors(gamma_block, bd, chrom_data.n_sites)
-        calls = np.array(jnp.argmax(gamma, axis=2), dtype=np.int8)
+        # Block emissions: batched decode
+        from .blocks import BlockData
+        block_batch = _auto_batch_size_blocks(
+            bd.n_blocks, n_anc, chrom_data.n_haps,
+        )
+        all_calls = []
+        all_max_post = []
+        all_global_sums = []
+        for bs in range(0, chrom_data.n_haps, block_batch):
+            be = min(bs + block_batch, chrom_data.n_haps)
+            bd_chunk = BlockData(
+                pattern_indices=bd.pattern_indices[bs:be],
+                block_starts=bd.block_starts,
+                block_ends=bd.block_ends,
+                block_distances=bd.block_distances,
+                pattern_counts=bd.pattern_counts,
+                max_patterns=bd.max_patterns,
+                block_size=bd.block_size,
+            )
+            gb_chunk = forward_backward_blocks(model, bd_chunk)
+            gamma_chunk = expand_block_posteriors(gb_chunk, bd, chrom_data.n_sites)
+            all_calls.append(np.array(jnp.argmax(gamma_chunk, axis=2), dtype=np.int8))
+            all_max_post.append(np.array(gamma_chunk.max(axis=2)))
+            all_global_sums.append(np.array(gamma_chunk.sum(axis=1)))
+            del gamma_chunk, gb_chunk
+        calls = np.concatenate(all_calls, axis=0)
         decode = DecodeResult(
             calls=calls,
-            max_post=np.array(gamma.max(axis=2)),
-            global_sums=np.array(gamma.sum(axis=1)),
+            max_post=np.concatenate(all_max_post, axis=0),
+            global_sums=np.concatenate(all_global_sums, axis=0),
         )
         result = AncestryResult(
             calls=calls, model=model, chrom=chrom_data.chrom,
-            decode=decode, posteriors=gamma,
-            spectral={"pca_proj": pca_proj, "gmm_labels": np.array(labels)},
+            decode=decode,
+            spectral={"pca_proj": pca_proj, "gmm_labels": np.array(labels)} if pca_proj is not None else None,
         )
     else:
         if model.bucket_assignments is not None:
