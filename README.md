@@ -102,9 +102,28 @@ pip install jax numpy pysam Pgenlib matplotlib pytest
 
 ### Docker
 
+The image is split in two:
+
+- A **base image** (`popout-base`) with CUDA, plink2, and all Python dependencies. Rebuild only when `pyproject.toml` or `Dockerfile.base` changes.
+- An **app image** (`popout`) that layers the current source and a git-derived version stamp on top of the base. Rebuild on every code change; only the source layer (a few MB) is uploaded.
+
 ```bash
-docker build -t popout .
-docker run --gpus all -v /data:/data popout \
+# One-time (and whenever deps change):
+./scripts/push-base.sh
+
+# On every code change:
+./scripts/push.sh
+```
+
+The installed version is available at runtime via `popout.__version__` and the
+`POPOUT_VERSION` environment variable, both populated from `git describe` at
+build time.
+
+To run locally:
+
+```bash
+docker run --gpus all -v /data:/data \
+    us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest \
     --pgen /data/pgens/ --map /data/map.txt --out /data/results
 ```
 

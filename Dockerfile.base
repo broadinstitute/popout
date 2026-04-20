@@ -1,0 +1,41 @@
+# Base image for popout: CUDA runtime + system deps + pinned Python deps.
+# Rebuild and push only when pyproject.toml or system dependencies change.
+FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# System dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 \
+        python3-pip \
+        python3-venv \
+        libhts-dev \
+        zlib1g-dev \
+        curl \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# plink2 (static AVX2 binary)
+RUN curl -fsSL https://s3.amazonaws.com/plink2-assets/plink2_linux_avx2_20260311.zip \
+        -o /tmp/plink2.zip \
+    && python3 -c "import zipfile; zipfile.ZipFile('/tmp/plink2.zip').extractall('/usr/local/bin')" \
+    && chmod +x /usr/local/bin/plink2 \
+    && rm /tmp/plink2.zip
+
+# Python venv
+RUN python3 -m venv /opt/popout
+ENV PATH="/opt/popout/bin:$PATH"
+RUN pip install --no-cache-dir --upgrade pip setuptools
+
+# Install Python dependencies via an editable install against a stub package.
+# The stub is removed after install; the real popout/ is supplied by the app image.
+WORKDIR /app
+COPY pyproject.toml .
+RUN mkdir -p popout \
+    && echo '__version__ = "0.0.0"' > popout/__init__.py \
+    && pip install --no-cache-dir -e ".[dev,monitor]" \
+    && rm -rf popout
+
+# JAX runtime config (belongs in the base so it's always present)
+ENV XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
+ENV JAX_PLATFORMS=cuda,cpu

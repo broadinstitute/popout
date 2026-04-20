@@ -1,65 +1,12 @@
-# ---- Base image ----
-# NVIDIA CUDA 12.6 on Ubuntu 24.04.  This image ships the CUDA runtime
-# and cuDNN but NOT the full toolkit (saves ~4 GB).  JAX's cuda12 wheels
-# bring their own CUDA libraries via pip, so the runtime image is sufficient.
-#
-# Compute capabilities included: sm_70+ (V100, A100, H100, L40S, etc.)
-FROM nvidia/cuda:12.6.3-cudnn-runtime-ubuntu24.04
+# Thin app image: overlays popout source and version stamp onto the base.
+# Rebuild and push on every code change; does not re-upload the dependency layer.
+ARG BASE_IMAGE=us-docker.pkg.dev/broad-dsde-methods/popout/popout-base:latest
+FROM ${BASE_IMAGE}
 
-# Avoid interactive prompts during apt
-ENV DEBIAN_FRONTEND=noninteractive
-
-# ---- System dependencies ----
-# - python3 / pip: runtime
-# - libhts-dev / zlib1g-dev: pysam C extension build deps
-# - plink2: VCF → PGEN conversion (pre-built binary)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 \
-        python3-pip \
-        python3-venv \
-        libhts-dev \
-        zlib1g-dev \
-        curl \
-        ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install plink2 (static binary, AVX2 — safe for any modern x86_64 GPU server)
-RUN curl -fsSL https://s3.amazonaws.com/plink2-assets/plink2_linux_avx2_20260311.zip \
-        -o /tmp/plink2.zip \
-    && python3 -c "import zipfile; zipfile.ZipFile('/tmp/plink2.zip').extractall('/usr/local/bin')" \
-    && chmod +x /usr/local/bin/plink2 \
-    && rm /tmp/plink2.zip
-
-# ---- Python environment ----
-# Use a venv to keep pip happy on externally-managed Ubuntu 24.04
-RUN python3 -m venv /opt/popout
-ENV PATH="/opt/popout/bin:$PATH"
-RUN pip install --no-cache-dir --upgrade pip setuptools
-
-# ---- Git version (pass at build time) ----
-# Usage: docker build --build-arg GIT_VERSION=$(git describe --tags --always --dirty | sed 's/^v//') ...
-ARG GIT_VERSION
-
-# ---- Install dependencies (cached unless pyproject.toml changes) ----
-# This is the expensive layer (~3 GB for JAX+CUDA wheels).  Editable
-# install (-e) creates an entry point and .pth that resolves imports
-# from /app/popout/ directly — so the code-only layer below needs no
-# pip install at all, just a COPY.
 WORKDIR /app
-COPY pyproject.toml .
-RUN mkdir -p popout && echo '__version__ = "0.0.0"' > popout/__init__.py \
-    && pip install --no-cache-dir -e ".[dev,monitor]"
-
-# ---- Install popout (code-only, instant) ----
 COPY popout/ popout/
-RUN if [ -n "${GIT_VERSION}" ]; then \
-        sed -i "s/^__version__ = .*/__version__ = \"${GIT_VERSION}\"/" popout/__init__.py; \
-    fi
 
-# ---- Runtime config ----
-# Tell JAX to pre-allocate 90% of GPU memory (avoids fragmentation)
-ENV XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
-# Silence JAX TPU probe warning
-ENV JAX_PLATFORMS=cuda,cpu
+ARG GIT_VERSION=unknown
+ENV POPOUT_VERSION=${GIT_VERSION}
 
 ENTRYPOINT ["popout"]
