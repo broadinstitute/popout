@@ -86,6 +86,11 @@ task popout_task {
     # ---- GPU check ----
     nvidia-smi || echo "WARNING: nvidia-smi failed"
 
+    # Disable Triton GEMM autotuner — fails on some A100 driver combos
+    # with "All configs failed during profiling / WRONG RESULTS". cuBLAS
+    # fallback is equally fast for the matmul shapes popout uses.
+    export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_triton_gemm=false"
+
     # ---- Build popout command ----
     CMD="popout --pgen pgen_dir/ --out ~{output_prefix}"
     ~{if defined(genetic_map) then 'CMD="$CMD --map ~{genetic_map}"' else ''}
