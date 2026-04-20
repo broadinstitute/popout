@@ -14,6 +14,7 @@ dependencies = [
     "numpy>=1.24",
     "Pgenlib>=0.90.0",
     "scipy>=1.10",
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
