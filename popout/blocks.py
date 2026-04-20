@@ -138,9 +138,15 @@ def init_pattern_freq(
     -------
     pattern_freq : (n_blocks, max_patterns, A)
     """
+    import logging
+    _ipf_log = logging.getLogger("popout.blocks.init_pattern_freq")
+
     A = allele_freq.shape[0]
     n_blocks = block_data.n_blocks
     max_p = block_data.max_patterns
+
+    _ipf_log.info("init_pattern_freq: entering (n_blocks=%d, max_p=%d, A=%d, H=%d, T=%d)",
+                  n_blocks, max_p, A, geno.shape[0], geno.shape[1])
 
     freq = np.array(allele_freq)
     freq = np.clip(freq, 1e-6, 1.0 - 1e-6)
@@ -148,6 +154,9 @@ def init_pattern_freq(
     pf = np.full((n_blocks, max_p, A), pseudocount, dtype=np.float32)
 
     for b in range(n_blocks):
+        if b % 10 == 0:
+            _ipf_log.info("init_pattern_freq: block %d/%d (patterns_this_block=%d)",
+                          b, n_blocks, block_data.pattern_counts[b])
         s = block_data.block_starts[b]
         e = block_data.block_ends[b]
         n_p = block_data.pattern_counts[b]
@@ -169,6 +178,8 @@ def init_pattern_freq(
                     log_prob += np.log(f) if bit == 1 else np.log(1.0 - f)
                 pf[b, p, a] = np.exp(log_prob)
 
+    _ipf_log.info("init_pattern_freq: main loop done, starting normalization")
+
     # Normalize per block per ancestry
     for b in range(n_blocks):
         n_p = block_data.pattern_counts[b]
@@ -177,7 +188,10 @@ def init_pattern_freq(
             if total > 0:
                 pf[b, :n_p, a] /= total
 
-    return jnp.array(pf)
+    _ipf_log.info("init_pattern_freq: normalization done, converting to jnp")
+    result = jnp.array(pf)
+    _ipf_log.info("init_pattern_freq: returning (pf.shape=%s)", result.shape)
+    return result
 
 
 def update_pattern_freq(

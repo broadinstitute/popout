@@ -527,15 +527,21 @@ def run_em(
     bd = None
     if use_block_emissions:
         from .blocks import pack_blocks, init_pattern_freq, update_pattern_freq, expand_block_posteriors
+        log.info("  [diag] calling pack_blocks (H=%d, T=%d, block_size=%d)",
+                 geno_np.shape[0], geno_np.shape[1], block_size)
         bd = pack_blocks(geno_np, block_size=block_size, pos_cm=chrom_data.pos_cm)
+        log.info("  [diag] pack_blocks returned")
         log.info("  Block emissions: %d blocks of %d SNPs, %d max patterns",
                  bd.n_blocks, block_size, bd.max_patterns)
+        log.info("  [diag] calling init_pattern_freq")
         pf = init_pattern_freq(model.allele_freq, bd, geno_np)
+        log.info("  [diag] init_pattern_freq returned, building AncestryModel")
         model = AncestryModel(
             n_ancestries=model.n_ancestries, mu=model.mu,
             gen_since_admix=model.gen_since_admix, allele_freq=model.allele_freq,
             pattern_freq=pf, block_data=bd,
         )
+        log.info("  [diag] AncestryModel with block_data built")
 
     # --- Stage 2-3: EM iterations ---
     bucket_centers = compute_bucket_centers(n_T_buckets) if per_hap_T else None

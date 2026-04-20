@@ -16,10 +16,53 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import logging
+import os
+import signal
 import sys
+import threading
 import time
 from pathlib import Path
+
+# Allow external stack dumps: send SIGUSR1 to dump all thread stacks to stderr.
+faulthandler.enable()
+try:
+    faulthandler.register(signal.SIGUSR1, file=sys.stderr, all_threads=True)
+except (AttributeError, ValueError):
+    pass  # SIGUSR1 not available on some platforms
+
+
+def _start_heartbeat():
+    try:
+        import psutil
+        proc = psutil.Process(os.getpid())
+    except ImportError:
+        psutil = None
+        proc = None
+
+    logger = logging.getLogger("popout.heartbeat")
+
+    def _beat():
+        while True:
+            time.sleep(60)
+            try:
+                if proc is not None:
+                    mem_mb = proc.memory_info().rss / 1024 / 1024
+                    n_threads = proc.num_threads()
+                    n_fds = proc.num_fds() if hasattr(proc, "num_fds") else -1
+                    logger.info("heartbeat: rss=%.0fMB threads=%d fds=%d",
+                                mem_mb, n_threads, n_fds)
+                else:
+                    logger.info("heartbeat: alive (psutil not available)")
+            except Exception as e:
+                logger.warning("heartbeat failed: %s", e)
+
+    t = threading.Thread(target=_beat, daemon=True, name="heartbeat")
+    t.start()
+
+
+_start_heartbeat()
 
 
 def main(argv: list[str] | None = None) -> None:
