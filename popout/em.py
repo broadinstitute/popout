@@ -575,9 +575,9 @@ def run_em(
         gamma_block = None  # only set for block-emissions path
         _pf_counts = None   # accumulated pattern-freq counts for M-step
         if bd is not None and model.pattern_freq is not None:
-            # Block emissions: chunked E-step with streaming M-step accumulators.
-            # No per-chunk gamma is retained — each chunk is consumed into
-            # reduction accumulators immediately and then freed.
+            # Block emissions: chunked E-step consuming block-level gamma
+            # directly. No per-site expansion — all M-step reductions are
+            # computed from the (chunk, n_blocks, A) tensor.
             from .blocks import BlockData
             block_batch = _auto_batch_size_blocks(
                 bd.n_blocks, n_anc, chrom_data.n_haps,
@@ -587,12 +587,17 @@ def run_em(
             T_sites = chrom_data.n_sites
             H_total = chrom_data.n_haps
 
+            # Pre-compute block geometry (tiny arrays, computed once)
+            b_starts = np.array(bd.block_starts, dtype=np.int64)
+            b_ends = np.array(bd.block_ends, dtype=np.int64)
+            block_widths_np = b_ends - b_starts
+            block_widths_j = jnp.array(block_widths_np, dtype=jnp.float32)
+
             weighted_counts = jnp.zeros((n_anc, T_sites), dtype=jnp.float32)
             total_weights = jnp.zeros((n_anc, T_sites), dtype=jnp.float32)
             mu_sum = jnp.zeros(n_anc, dtype=jnp.float32)
-            switch_sum = jnp.zeros(max(T_sites - 1, 0), dtype=jnp.float32)
+            switch_sum = jnp.zeros(n_anc, dtype=jnp.float32)
             all_switches_per_hap: list[np.ndarray] = []
-            # Accumulate scatter-add counts for update_pattern_freq
             _pf_counts = jnp.zeros((bd.n_blocks, bd.max_patterns, n_anc), dtype=jnp.float32)
 
             for bs in range(0, H_total, block_batch):
@@ -606,24 +611,51 @@ def run_em(
                     max_patterns=bd.max_patterns,
                     block_size=bd.block_size,
                 )
+                # E-step: block-level forward-backward → (chunk, n_blocks, A)
                 gb_chunk = forward_backward_blocks(model, bd_chunk)
-                gamma_chunk = expand_block_posteriors(gb_chunk, bd, T_sites)
                 geno_chunk = geno[bs:be].astype(jnp.float32)
 
-                weighted_counts = weighted_counts + jnp.einsum('hta,ht->at', gamma_chunk, geno_chunk)
-                total_weights = total_weights + gamma_chunk.sum(axis=0).T
-                mu_sum = mu_sum + gamma_chunk.sum(axis=(0, 1))
+                # --- M-step accumulators from block gamma (no per-site expansion) ---
 
-                if T_sites > 1:
-                    calls_c = jnp.argmax(gamma_chunk, axis=2)
-                    sw_c = (calls_c[:, 1:] != calls_c[:, :-1])
-                    switch_sum = switch_sum + sw_c.sum(axis=0).astype(jnp.float32)
-                    all_switches_per_hap.append(np.array(sw_c.sum(axis=1), dtype=np.int32))
-                    del calls_c, sw_c
+                # weighted_counts[a, t]: for sites t in block b,
+                # gamma[h,t,a] = gamma_block[h,b,a], so:
+                # weighted_counts[a, s:e] += gamma_block[:,b,:].T @ geno[:,s:e]
+                for b_idx in range(bd.n_blocks):
+                    s, e = int(b_starts[b_idx]), int(b_ends[b_idx])
+                    # (A, chunk) @ (chunk, w) → (A, w)
+                    weighted_counts = weighted_counts.at[:, s:e].add(
+                        gb_chunk[:, b_idx, :].T @ geno_chunk[:, s:e]
+                    )
+
+                # total_weights[a, t]: for sites in block b, each site gets
+                # the same per-ancestry sum
+                for b_idx in range(bd.n_blocks):
+                    s, e = int(b_starts[b_idx]), int(b_ends[b_idx])
+                    per_anc = gb_chunk[:, b_idx, :].sum(axis=0)  # (A,)
+                    total_weights = total_weights.at[:, s:e].add(
+                        jnp.broadcast_to(per_anc[:, None], (n_anc, e - s))
+                    )
+
+                # mu_sum[a] = sum_h sum_b gamma_block[h,b,a] * width[b]
+                mu_sum = mu_sum + jnp.einsum('hba,b->a', gb_chunk, block_widths_j)
+
+                # Switches: only at block boundaries (within-block gamma is constant)
+                calls_block = jnp.argmax(gb_chunk, axis=2)  # (chunk, n_blocks)
+                if bd.n_blocks > 1:
+                    sw_block = (calls_block[:, 1:] != calls_block[:, :-1])  # (chunk, n_blocks-1)
+                    all_switches_per_hap.append(
+                        np.array(sw_block.sum(axis=1), dtype=np.int32)
+                    )
+                    # Attribute switches to pre-switch ancestry
+                    pre_calls = calls_block[:, :-1]
+                    one_hot = jax.nn.one_hot(pre_calls, n_anc, dtype=jnp.float32)
+                    switch_sum = switch_sum + (
+                        one_hot * sw_block[..., None].astype(jnp.float32)
+                    ).sum(axis=(0, 1))
                 else:
                     all_switches_per_hap.append(np.zeros(be - bs, dtype=np.int32))
 
-                # Accumulate pattern-freq scatter-add from block posteriors
+                # Accumulate pattern-freq scatter-add counts
                 pat_idx_chunk = jnp.array(bd_chunk.pattern_indices)
                 for b_idx in range(bd.n_blocks):
                     _pf_counts = _pf_counts.at[b_idx].add(
@@ -632,9 +664,8 @@ def run_em(
                         )
                     )
 
-                # Force JAX to finish before starting next chunk
                 weighted_counts.block_until_ready()
-                del gamma_chunk, geno_chunk, gb_chunk, pat_idx_chunk
+                del gb_chunk, geno_chunk, calls_block, pat_idx_chunk
 
             switches_per_hap = np.concatenate(all_switches_per_hap)
             em_stats = EMStats(

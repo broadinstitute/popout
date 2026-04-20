@@ -109,6 +109,63 @@ def test_k1_equals_bernoulli():
     # This is a sanity check that the init works for degenerate block size
 
 
+def test_block_mstep_no_expansion_matches_expanded():
+    """M-step accumulators from block-level gamma must match per-site expansion."""
+    from popout.hmm import forward_backward_blocks
+    from popout.datatypes import AncestryModel
+
+    rng = np.random.default_rng(42)
+    H, T, A = 200, 64, 4
+    block_size = 8
+    geno = rng.integers(0, 2, size=(H, T), dtype=np.uint8)
+    bd = pack_blocks(geno, block_size=block_size)
+    allele_freq = jnp.array(rng.uniform(0.1, 0.9, (A, T)).astype(np.float32))
+    pf = init_pattern_freq(allele_freq, bd, geno)
+    model = AncestryModel(
+        n_ancestries=A, mu=jnp.full(A, 1.0/A), gen_since_admix=20.0,
+        allele_freq=allele_freq, pattern_freq=pf, block_data=bd,
+    )
+
+    gamma_block = forward_backward_blocks(model, bd)
+    geno_j = jnp.array(geno, dtype=jnp.float32)
+
+    # --- Reference: expand to per-site then reduce ---
+    gamma_site = expand_block_posteriors(gamma_block, bd, T)
+    ref_wc = jnp.einsum('hta,ht->at', gamma_site, geno_j)
+    ref_tw = gamma_site.sum(axis=0).T
+    ref_mu = gamma_site.sum(axis=(0, 1))
+
+    # --- New: block-level accumulation ---
+    b_starts = np.array(bd.block_starts)
+    b_ends = np.array(bd.block_ends)
+    block_widths = jnp.array(b_ends - b_starts, dtype=jnp.float32)
+
+    new_wc = jnp.zeros((A, T), dtype=jnp.float32)
+    new_tw = jnp.zeros((A, T), dtype=jnp.float32)
+    for b_idx in range(bd.n_blocks):
+        s, e = int(b_starts[b_idx]), int(b_ends[b_idx])
+        new_wc = new_wc.at[:, s:e].add(gamma_block[:, b_idx, :].T @ geno_j[:, s:e])
+        per_anc = gamma_block[:, b_idx, :].sum(axis=0)
+        new_tw = new_tw.at[:, s:e].add(
+            jnp.broadcast_to(per_anc[:, None], (A, e - s))
+        )
+    new_mu = jnp.einsum('hba,b->a', gamma_block, block_widths)
+
+    np.testing.assert_allclose(np.array(new_wc), np.array(ref_wc), rtol=1e-4, atol=1e-6)
+    np.testing.assert_allclose(np.array(new_tw), np.array(ref_tw), rtol=1e-4, atol=1e-6)
+    np.testing.assert_allclose(np.array(new_mu), np.array(ref_mu), rtol=1e-4, atol=1e-6)
+
+    # --- Switches: block-boundary vs per-site argmax ---
+    calls_site = jnp.argmax(gamma_site, axis=2)
+    ref_sw = np.array((calls_site[:, 1:] != calls_site[:, :-1]).sum(axis=1))
+    calls_block = jnp.argmax(gamma_block, axis=2)
+    new_sw = np.array((calls_block[:, 1:] != calls_block[:, :-1]).sum(axis=1))
+    # Block-boundary switches <= per-site switches (within-block switches are
+    # zero by construction). They should be equal since within-block gamma is
+    # constant, so within-block argmax is constant, so no within-block switches.
+    np.testing.assert_array_equal(new_sw, ref_sw)
+
+
 def test_forward_backward_blocks_batched_matches_unbatched():
     """Batched and unbatched forward_backward_blocks must agree."""
     from popout.hmm import forward_backward_blocks, forward_backward_blocks_batched
