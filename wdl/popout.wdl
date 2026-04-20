@@ -130,11 +130,12 @@ task popout_task {
   >>>
 
   output {
-    File global_ancestry = "~{output_prefix}.global.tsv"
-    File tracts           = "~{output_prefix}.tracts.tsv.gz"
-    File model            = "~{output_prefix}.model"
-    File model_npz        = "~{output_prefix}.model.npz"
-    File summary          = "~{output_prefix}.summary.json"
+    # These are optional because --stop-after-seeding exits before producing them
+    File? global_ancestry = "~{output_prefix}.global.tsv"
+    File? tracts           = "~{output_prefix}.tracts.tsv.gz"
+    File? model            = "~{output_prefix}.model"
+    File? model_npz        = "~{output_prefix}.model.npz"
+    File? summary          = "~{output_prefix}.summary.json"
     File? spectral_npz     = "~{output_prefix}.spectral.npz"
     File? stats_jsonl      = "~{output_prefix}.stats.jsonl"
 
@@ -238,11 +239,11 @@ workflow popout {
   }
 
   output {
-    File global_ancestry = popout_task.global_ancestry
-    File tracts           = popout_task.tracts
-    File model            = popout_task.model
-    File model_npz        = popout_task.model_npz
-    File summary          = popout_task.summary
+    File? global_ancestry = popout_task.global_ancestry
+    File? tracts           = popout_task.tracts
+    File? model            = popout_task.model
+    File? model_npz        = popout_task.model_npz
+    File? summary          = popout_task.summary
     File? spectral_npz     = popout_task.spectral_npz
     File? stats_jsonl      = popout_task.stats_jsonl
 
