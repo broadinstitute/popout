@@ -866,6 +866,97 @@ def run_em(
 # Multi-chromosome wrapper
 # ---------------------------------------------------------------------------
 
+def _save_checkpoint(
+    out_prefix: str,
+    model: AncestryModel,
+    leaf_labels: np.ndarray,
+    leaf_info: list,
+    chrom_data: 'ChromData',
+) -> None:
+    """Save post-seeding state for resume."""
+    import json, datetime
+    bd = model.block_data
+    save_dict = dict(
+        leaf_labels=np.array(leaf_labels, dtype=np.int32),
+        leaf_paths=np.array([li.path for li in leaf_info]),
+        mu=np.array(model.mu),
+        gen_since_admix=np.float64(model.gen_since_admix),
+        allele_freq=np.array(model.allele_freq),
+        n_ancestries=np.int32(model.n_ancestries),
+        chrom=np.array(str(chrom_data.chrom)),
+        n_sites=np.int64(chrom_data.n_sites),
+        n_haps=np.int64(chrom_data.n_haps),
+    )
+    if model.pattern_freq is not None:
+        save_dict["pattern_freq"] = np.array(model.pattern_freq)
+    if bd is not None:
+        save_dict["pattern_indices"] = np.array(bd.pattern_indices)
+        save_dict["block_starts"] = np.array(bd.block_starts)
+        save_dict["block_ends"] = np.array(bd.block_ends)
+        save_dict["block_distances"] = np.array(bd.block_distances)
+        save_dict["pattern_counts"] = np.array(bd.pattern_counts)
+        save_dict["max_patterns"] = np.int32(bd.max_patterns)
+        save_dict["block_size"] = np.int32(bd.block_size)
+    np.savez_compressed(f"{out_prefix}.checkpoint.npz", **save_dict)
+    meta = {
+        "n_ancestries": int(model.n_ancestries),
+        "n_haps": int(chrom_data.n_haps),
+        "n_sites": int(chrom_data.n_sites),
+        "n_leaves": len(leaf_info),
+        "chrom": str(chrom_data.chrom),
+        "date": datetime.datetime.now().isoformat(),
+    }
+    with open(f"{out_prefix}.checkpoint.meta.json", "w") as f:
+        json.dump(meta, f, indent=2)
+    log.info("Checkpoint written to %s.checkpoint.npz (%d leaves, A=%d)",
+             out_prefix, len(leaf_info), model.n_ancestries)
+
+
+def _load_checkpoint(
+    path_prefix: str,
+    chrom_data: 'ChromData',
+) -> tuple[AncestryModel, np.ndarray]:
+    """Load post-seeding checkpoint."""
+    from .blocks import BlockData
+    data = np.load(f"{path_prefix}.checkpoint.npz", allow_pickle=True)
+
+    n_anc = int(data["n_ancestries"])
+    assert int(data["n_haps"]) == chrom_data.n_haps, (
+        f"Checkpoint H={data['n_haps']} != input H={chrom_data.n_haps}"
+    )
+    assert int(data["n_sites"]) == chrom_data.n_sites, (
+        f"Checkpoint T={data['n_sites']} != input T={chrom_data.n_sites}"
+    )
+
+    bd = None
+    pf = None
+    if "block_starts" in data:
+        bd = BlockData(
+            pattern_indices=data["pattern_indices"],
+            block_starts=data["block_starts"],
+            block_ends=data["block_ends"],
+            block_distances=data["block_distances"],
+            pattern_counts=data["pattern_counts"],
+            max_patterns=int(data["max_patterns"]),
+            block_size=int(data["block_size"]),
+        )
+    if "pattern_freq" in data:
+        pf = jnp.array(data["pattern_freq"])
+
+    model = AncestryModel(
+        n_ancestries=n_anc,
+        mu=jnp.array(data["mu"]),
+        gen_since_admix=float(data["gen_since_admix"]),
+        allele_freq=jnp.array(data["allele_freq"]),
+        pattern_freq=pf,
+        block_data=bd,
+    )
+    leaf_labels = data["leaf_labels"]
+    log.info("Loaded checkpoint: A=%d, H=%d, T=%d",
+             n_anc, chrom_data.n_haps, chrom_data.n_sites)
+    return model, leaf_labels
+
+
 def run_em_genome(
     chrom_iter,
     n_ancestries: Optional[int] = None,
@@ -885,7 +976,9 @@ def run_em_genome(
     recursive_kwargs: Optional[dict] = None,
     freeze_anchors_iters: int = 0,
     out_prefix: Optional[str] = None,
-) -> list[AncestryResult]:
+    stop_after_seeding: bool = False,
+    resume_from_checkpoint: Optional[str] = None,
+) -> list[AncestryResult] | None:
     """Run self-bootstrapping LAI across all chromosomes.
 
     Strategy (following FLARE):
@@ -914,48 +1007,125 @@ def run_em_genome(
             # First chromosome: full EM
             log.info("=== Seed chromosome: %s (full EM) ===", chrom_data.chrom)
 
-            # Recursive seeding: run before run_em, pass responsibilities in
-            seed_resp = None
-            em_n_ancestries = n_ancestries
-            if seed_method == "recursive":
-                from .recursive_seed import recursive_split_seed
-                rkw = recursive_kwargs or {}
-                if out_prefix is not None and "dump_pre_merge_path" not in rkw:
-                    rkw["dump_pre_merge_path"] = f"{out_prefix}.recursive_pre_merge"
-                leaf_labels, leaf_info = recursive_split_seed(
-                    chrom_data.geno,
-                    chrom_data=chrom_data,
-                    gen_since_admix=gen_since_admix,
-                    rng_seed=rng_seed,
-                    stats=stats,
-                    **rkw,
+            if resume_from_checkpoint is not None:
+                # --- Resume from checkpoint: skip recursion + Stage 1 ---
+                log.info("Resuming from checkpoint: %s", resume_from_checkpoint)
+                ckpt_model, ckpt_labels = _load_checkpoint(
+                    resume_from_checkpoint, chrom_data,
                 )
-                n_leaves = len(leaf_info)
-                # Convert to one-hot responsibilities
+                n_leaves = ckpt_model.n_ancestries
                 seed_resp = jnp.zeros((chrom_data.n_haps, n_leaves), dtype=jnp.float32)
                 seed_resp = seed_resp.at[
-                    jnp.arange(chrom_data.n_haps), jnp.array(leaf_labels)
+                    jnp.arange(chrom_data.n_haps), jnp.array(ckpt_labels)
                 ].set(1.0)
-                em_n_ancestries = n_leaves
 
-            result = run_em(
-                chrom_data,
-                n_ancestries=em_n_ancestries,
-                n_em_iter=n_em_iter,
-                gen_since_admix=gen_since_admix,
-                batch_size=batch_size,
-                rng_seed=rng_seed,
-                stats=stats,
-                per_hap_T=per_hap_T,
-                n_T_buckets=n_T_buckets,
-                use_block_emissions=use_block_emissions,
-                block_size=block_size,
-                detection_method=detection_method,
-                max_ancestries=max_ancestries,
-                seed_responsibilities=seed_resp,
-                freeze_anchors_iters=freeze_anchors_iters,
-            )
-            fitted_model = result.model
+                result = run_em(
+                    chrom_data,
+                    n_ancestries=n_leaves,
+                    n_em_iter=n_em_iter,
+                    gen_since_admix=ckpt_model.gen_since_admix,
+                    batch_size=batch_size,
+                    rng_seed=rng_seed,
+                    stats=stats,
+                    per_hap_T=per_hap_T,
+                    n_T_buckets=n_T_buckets,
+                    use_block_emissions=use_block_emissions,
+                    block_size=block_size,
+                    detection_method=detection_method,
+                    max_ancestries=max_ancestries,
+                    seed_responsibilities=seed_resp,
+                    freeze_anchors_iters=freeze_anchors_iters,
+                )
+                fitted_model = result.model
+            else:
+                # --- Normal path: recursion → init → EM ---
+                seed_resp = None
+                em_n_ancestries = n_ancestries
+                leaf_labels_for_ckpt = None
+                leaf_info_for_ckpt = None
+
+                if seed_method == "recursive":
+                    from .recursive_seed import recursive_split_seed
+                    rkw = recursive_kwargs or {}
+                    if out_prefix is not None and "dump_pre_merge_path" not in rkw:
+                        rkw["dump_pre_merge_path"] = f"{out_prefix}.recursive_pre_merge"
+                    leaf_labels, leaf_info = recursive_split_seed(
+                        chrom_data.geno,
+                        chrom_data=chrom_data,
+                        gen_since_admix=gen_since_admix,
+                        rng_seed=rng_seed,
+                        stats=stats,
+                        **rkw,
+                    )
+                    n_leaves = len(leaf_info)
+                    seed_resp = jnp.zeros((chrom_data.n_haps, n_leaves), dtype=jnp.float32)
+                    seed_resp = seed_resp.at[
+                        jnp.arange(chrom_data.n_haps), jnp.array(leaf_labels)
+                    ].set(1.0)
+                    em_n_ancestries = n_leaves
+                    leaf_labels_for_ckpt = leaf_labels
+                    leaf_info_for_ckpt = leaf_info
+
+                if stop_after_seeding:
+                    # Run only Stage 0 + Stage 1 (seeding + model init), then exit
+                    result = run_em(
+                        chrom_data,
+                        n_ancestries=em_n_ancestries,
+                        n_em_iter=0,
+                        gen_since_admix=gen_since_admix,
+                        batch_size=batch_size,
+                        rng_seed=rng_seed,
+                        seed_responsibilities=seed_resp,
+                        use_block_emissions=use_block_emissions,
+                        block_size=block_size,
+                        detection_method=detection_method,
+                        max_ancestries=max_ancestries,
+                    )
+                    if out_prefix is not None:
+                        if leaf_labels_for_ckpt is None:
+                            # GMM path: use hard labels as checkpoint
+                            leaf_labels_for_ckpt = np.array(
+                                jnp.argmax(seed_resp, axis=1) if seed_resp is not None
+                                else jnp.zeros(chrom_data.n_haps, dtype=jnp.int32)
+                            )
+                            from .recursive_seed import LeafInfo
+                            leaf_info_for_ckpt = [
+                                LeafInfo(label=i, n_haps=int((leaf_labels_for_ckpt==i).sum()),
+                                         depth=0, path=f"L{i}", bic_score=0.0)
+                                for i in range(result.model.n_ancestries)
+                            ]
+                        _save_checkpoint(
+                            out_prefix, result.model,
+                            leaf_labels_for_ckpt, leaf_info_for_ckpt, chrom_data,
+                        )
+                    log.info("=== Stopped after seeding (--stop-after-seeding) ===")
+                    return None
+
+                result = run_em(
+                    chrom_data,
+                    n_ancestries=em_n_ancestries,
+                    n_em_iter=n_em_iter,
+                    gen_since_admix=gen_since_admix,
+                    batch_size=batch_size,
+                    rng_seed=rng_seed,
+                    stats=stats,
+                    per_hap_T=per_hap_T,
+                    n_T_buckets=n_T_buckets,
+                    use_block_emissions=use_block_emissions,
+                    block_size=block_size,
+                    detection_method=detection_method,
+                    max_ancestries=max_ancestries,
+                    seed_responsibilities=seed_resp,
+                    freeze_anchors_iters=freeze_anchors_iters,
+                )
+                fitted_model = result.model
+
+                # Save checkpoint for future resume even on normal runs
+                if out_prefix is not None and leaf_labels_for_ckpt is not None:
+                    _save_checkpoint(
+                        out_prefix, result.model,
+                        leaf_labels_for_ckpt, leaf_info_for_ckpt, chrom_data,
+                    )
         else:
             # Subsequent chromosomes: use fitted params, 1 iteration to adapt
             log.info("=== Chromosome %s (warm-started, 1 iter) ===", chrom_data.chrom)

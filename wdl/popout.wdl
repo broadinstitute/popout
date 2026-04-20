@@ -37,6 +37,8 @@ task popout_task {
     Int     freeze_anchors_iters     = 0
     Float   recursive_merge_hellinger = 0.08
     Int     recursive_max_leaves     = 20
+    Boolean stop_after_seeding       = false
+    File?   resume_from_checkpoint
     String  extra_args               = ""
 
     # Weights & Biases — API key string or gs:// URL to a file containing it
@@ -111,6 +113,8 @@ task popout_task {
     if [ "~{freeze_anchors_iters}" -gt 0 ]; then
       CMD="$CMD --freeze-anchors-iters ~{freeze_anchors_iters}"
     fi
+    ~{if stop_after_seeding then 'CMD="$CMD --stop-after-seeding"' else ''}
+    ~{if defined(resume_from_checkpoint) then 'CMD="$CMD --resume-from-checkpoint ~{resume_from_checkpoint}"' else ''}
 
     if [ -n "$WANDB_RAW" ]; then CMD="$CMD --monitor wandb"; fi
 
@@ -144,6 +148,10 @@ task popout_task {
     File? recursive_leaves     = "~{output_prefix}.recursive_pre_merge.leaves.tsv"
     File? recursive_leaf_meta  = "~{output_prefix}.recursive_pre_merge.leaf_meta.tsv"
     File? recursive_leaf_freqs = "~{output_prefix}.recursive_pre_merge.leaf_freqs.npz"
+
+    # Checkpoint (produced when seed_method = recursive or stop_after_seeding)
+    File? checkpoint      = "~{output_prefix}.checkpoint.npz"
+    File? checkpoint_meta = "~{output_prefix}.checkpoint.meta.json"
   }
 
   runtime {
@@ -183,6 +191,8 @@ workflow popout {
     Int     freeze_anchors_iters     = 0
     Float   recursive_merge_hellinger = 0.08
     Int     recursive_max_leaves     = 20
+    Boolean stop_after_seeding       = false
+    File?   resume_from_checkpoint
     String  extra_args               = ""
 
     # Weights & Biases
@@ -216,6 +226,8 @@ workflow popout {
       freeze_anchors_iters      = freeze_anchors_iters,
       recursive_merge_hellinger = recursive_merge_hellinger,
       recursive_max_leaves      = recursive_max_leaves,
+      stop_after_seeding        = stop_after_seeding,
+      resume_from_checkpoint    = resume_from_checkpoint,
       extra_args                = extra_args,
       wandb_key       = wandb_key,
       machine_type    = machine_type,
@@ -242,5 +254,8 @@ workflow popout {
     File? recursive_leaves     = popout_task.recursive_leaves
     File? recursive_leaf_meta  = popout_task.recursive_leaf_meta
     File? recursive_leaf_freqs = popout_task.recursive_leaf_freqs
+
+    File? checkpoint      = popout_task.checkpoint
+    File? checkpoint_meta = popout_task.checkpoint_meta
   }
 }

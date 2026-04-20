@@ -250,6 +250,17 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     parser.add_argument(
+        "--stop-after-seeding", action="store_true",
+        help="Exit after recursive seeding and Stage 1 model init, before "
+             "starting EM iterations. Writes a checkpoint for --resume-from-checkpoint.",
+    )
+    parser.add_argument(
+        "--resume-from-checkpoint", type=str, default=None,
+        help="Resume from a checkpoint written by --stop-after-seeding. "
+             "Skips recursion and Stage 1; jumps directly to EM iterations.",
+    )
+
+    parser.add_argument(
         "--probs", action="store_true",
         help="Write posterior probabilities to output files",
     )
@@ -478,10 +489,19 @@ def main(argv: list[str] | None = None) -> None:
             recursive_kwargs=recursive_kwargs,
             freeze_anchors_iters=args.freeze_anchors_iters,
             out_prefix=args.out,
+            stop_after_seeding=args.stop_after_seeding,
+            resume_from_checkpoint=args.resume_from_checkpoint,
         )
 
     t_compute = time.perf_counter() - t0
     log.info("Computation complete in %.1f seconds", t_compute)
+
+    if results is None:
+        # --stop-after-seeding: checkpoint written, no EM results
+        if stats is not None:
+            stats.emit("runtime/t_compute", round(t_compute, 2))
+            stats.finalize()
+        return
 
     # --- Write outputs ---
     from .output import write_global_ancestry, write_model, write_ancestry_tracts
