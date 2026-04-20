@@ -797,6 +797,16 @@ def run_em(
         prev_freq = new_freq
         prev_T = new_T
 
+    # --- Skip decode if no EM iterations were run (checkpoint-only mode) ---
+    if n_em_iter == 0:
+        log.info("Skipping final decode (n_em_iter=0)")
+        calls = np.zeros((chrom_data.n_haps, chrom_data.n_sites), dtype=np.int8)
+        result = AncestryResult(
+            calls=calls, model=model, chrom=chrom_data.chrom,
+            spectral={"pca_proj": pca_proj, "gmm_labels": np.array(labels)} if pca_proj is not None else None,
+        )
+        return result
+
     # --- Final decode (streaming — no full gamma materialised) ---
     log.info("Final forward-backward pass")
     if bd is not None and model.pattern_freq is not None:
