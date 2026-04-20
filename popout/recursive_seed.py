@@ -175,6 +175,8 @@ def recursive_split_seed(
 
         node = queue.popleft()
         n = len(node.indices)
+        log.info("  [%d leaves, %d queued] Testing %s (%d haps, depth=%d)",
+                 len(leaves), len(queue), node.path, n, node.depth)
 
         # Too small to split?
         if n < 2 * min_cluster_size:
