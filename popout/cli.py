@@ -259,6 +259,11 @@ def main(argv: list[str] | None = None) -> None:
         help="Resume from a checkpoint written by --stop-after-seeding. "
              "Skips recursion and Stage 1; jumps directly to EM iterations.",
     )
+    parser.add_argument(
+        "--checkpoint-after-em", action="store_true",
+        help="Write a post-EM checkpoint before the final decode pass. "
+             "Allows resuming from the converged model if decode OOMs.",
+    )
 
     parser.add_argument(
         "--probs", action="store_true",
@@ -491,6 +496,7 @@ def main(argv: list[str] | None = None) -> None:
             out_prefix=args.out,
             stop_after_seeding=args.stop_after_seeding,
             resume_from_checkpoint=args.resume_from_checkpoint,
+            checkpoint_after_em=args.checkpoint_after_em,
         )
 
     t_compute = time.perf_counter() - t0

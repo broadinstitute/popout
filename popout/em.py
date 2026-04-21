@@ -474,6 +474,7 @@ def run_em(
     max_ancestries: int = 20,
     seed_responsibilities: Optional[jnp.ndarray] = None,
     freeze_anchors_iters: int = 0,
+    checkpoint_after_em: Optional[str] = None,
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -807,13 +808,16 @@ def run_em(
         )
         return result
 
+    # --- Post-EM checkpoint (before decode, which may OOM) ---
+    if checkpoint_after_em is not None:
+        _save_em_checkpoint(checkpoint_after_em, model, chrom_data)
+
     # --- Final decode (streaming — no full gamma materialised) ---
     log.info("Final forward-backward pass")
     if bd is not None and model.pattern_freq is not None:
-        # Block emissions: block-level decode without per-site gamma expansion.
-        # Argmax and max are computed at block level, then gathered to per-site
-        # via an integer index (cheap) instead of expanding the full (H, T, A)
-        # posterior tensor (32 GB at AoU K=20).
+        # Block emissions: block-level decode. Preallocate final arrays and
+        # write chunks into slices to avoid retaining per-chunk lists.
+        # max_post is omitted (40 GB at AoU scale, not needed for outputs).
         from .blocks import BlockData
         block_batch = _auto_batch_size_blocks(
             bd.n_blocks, n_anc, chrom_data.n_haps,
@@ -828,11 +832,11 @@ def run_em(
             dtype=jnp.float32,
         )
 
-        all_calls = []
-        all_max_post = []
-        all_global_sums = []
-        for bs in range(0, chrom_data.n_haps, block_batch):
-            be = min(bs + block_batch, chrom_data.n_haps)
+        H_total = chrom_data.n_haps
+        calls = np.empty((H_total, chrom_data.n_sites), dtype=np.int8)
+        global_sums = np.zeros((H_total, n_anc), dtype=np.float64)
+        for bs in range(0, H_total, block_batch):
+            be = min(bs + block_batch, H_total)
             bd_chunk = BlockData(
                 pattern_indices=bd.pattern_indices[bs:be],
                 block_starts=bd.block_starts,
@@ -846,22 +850,15 @@ def run_em(
             gb_chunk.block_until_ready()
             # Block-level reductions (tiny: chunk × n_blocks)
             calls_block = np.array(jnp.argmax(gb_chunk, axis=2), dtype=np.int8)
-            max_post_block = np.array(gb_chunk.max(axis=2), dtype=np.float32)
-            global_sums_chunk = np.array(
+            global_sums[bs:be] = np.array(
                 jnp.einsum('hba,b->ha', gb_chunk, block_widths_j),
                 dtype=np.float64,
             )
             del gb_chunk
-            # Expand to per-site via integer gather (int8/float32, no A dimension)
-            all_calls.append(calls_block[:, site_to_block])
-            all_max_post.append(max_post_block[:, site_to_block])
-            all_global_sums.append(global_sums_chunk)
-        calls = np.concatenate(all_calls, axis=0)
-        decode = DecodeResult(
-            calls=calls,
-            max_post=np.concatenate(all_max_post, axis=0),
-            global_sums=np.concatenate(all_global_sums, axis=0),
-        )
+            # Expand calls to per-site via integer gather (int8, no A dimension)
+            calls[bs:be] = calls_block[:, site_to_block]
+            log.info("  decode chunk %d–%d / %d", bs, be, H_total)
+        decode = DecodeResult(calls=calls, global_sums=global_sums)
         result = AncestryResult(
             calls=calls, model=model, chrom=chrom_data.chrom,
             decode=decode,
@@ -896,6 +893,73 @@ def run_em(
 # ---------------------------------------------------------------------------
 # Multi-chromosome wrapper
 # ---------------------------------------------------------------------------
+
+def _save_em_checkpoint(path: str, model: AncestryModel, chrom_data: 'ChromData') -> None:
+    """Save converged model state after EM, before decode."""
+    save_dict = dict(
+        mu=np.array(model.mu),
+        gen_since_admix=np.float64(model.gen_since_admix),
+        allele_freq=np.array(model.allele_freq),
+        n_ancestries=np.int32(model.n_ancestries),
+        n_sites=np.int64(chrom_data.n_sites),
+        n_haps=np.int64(chrom_data.n_haps),
+        chrom=np.array(str(chrom_data.chrom)),
+    )
+    if model.pattern_freq is not None:
+        save_dict["pattern_freq"] = np.array(model.pattern_freq)
+    bd = model.block_data
+    if bd is not None:
+        save_dict["pattern_indices"] = np.array(bd.pattern_indices)
+        save_dict["block_starts"] = np.array(bd.block_starts)
+        save_dict["block_ends"] = np.array(bd.block_ends)
+        save_dict["block_distances"] = np.array(bd.block_distances)
+        save_dict["pattern_counts"] = np.array(bd.pattern_counts)
+        save_dict["max_patterns"] = np.int32(bd.max_patterns)
+        save_dict["block_size"] = np.int32(bd.block_size)
+    if not path.endswith(".npz"):
+        path = f"{path}.em_checkpoint.npz"
+    np.savez_compressed(path, **save_dict)
+    log.info("Post-EM checkpoint written to %s (A=%d)", path, model.n_ancestries)
+
+
+def _load_em_checkpoint(path: str, chrom_data: 'ChromData') -> AncestryModel:
+    """Load converged model from a post-EM checkpoint."""
+    from .blocks import BlockData
+    if not path.endswith(".npz"):
+        path = f"{path}.em_checkpoint.npz"
+    data = np.load(path, allow_pickle=True)
+    n_anc = int(data["n_ancestries"])
+    assert int(data["n_haps"]) == chrom_data.n_haps, (
+        f"Checkpoint H={data['n_haps']} != input H={chrom_data.n_haps}"
+    )
+    assert int(data["n_sites"]) == chrom_data.n_sites, (
+        f"Checkpoint T={data['n_sites']} != input T={chrom_data.n_sites}"
+    )
+    bd = None
+    pf = None
+    if "block_starts" in data:
+        bd = BlockData(
+            pattern_indices=data["pattern_indices"],
+            block_starts=data["block_starts"],
+            block_ends=data["block_ends"],
+            block_distances=data["block_distances"],
+            pattern_counts=data["pattern_counts"],
+            max_patterns=int(data["max_patterns"]),
+            block_size=int(data["block_size"]),
+        )
+    if "pattern_freq" in data:
+        pf = jnp.array(data["pattern_freq"])
+    model = AncestryModel(
+        n_ancestries=n_anc,
+        mu=jnp.array(data["mu"]),
+        gen_since_admix=float(data["gen_since_admix"]),
+        allele_freq=jnp.array(data["allele_freq"]),
+        pattern_freq=pf,
+        block_data=bd,
+    )
+    log.info("Loaded post-EM checkpoint: A=%d, H=%d, T=%d", n_anc, chrom_data.n_haps, chrom_data.n_sites)
+    return model
+
 
 def _save_checkpoint(
     out_prefix: str,
@@ -1011,6 +1075,7 @@ def run_em_genome(
     out_prefix: Optional[str] = None,
     stop_after_seeding: bool = False,
     resume_from_checkpoint: Optional[str] = None,
+    checkpoint_after_em: bool = False,
 ) -> list[AncestryResult] | None:
     """Run self-bootstrapping LAI across all chromosomes.
 
@@ -1052,6 +1117,7 @@ def run_em_genome(
                     jnp.arange(chrom_data.n_haps), jnp.array(ckpt_labels)
                 ].set(1.0)
 
+                em_ckpt_path = f"{out_prefix}.em_checkpoint" if (checkpoint_after_em and out_prefix) else None
                 result = run_em(
                     chrom_data,
                     n_ancestries=n_leaves,
@@ -1068,6 +1134,7 @@ def run_em_genome(
                     max_ancestries=max_ancestries,
                     seed_responsibilities=seed_resp,
                     freeze_anchors_iters=freeze_anchors_iters,
+                    checkpoint_after_em=em_ckpt_path,
                 )
                 fitted_model = result.model
             else:
@@ -1134,6 +1201,7 @@ def run_em_genome(
                     log.info("=== Stopped after seeding (--stop-after-seeding) ===")
                     return None
 
+                em_ckpt_path = f"{out_prefix}.em_checkpoint" if (checkpoint_after_em and out_prefix) else None
                 result = run_em(
                     chrom_data,
                     n_ancestries=em_n_ancestries,
@@ -1150,6 +1218,7 @@ def run_em_genome(
                     max_ancestries=max_ancestries,
                     seed_responsibilities=seed_resp,
                     freeze_anchors_iters=freeze_anchors_iters,
+                    checkpoint_after_em=em_ckpt_path,
                 )
                 fitted_model = result.model
 

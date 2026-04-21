@@ -38,6 +38,7 @@ task popout_task {
     Float   recursive_merge_hellinger = 0.08
     Int     recursive_max_leaves     = 20
     Boolean stop_after_seeding       = false
+    Boolean checkpoint_after_em      = true
     File?   resume_from_checkpoint
     String  extra_args               = ""
 
@@ -114,6 +115,7 @@ task popout_task {
       CMD="$CMD --freeze-anchors-iters ~{freeze_anchors_iters}"
     fi
     ~{if stop_after_seeding then 'CMD="$CMD --stop-after-seeding"' else ''}
+    ~{if checkpoint_after_em then 'CMD="$CMD --checkpoint-after-em"' else ''}
     ~{if defined(resume_from_checkpoint) then 'CMD="$CMD --resume-from-checkpoint ~{resume_from_checkpoint}"' else ''}
 
     if [ -n "$WANDB_RAW" ]; then CMD="$CMD --monitor wandb"; fi
@@ -153,6 +155,9 @@ task popout_task {
     # Checkpoint (produced when seed_method = recursive or stop_after_seeding)
     File? checkpoint      = "~{output_prefix}.checkpoint.npz"
     File? checkpoint_meta = "~{output_prefix}.checkpoint.meta.json"
+
+    # Post-EM checkpoint (produced when checkpoint_after_em = true)
+    File? em_checkpoint   = "~{output_prefix}.em_checkpoint.npz"
   }
 
   runtime {
@@ -193,6 +198,7 @@ workflow popout {
     Float   recursive_merge_hellinger = 0.08
     Int     recursive_max_leaves     = 20
     Boolean stop_after_seeding       = false
+    Boolean checkpoint_after_em      = true
     File?   resume_from_checkpoint
     String  extra_args               = ""
 
@@ -228,6 +234,7 @@ workflow popout {
       recursive_merge_hellinger = recursive_merge_hellinger,
       recursive_max_leaves      = recursive_max_leaves,
       stop_after_seeding        = stop_after_seeding,
+      checkpoint_after_em       = checkpoint_after_em,
       resume_from_checkpoint    = resume_from_checkpoint,
       extra_args                = extra_args,
       wandb_key       = wandb_key,
@@ -258,5 +265,7 @@ workflow popout {
 
     File? checkpoint      = popout_task.checkpoint
     File? checkpoint_meta = popout_task.checkpoint_meta
+
+    File? em_checkpoint   = popout_task.em_checkpoint
   }
 }
