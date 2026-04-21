@@ -328,15 +328,21 @@ def _genotypes_to_pca_projection(
     """
     H, T = geno.shape
 
-    # Subsample SNPs if needed
+    # Subsample SNPs if needed — keep only the index, not a full copy.
+    # At biobank scale (1M haps × 16k sites), geno[:, idx] would be ~10 GB.
     if T > max_snps:
         key, subkey = jax.random.split(key)
-        idx = np.array(jnp.sort(
+        snp_idx = np.array(jnp.sort(
             jax.random.choice(subkey, T, shape=(max_snps,), replace=False)
         ))
-        geno_sub = geno[:, idx]
+        T_sub = max_snps
     else:
-        geno_sub = geno
+        snp_idx = None
+        T_sub = T
+
+    def _col_subset(arr):
+        """Index columns lazily — avoids a persistent full-matrix copy."""
+        return arr[:, snp_idx] if snp_idx is not None else arr
 
     need_batched = H > max_haps_svd
 
@@ -347,9 +353,9 @@ def _genotypes_to_pca_projection(
             subkey, H, shape=(max_haps_svd,), replace=False,
         ))
         hap_idx.sort()
-        X = jnp.array(geno_sub[hap_idx], dtype=jnp.float32)
+        X = jnp.array(_col_subset(geno[hap_idx]), dtype=jnp.float32)
     else:
-        X = jnp.array(geno_sub, dtype=jnp.float32)
+        X = jnp.array(_col_subset(geno), dtype=jnp.float32)
 
     # Patterson normalisation
     mean = X.mean(axis=0)
@@ -360,7 +366,7 @@ def _genotypes_to_pca_projection(
 
     # SVD — exact for small matrices, randomized for larger
     n_pc = min(n_components, X.shape[0], X.shape[1])
-    if not need_batched and H < 2000 and X.shape[1] < 5000:
+    if not need_batched and H < 2000 and T_sub < 5000:
         U, S, _ = jnp.linalg.svd(X, full_matrices=False)
         del X
         proj = np.array(U[:, :n_pc] * S[:n_pc])
@@ -375,7 +381,7 @@ def _genotypes_to_pca_projection(
         proj = np.empty((H, n_pc), dtype=np.float32)
         for start in range(0, H, projection_batch):
             end = min(start + projection_batch, H)
-            batch = jnp.array(geno_sub[start:end], dtype=jnp.float32)
+            batch = jnp.array(_col_subset(geno[start:end]), dtype=jnp.float32)
             batch = (batch - mean) / scale
             proj[start:end] = np.array(batch @ Vt.T)
     else:

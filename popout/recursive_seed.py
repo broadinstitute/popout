@@ -306,7 +306,10 @@ def recursive_split_seed(
 
         # Sub-PCA on this cluster's raw genotypes
         key, subkey = jax.random.split(key)
-        sub_geno = geno[node.indices]
+        if len(node.indices) == H:
+            sub_geno = geno          # root node: avoid full-matrix host copy
+        else:
+            sub_geno = geno[node.indices]
         sub_proj = _geno_sub_pca(
             sub_geno, n_components=2, key=subkey,
             max_haps_svd=max_haps_svd, projection_batch=projection_batch,
@@ -698,7 +701,10 @@ def _run_k2_em_split(
     from .hmm import forward_backward_em
 
     if geno_j is not None:
-        sub_geno_j = geno_j[jnp.asarray(indices)]
+        if len(indices) == geno_j.shape[0]:
+            sub_geno_j = geno_j  # root node — no copy needed
+        else:
+            sub_geno_j = geno_j[jnp.asarray(indices)]
     else:
         sub_geno_j = jnp.asarray(geno[indices])
     H_sub, T = sub_geno_j.shape
