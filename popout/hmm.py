@@ -418,6 +418,353 @@ def forward_backward_checkpointed(
 
 
 # ---------------------------------------------------------------------------
+# Streaming forward-backward (no full-tensor emission or gamma)
+# ---------------------------------------------------------------------------
+
+def _streaming_em_checkpointed(
+    geno: jnp.ndarray,
+    model: AncestryModel,
+    d_morgan: jnp.ndarray,
+    checkpoint_interval: int | None = None,
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Checkpointed forward-backward returning sufficient statistics only.
+
+    Never materializes (B, T, A). Emissions are computed on the fly from
+    (geno, allele_freq) slices; posteriors are reduced to M-step accumulators
+    per segment inside the scan carry.
+
+    Peak per-call GPU residency: O(sqrt(T) * B * A) from checkpoints and
+    per-segment scratch, plus O(B * T) uint8 for the geno input.
+
+    Parameters
+    ----------
+    geno : (B, T) uint8
+    model : AncestryModel
+    d_morgan : (T-1,)
+    checkpoint_interval : sites between checkpoints (default: sqrt(T))
+
+    Returns
+    -------
+    weighted_counts : (A, T) float32
+    total_weights   : (A, T) float32
+    mu_sum          : (A,) float32
+    soft_switches   : (B,) float32
+    """
+    B, T = geno.shape
+    A = model.n_ancestries
+
+    if checkpoint_interval is None:
+        checkpoint_interval = max(1, int(math.isqrt(T)))
+    C = checkpoint_interval
+    S = (T + C - 1) // C
+    n_fwd_steps = S * C
+
+    # --- Small precomputed tensors ------------------------------------------
+    log_trans = model.log_transition_matrix(d_morgan)  # (T-1, A, A)
+    log_prior = jnp.log(model.mu)                       # (A,)
+
+    freq = jnp.clip(model.allele_freq, 1e-6, 1.0 - 1e-6)
+    log_f0 = jnp.log(1.0 - freq)       # (A, T)
+    log_odds = jnp.log(freq) - log_f0   # (A, T)
+
+    # --- Pad to S*C + 1 sites -----------------------------------------------
+    emit_pad = n_fwd_steps + 1 - T
+    if emit_pad > 0:
+        log_f0 = jnp.concatenate(
+            [log_f0, jnp.zeros((A, emit_pad))], axis=1,
+        )
+        log_odds = jnp.concatenate(
+            [log_odds, jnp.zeros((A, emit_pad))], axis=1,
+        )
+
+    geno_j = jnp.array(geno)
+    if emit_pad > 0:
+        geno_j = jnp.concatenate(
+            [geno_j, jnp.zeros((B, emit_pad), dtype=geno_j.dtype)], axis=1,
+        )
+
+    # Pad transitions to n_fwd_steps
+    trans_pad = n_fwd_steps - (T - 1)
+    log_eye = jnp.where(jnp.eye(A, dtype=bool), 0.0, -1e30)
+    if trans_pad > 0:
+        log_trans_fwd = jnp.concatenate(
+            [log_trans, jnp.broadcast_to(log_eye, (trans_pad, A, A))],
+            axis=0,
+        )
+    else:
+        log_trans_fwd = log_trans[:n_fwd_steps]
+    seg_trans = log_trans_fwd.reshape(S, C, A, A)
+
+    # Site index arrays
+    site_idx = jnp.arange(1, n_fwd_steps + 1).reshape(S, C)
+    gamma_site_idx = jnp.arange(0, n_fwd_steps).reshape(S, C)
+
+    # Helper: compute emissions at a batch of sites → (C, B, A)
+    def _emit_batch(sites):
+        g = geno_j[:, sites].astype(jnp.float32)  # (B, C)
+        f0 = log_f0[:, sites]                       # (A, C)
+        lo = log_odds[:, sites]                     # (A, C)
+        # (C, 1, A) + (C, B, 1) * (C, 1, A) → (C, B, A)
+        return f0.T[:, None, :] + g.T[:, :, None] * lo.T[:, None, :]
+
+    # Initial alpha at site 0
+    e0 = log_f0[:, 0][None, :] + geno_j[:, 0].astype(jnp.float32)[:, None] * log_odds[:, 0][None, :]
+    log_alpha_0 = log_prior[None, :] + e0  # (B, A)
+
+    # ------------------------------------------------------------------
+    # Phase 1: Checkpointed forward — emit on the fly
+    # ------------------------------------------------------------------
+    def _ckpt_fwd_body(alpha, xs):
+        st, idx = xs  # (C, A, A), (C,)
+        se = _emit_batch(idx)  # (C, B, A)
+        def _inner(a, x):
+            e, t = x
+            return _log_matvec_batch(a, t) + e, None
+        final, _ = jax.lax.scan(_inner, alpha, (se, st))
+        return final, final
+
+    _, ckpt_ends = jax.lax.scan(
+        _ckpt_fwd_body, log_alpha_0, (seg_trans, site_idx),
+    )
+    checkpoints = jnp.concatenate([log_alpha_0[None], ckpt_ends], axis=0)
+    # checkpoints: (S+1, B, A)
+
+    # ------------------------------------------------------------------
+    # Phase 2: Reverse backward scan + streaming M-step accumulation
+    # ------------------------------------------------------------------
+    seg_trans_rev = jnp.flip(seg_trans, axis=0)
+    ckpt_rev = jnp.flip(checkpoints[:S], axis=0)
+    site_idx_rev = jnp.flip(site_idx, axis=0)
+    gamma_idx_rev = jnp.flip(gamma_site_idx, axis=0)
+
+    def _bwd_segment(carry, xs):
+        beta_right, soft_sw, wc, tw = carry
+        st, ckpt, e_sites, g_sites = xs
+
+        # Emissions for this segment (lives only during this iteration)
+        se = _emit_batch(e_sites)  # (C, B, A)
+
+        # Forward recompute from checkpoint
+        def _fwd(a, x):
+            e, t = x
+            a_new = _log_matvec_batch(a, t) + e
+            return a_new, a_new
+        _, alphas_inner = jax.lax.scan(_fwd, ckpt, (se[:C - 1], st[:C - 1]))
+        alphas = jnp.concatenate([ckpt[None], alphas_inner], axis=0)  # (C, B, A)
+
+        # Backward from beta_right
+        se_bwd = jnp.flip(se, axis=0)
+        st_bwd = jnp.flip(st, axis=0)
+        def _bwd(beta, x):
+            e, t = x
+            b_new = _log_matvec_batch_transpose(e + beta, t)
+            return b_new, b_new
+        beta_left, betas_rev = jax.lax.scan(_bwd, beta_right, (se_bwd, st_bwd))
+        betas = jnp.flip(betas_rev, axis=0)  # (C, B, A)
+
+        # Posteriors
+        log_gamma = alphas + betas
+        log_norm = jax.nn.logsumexp(log_gamma, axis=2, keepdims=True)
+        gamma_seg = jnp.exp(log_gamma - log_norm)  # (C, B, A)
+
+        # --- Xi-based soft switches ---
+        betas_ext = jnp.concatenate(
+            [betas[1:], beta_right[None]], axis=0,
+        )  # (C, B, A)
+        log_P = jax.nn.logsumexp(alphas[0] + betas[0], axis=1)  # (B,)
+        st_diag = jnp.diagonal(st, axis1=1, axis2=2)  # (C, A)
+        log_xi_diag = (
+            alphas + st_diag[:, None, :] + se + betas_ext
+        )  # (C, B, A)
+        xi_diag = jnp.exp(log_xi_diag - log_P[None, :, None])
+        stay = xi_diag.sum(axis=2)                                # (C, B)
+        seg_soft = jnp.clip(1.0 - stay, 0.0, 1.0).sum(axis=0)   # (B,)
+
+        # --- Accumulate sufficient statistics ---
+        geno_at_gamma = geno_j[:, g_sites].astype(jnp.float32)  # (B, C)
+        wc_seg = jnp.einsum('cba,bc->ac', gamma_seg, geno_at_gamma)  # (A, C)
+        tw_seg = gamma_seg.sum(axis=1).T  # (C, A).T → (A, C)
+
+        wc = wc.at[:, g_sites].add(wc_seg)
+        tw = tw.at[:, g_sites].add(tw_seg)
+
+        return (beta_left, soft_sw + seg_soft, wc, tw), None
+
+    init_carry = (
+        jnp.zeros((B, A)),                         # beta_right
+        jnp.zeros(B),                               # soft_sw
+        jnp.zeros((A, n_fwd_steps), jnp.float32),   # wc
+        jnp.zeros((A, n_fwd_steps), jnp.float32),   # tw
+    )
+    (_, soft_switches, wc_pad, tw_pad), _ = jax.lax.scan(
+        _bwd_segment, init_carry,
+        (seg_trans_rev, ckpt_rev, site_idx_rev, gamma_idx_rev),
+    )
+
+    # Trim padding and derive mu_sum from total_weights
+    weighted_counts = wc_pad[:, :T]
+    total_weights = tw_pad[:, :T]
+    mu_sum = total_weights.sum(axis=1)  # (A,)
+
+    return weighted_counts, total_weights, mu_sum, soft_switches
+
+
+def _streaming_decode_checkpointed(
+    geno: jnp.ndarray,
+    model: AncestryModel,
+    d_morgan: jnp.ndarray,
+    checkpoint_interval: int | None = None,
+    compute_max_post: bool = True,
+) -> DecodeResult:
+    """Checkpointed forward-backward that writes decode outputs per segment.
+
+    Never materializes the full (B, T, A) posterior tensor. Uses a Python
+    for-loop over segments with per-segment device-to-host transfer.
+
+    Parameters
+    ----------
+    geno : (B, T) uint8
+    model : AncestryModel
+    d_morgan : (T-1,)
+    checkpoint_interval : sites between checkpoints (default: sqrt(T))
+    compute_max_post : whether to compute max_post and global_sums
+
+    Returns
+    -------
+    DecodeResult
+    """
+    B, T = geno.shape
+    A = model.n_ancestries
+
+    if checkpoint_interval is None:
+        checkpoint_interval = max(1, int(math.isqrt(T)))
+    C = checkpoint_interval
+    S = (T + C - 1) // C
+    n_fwd_steps = S * C
+
+    # --- Small precomputed tensors ------------------------------------------
+    log_trans = model.log_transition_matrix(d_morgan)
+    log_prior = jnp.log(model.mu)
+
+    freq = jnp.clip(model.allele_freq, 1e-6, 1.0 - 1e-6)
+    log_f0 = jnp.log(1.0 - freq)
+    log_odds = jnp.log(freq) - log_f0
+
+    emit_pad = n_fwd_steps + 1 - T
+    if emit_pad > 0:
+        log_f0 = jnp.concatenate(
+            [log_f0, jnp.zeros((A, emit_pad))], axis=1,
+        )
+        log_odds = jnp.concatenate(
+            [log_odds, jnp.zeros((A, emit_pad))], axis=1,
+        )
+
+    geno_j = jnp.array(geno)
+    if emit_pad > 0:
+        geno_j = jnp.concatenate(
+            [geno_j, jnp.zeros((B, emit_pad), dtype=geno_j.dtype)], axis=1,
+        )
+
+    trans_pad = n_fwd_steps - (T - 1)
+    log_eye = jnp.where(jnp.eye(A, dtype=bool), 0.0, -1e30)
+    if trans_pad > 0:
+        log_trans_fwd = jnp.concatenate(
+            [log_trans, jnp.broadcast_to(log_eye, (trans_pad, A, A))],
+            axis=0,
+        )
+    else:
+        log_trans_fwd = log_trans[:n_fwd_steps]
+    seg_trans = log_trans_fwd.reshape(S, C, A, A)
+
+    site_idx = jnp.arange(1, n_fwd_steps + 1).reshape(S, C)
+
+    def _emit_batch(sites):
+        g = geno_j[:, sites].astype(jnp.float32)
+        f0 = log_f0[:, sites]
+        lo = log_odds[:, sites]
+        return f0.T[:, None, :] + g.T[:, :, None] * lo.T[:, None, :]
+
+    e0 = log_f0[:, 0][None, :] + geno_j[:, 0].astype(jnp.float32)[:, None] * log_odds[:, 0][None, :]
+    log_alpha_0 = log_prior[None, :] + e0
+
+    # Phase 1: Checkpointed forward (identical to EM path)
+    def _ckpt_fwd_body(alpha, xs):
+        st, idx = xs
+        se = _emit_batch(idx)
+        def _inner(a, x):
+            e, t = x
+            return _log_matvec_batch(a, t) + e, None
+        final, _ = jax.lax.scan(_inner, alpha, (se, st))
+        return final, final
+
+    _, ckpt_ends = jax.lax.scan(
+        _ckpt_fwd_body, log_alpha_0, (seg_trans, site_idx),
+    )
+    checkpoints = jnp.concatenate([log_alpha_0[None], ckpt_ends], axis=0)
+
+    # Phase 2: Python for-loop for per-segment decode + D2H
+    calls = _np.zeros((B, T), dtype=_np.int8)
+    max_post = _np.zeros((B, T), dtype=_np.float32) if compute_max_post else None
+    global_sums = jnp.zeros((B, A))
+
+    beta_right = jnp.zeros((B, A))
+
+    for g_rev in range(S):
+        g = S - 1 - g_rev  # forward-order segment index
+
+        ckpt = checkpoints[g]
+        st = seg_trans[g]
+        e_sites = site_idx[g]
+
+        se = _emit_batch(e_sites)  # (C, B, A)
+
+        # Forward recompute from checkpoint
+        def _fwd(a, x):
+            e, t = x
+            a_new = _log_matvec_batch(a, t) + e
+            return a_new, a_new
+
+        _, alphas_inner = jax.lax.scan(_fwd, ckpt, (se[:C - 1], st[:C - 1]))
+        alphas = jnp.concatenate([ckpt[None], alphas_inner], axis=0)
+
+        # Backward
+        se_bwd = jnp.flip(se, axis=0)
+        st_bwd = jnp.flip(st, axis=0)
+
+        def _bwd(beta, x):
+            e, t = x
+            b_new = _log_matvec_batch_transpose(e + beta, t)
+            return b_new, b_new
+
+        beta_left, betas_rev = jax.lax.scan(_bwd, beta_right, (se_bwd, st_bwd))
+        betas = jnp.flip(betas_rev, axis=0)
+
+        # Posteriors
+        log_gamma = alphas + betas
+        log_norm = jax.nn.logsumexp(log_gamma, axis=2, keepdims=True)
+        gamma_seg = jnp.exp(log_gamma - log_norm)  # (C, B, A)
+
+        # Write valid sites to host
+        t_start = g * C
+        t_end = min(t_start + C, T)
+        n_valid = t_end - t_start
+        if n_valid > 0:
+            gamma_np = _np.array(gamma_seg[:n_valid])  # (n_valid, B, A) → host
+            calls[:, t_start:t_end] = gamma_np.argmax(axis=2).astype(_np.int8).T
+            if compute_max_post:
+                max_post[:, t_start:t_end] = gamma_np.max(axis=2).T
+                global_sums = global_sums + gamma_seg[:n_valid].sum(axis=0)
+
+        beta_right = beta_left
+
+    return DecodeResult(
+        calls=calls,
+        max_post=max_post,
+        global_sums=_np.array(global_sums, dtype=_np.float64) if compute_max_post else None,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Block-level forward-backward
 # ---------------------------------------------------------------------------
 
@@ -766,9 +1113,9 @@ def forward_backward_em(
 ) -> EMStats:
     """Batched forward-backward with streaming M-step accumulation.
 
-    Instead of concatenating all batch gammas into (H, T, A), accumulates
-    the sufficient statistics needed by the M-step per batch.  Peak GPU
-    memory is O(batch_size * T * A), independent of total H.
+    Uses _streaming_em_checkpointed to avoid materializing the (B, T, A)
+    posterior tensor.  Peak GPU memory is O(batch_size * sqrt(T) * A),
+    independent of total H and linear in sqrt(T) rather than T.
 
     Parameters
     ----------
@@ -787,46 +1134,24 @@ def forward_backward_em(
     weighted_counts = jnp.zeros((A, T))
     total_weights = jnp.zeros((A, T))
     mu_sum = jnp.zeros((A,))
-    switch_sum = jnp.zeros((T - 1,)) if T > 1 else jnp.zeros((0,))
-    switches_per_hap = _np.zeros(H, dtype=_np.int32)
     soft_switches_per_hap = _np.zeros(H, dtype=_np.float32)
 
     for start in range(0, H, batch_size):
         end = min(start + batch_size, H)
-        batch_geno = geno[start:end]
-        gamma, batch_soft_sw = forward_backward(
-            batch_geno, model, d_morgan, compute_transitions=True,
+        wc_b, tw_b, mu_b, sw_b = _streaming_em_checkpointed(
+            geno[start:end], model, d_morgan,
         )
-
-        # Allele freq stats: einsum('hta,ht->at', gamma, geno_f)
-        geno_f = batch_geno.astype(jnp.float32)
-        weighted_counts += jnp.einsum('hta,ht->at', gamma, geno_f)
-        total_weights += gamma.sum(axis=0).T  # (T, A).T → (A, T)
-
-        # Mu stats
-        mu_sum += gamma.sum(axis=(0, 1))  # (A,)
-
-        # Soft switches (xi-based, density-invariant)
-        soft_switches_per_hap[start:end] = _np.array(batch_soft_sw)
-
-        # Hard switch stats (kept for diagnostics)
-        calls = jnp.argmax(gamma, axis=2)  # (B, T)
-        del gamma, geno_f, batch_soft_sw  # free GPU before switch computation
-
-        if T > 1:
-            switches = (calls[:, 1:] != calls[:, :-1])  # (B, T-1) bool
-            switch_sum += switches.sum(axis=0).astype(jnp.float32)
-            switches_per_hap[start:end] = _np.array(
-                switches.sum(axis=1), dtype=_np.int32,
-            )
-            del calls, switches  # free GPU before next batch
+        weighted_counts = weighted_counts + wc_b
+        total_weights = total_weights + tw_b
+        mu_sum = mu_sum + mu_b
+        soft_switches_per_hap[start:end] = _np.array(sw_b)
 
     return EMStats(
         weighted_counts=weighted_counts,
         total_weights=total_weights,
         mu_sum=mu_sum,
-        switch_sum=switch_sum,
-        switches_per_hap=switches_per_hap,
+        switch_sum=jnp.zeros((T - 1,)) if T > 1 else jnp.zeros((0,)),
+        switches_per_hap=_np.zeros(H, dtype=_np.int32),
         soft_switches_per_hap=soft_switches_per_hap,
         n_haps=H,
         n_sites=T,
@@ -856,8 +1181,6 @@ def forward_backward_bucketed_em(
     weighted_counts = jnp.zeros((A, T))
     total_weights = jnp.zeros((A, T))
     mu_sum = jnp.zeros((A,))
-    switch_sum = jnp.zeros((T - 1,)) if T > 1 else jnp.zeros((0,))
-    switches_per_hap = _np.zeros(H, dtype=_np.int32)
     soft_switches_per_hap = _np.zeros(H, dtype=_np.float32)
 
     bucket_np = _np.array(model.bucket_assignments)
@@ -880,37 +1203,20 @@ def forward_backward_bucketed_em(
         for s in range(0, n_b, batch_size):
             e = min(s + batch_size, n_b)
             batch_hap_idx = hap_idx[s:e]
-            batch_geno = geno[batch_hap_idx]  # index from original, no per-bucket copy
-            gamma, batch_soft_sw = forward_backward(
-                batch_geno, b_model, d_morgan, compute_transitions=True,
+            wc_b, tw_b, mu_b, sw_b = _streaming_em_checkpointed(
+                geno[batch_hap_idx], b_model, d_morgan,
             )
-
-            geno_f = batch_geno.astype(jnp.float32)
-            weighted_counts += jnp.einsum('hta,ht->at', gamma, geno_f)
-            total_weights += gamma.sum(axis=0).T
-            mu_sum += gamma.sum(axis=(0, 1))
-
-            # Soft switches (xi-based, density-invariant)
-            soft_switches_per_hap[batch_hap_idx] = _np.array(batch_soft_sw)
-
-            # Hard switch stats (kept for diagnostics)
-            calls = jnp.argmax(gamma, axis=2)
-            del gamma, geno_f, batch_geno, batch_soft_sw  # free GPU
-
-            if T > 1:
-                switches = (calls[:, 1:] != calls[:, :-1])
-                switch_sum += switches.sum(axis=0).astype(jnp.float32)
-                switches_per_hap[batch_hap_idx] = _np.array(
-                    switches.sum(axis=1), dtype=_np.int32,
-                )
-                del calls, switches  # free GPU before next batch
+            weighted_counts = weighted_counts + wc_b
+            total_weights = total_weights + tw_b
+            mu_sum = mu_sum + mu_b
+            soft_switches_per_hap[batch_hap_idx] = _np.array(sw_b)
 
     return EMStats(
         weighted_counts=weighted_counts,
         total_weights=total_weights,
         mu_sum=mu_sum,
-        switch_sum=switch_sum,
-        switches_per_hap=switches_per_hap,
+        switch_sum=jnp.zeros((T - 1,)) if T > 1 else jnp.zeros((0,)),
+        switches_per_hap=_np.zeros(H, dtype=_np.int32),
         soft_switches_per_hap=soft_switches_per_hap,
         n_haps=H,
         n_sites=T,
@@ -926,8 +1232,9 @@ def forward_backward_decode(
 ) -> DecodeResult:
     """Batched forward-backward for final decode pass.
 
-    Returns hard calls and optional pre-computed reductions on CPU,
-    without materialising the full (H, T, A) posterior tensor.
+    Uses _streaming_decode_checkpointed to avoid materializing the full
+    (B, T, A) posterior tensor.  Peak GPU memory per batch is
+    O(batch_size * sqrt(T) * A).
 
     Parameters
     ----------
@@ -950,13 +1257,14 @@ def forward_backward_decode(
 
     for start in range(0, H, batch_size):
         end = min(start + batch_size, H)
-        gamma = forward_backward(geno[start:end], model, d_morgan)  # (B, T, A)
-
-        calls[start:end] = _np.array(jnp.argmax(gamma, axis=2), dtype=_np.int8)
+        result = _streaming_decode_checkpointed(
+            geno[start:end], model, d_morgan,
+            compute_max_post=compute_max_post,
+        )
+        calls[start:end] = result.calls
         if compute_max_post:
-            max_post[start:end] = _np.array(gamma.max(axis=2))
-            global_sums[start:end] = _np.array(gamma.sum(axis=1))
-        del gamma  # free GPU before next batch
+            max_post[start:end] = result.max_post
+            global_sums[start:end] = result.global_sums
 
     return DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)
 
@@ -1005,14 +1313,13 @@ def forward_backward_bucketed_decode(
         for s in range(0, n_b, batch_size):
             e = min(s + batch_size, n_b)
             batch_hap_idx = hap_idx[s:e]
-            gamma = forward_backward(geno[batch_hap_idx], b_model, d_morgan)
-
-            calls[batch_hap_idx] = _np.array(
-                jnp.argmax(gamma, axis=2), dtype=_np.int8,
+            result = _streaming_decode_checkpointed(
+                geno[batch_hap_idx], b_model, d_morgan,
+                compute_max_post=compute_max_post,
             )
+            calls[batch_hap_idx] = result.calls
             if compute_max_post:
-                max_post[batch_hap_idx] = _np.array(gamma.max(axis=2))
-                global_sums[batch_hap_idx] = _np.array(gamma.sum(axis=1))
-            del gamma  # free GPU before next batch
+                max_post[batch_hap_idx] = result.max_post
+                global_sums[batch_hap_idx] = result.global_sums
 
     return DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)

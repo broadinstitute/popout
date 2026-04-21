@@ -85,20 +85,16 @@ def test_em_stats_match_full_gamma():
         rtol=1e-4, err_msg="mu_sum mismatch",
     )
 
-    # Check switch_sum
-    calls = jnp.argmax(gamma, axis=2)
-    switches = (calls[:, 1:] != calls[:, :-1]).astype(jnp.float32)
-    expected_switch_sum = switches.sum(axis=0)
-    np.testing.assert_allclose(
-        np.array(em_stats.switch_sum), np.array(expected_switch_sum),
-        atol=1e-4, err_msg="switch_sum mismatch",
-    )
-
-    # Check switches_per_hap
-    expected_sph = np.array(switches.sum(axis=1), dtype=np.int32)
+    # Hard switch diagnostics (switch_sum, switches_per_hap) are zeroed in
+    # the streaming path — they require materializing gamma and are only
+    # used for QC output. Verify they're properly zeroed.
     np.testing.assert_array_equal(
-        em_stats.switches_per_hap, expected_sph,
-        err_msg="switches_per_hap mismatch",
+        np.array(em_stats.switch_sum), np.zeros(geno.shape[1] - 1),
+        err_msg="switch_sum should be zero in streaming path",
+    )
+    np.testing.assert_array_equal(
+        em_stats.switches_per_hap, np.zeros(geno.shape[0], dtype=np.int32),
+        err_msg="switches_per_hap should be zero in streaming path",
     )
 
     assert em_stats.n_haps == geno.shape[0]
