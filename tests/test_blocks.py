@@ -243,6 +243,53 @@ def test_init_pattern_freq_matches_scalar_reference():
     np.testing.assert_allclose(pf_vec, pf_ref, rtol=1e-5, atol=1e-7)
 
 
+def test_block_decode_without_expansion():
+    """Block-level argmax/max expanded via site_to_block must match per-site."""
+    from popout.hmm import forward_backward_blocks
+    from popout.datatypes import AncestryModel
+
+    rng = np.random.default_rng(42)
+    H, T, A = 200, 64, 4
+    block_size = 8
+    geno = rng.integers(0, 2, size=(H, T), dtype=np.uint8)
+    bd = pack_blocks(geno, block_size=block_size)
+    allele_freq = jnp.array(rng.uniform(0.1, 0.9, (A, T)).astype(np.float32))
+    pf = init_pattern_freq(allele_freq, bd, geno)
+    model = AncestryModel(
+        n_ancestries=A, mu=jnp.full(A, 1.0 / A), gen_since_admix=20.0,
+        allele_freq=allele_freq, pattern_freq=pf, block_data=bd,
+    )
+
+    gamma_block = forward_backward_blocks(model, bd)
+
+    # --- Reference: expand to per-site, then reduce ---
+    gamma_site = expand_block_posteriors(gamma_block, bd, T)
+    ref_calls = np.array(jnp.argmax(gamma_site, axis=2), dtype=np.int8)
+    ref_max_post = np.array(gamma_site.max(axis=2), dtype=np.float32)
+    ref_global_sums = np.array(gamma_site.sum(axis=1), dtype=np.float64)
+
+    # --- New: block-level reduction + integer gather ---
+    site_to_block = np.empty(T, dtype=np.int32)
+    for b_idx in range(bd.n_blocks):
+        site_to_block[bd.block_starts[b_idx]:bd.block_ends[b_idx]] = b_idx
+    block_widths = jnp.array(
+        [bd.block_ends[b] - bd.block_starts[b] for b in range(bd.n_blocks)],
+        dtype=jnp.float32,
+    )
+
+    calls_block = np.array(jnp.argmax(gamma_block, axis=2), dtype=np.int8)
+    new_calls = calls_block[:, site_to_block]
+    max_post_block = np.array(gamma_block.max(axis=2), dtype=np.float32)
+    new_max_post = max_post_block[:, site_to_block]
+    new_global_sums = np.array(
+        jnp.einsum('hba,b->ha', gamma_block, block_widths), dtype=np.float64,
+    )
+
+    np.testing.assert_array_equal(new_calls, ref_calls)
+    np.testing.assert_allclose(new_max_post, ref_max_post, rtol=1e-6)
+    np.testing.assert_allclose(new_global_sums, ref_global_sums, rtol=1e-4, atol=1e-6)
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

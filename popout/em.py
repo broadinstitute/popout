@@ -542,7 +542,7 @@ def run_em(
     # --- Optional: block emission setup ---
     bd = None
     if use_block_emissions:
-        from .blocks import pack_blocks, init_pattern_freq, update_pattern_freq, expand_block_posteriors
+        from .blocks import pack_blocks, init_pattern_freq, update_pattern_freq
         log.info("  [diag] calling pack_blocks (H=%d, T=%d, block_size=%d)",
                  geno_np.shape[0], geno_np.shape[1], block_size)
         bd = pack_blocks(geno_np, block_size=block_size, pos_cm=chrom_data.pos_cm)
@@ -810,11 +810,24 @@ def run_em(
     # --- Final decode (streaming — no full gamma materialised) ---
     log.info("Final forward-backward pass")
     if bd is not None and model.pattern_freq is not None:
-        # Block emissions: batched decode
+        # Block emissions: block-level decode without per-site gamma expansion.
+        # Argmax and max are computed at block level, then gathered to per-site
+        # via an integer index (cheap) instead of expanding the full (H, T, A)
+        # posterior tensor (32 GB at AoU K=20).
         from .blocks import BlockData
         block_batch = _auto_batch_size_blocks(
             bd.n_blocks, n_anc, chrom_data.n_haps,
         )
+
+        # Map each site to its block index for cheap per-site expansion
+        site_to_block = np.empty(chrom_data.n_sites, dtype=np.int32)
+        for b_idx in range(bd.n_blocks):
+            site_to_block[bd.block_starts[b_idx]:bd.block_ends[b_idx]] = b_idx
+        block_widths_j = jnp.array(
+            [bd.block_ends[b] - bd.block_starts[b] for b in range(bd.n_blocks)],
+            dtype=jnp.float32,
+        )
+
         all_calls = []
         all_max_post = []
         all_global_sums = []
@@ -830,11 +843,19 @@ def run_em(
                 block_size=bd.block_size,
             )
             gb_chunk = forward_backward_blocks(model, bd_chunk)
-            gamma_chunk = expand_block_posteriors(gb_chunk, bd, chrom_data.n_sites)
-            all_calls.append(np.array(jnp.argmax(gamma_chunk, axis=2), dtype=np.int8))
-            all_max_post.append(np.array(gamma_chunk.max(axis=2)))
-            all_global_sums.append(np.array(gamma_chunk.sum(axis=1)))
-            del gamma_chunk, gb_chunk
+            gb_chunk.block_until_ready()
+            # Block-level reductions (tiny: chunk × n_blocks)
+            calls_block = np.array(jnp.argmax(gb_chunk, axis=2), dtype=np.int8)
+            max_post_block = np.array(gb_chunk.max(axis=2), dtype=np.float32)
+            global_sums_chunk = np.array(
+                jnp.einsum('hba,b->ha', gb_chunk, block_widths_j),
+                dtype=np.float64,
+            )
+            del gb_chunk
+            # Expand to per-site via integer gather (int8/float32, no A dimension)
+            all_calls.append(calls_block[:, site_to_block])
+            all_max_post.append(max_post_block[:, site_to_block])
+            all_global_sums.append(global_sums_chunk)
         calls = np.concatenate(all_calls, axis=0)
         decode = DecodeResult(
             calls=calls,
