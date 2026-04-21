@@ -928,6 +928,8 @@ def _load_checkpoint(
 ) -> tuple[AncestryModel, np.ndarray]:
     """Load post-seeding checkpoint."""
     from .blocks import BlockData
+    if path_prefix.endswith(".checkpoint.npz"):
+        path_prefix = path_prefix.removesuffix(".checkpoint.npz")
     data = np.load(f"{path_prefix}.checkpoint.npz", allow_pickle=True)
 
     n_anc = int(data["n_ancestries"])
