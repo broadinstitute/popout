@@ -43,7 +43,7 @@ def _write_simulated_vcf(chrom_data, sample_names, vcf_path):
 def test_convert_integration():
     """Full pipeline: simulate → popout → convert → parse_flare → verify."""
     from popout.em import run_em
-    from popout.output import write_global_ancestry, write_model, write_ancestry_tracts, write_decode_npz
+    from popout.output import write_global_ancestry, write_model, write_ancestry_tracts, write_decode_parquet
     from popout.names import parse_ancestry_names
     from popout.convert import convert_to_vcf
     from popout.benchmark.parsers.flare import parse_flare
@@ -92,9 +92,9 @@ def test_convert_integration():
             f"{out_prefix}.tracts.tsv.gz",
             write_posteriors=True,
         )
-        write_decode_npz(
+        write_decode_parquet(
             result, chrom_data,
-            f"{out_prefix}.chr{chrom_data.chrom}.decode.npz",
+            f"{out_prefix}.chr{chrom_data.chrom}.decode.parquet",
             include_max_post=True,
         )
 

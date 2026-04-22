@@ -163,7 +163,7 @@ task popout_task {
     File? checkpoint_meta = "~{output_prefix}.checkpoint.meta.json"
 
     # Dense decode (produced when write_probs or write_dense_decode = true)
-    Array[File] decode_npz = glob("~{output_prefix}.chr*.decode.npz")
+    Array[File] decode_parquet = glob("~{output_prefix}.chr*.decode.parquet")
 
     # Post-EM checkpoint (produced when checkpoint_after_em = true)
     File? em_checkpoint   = "~{output_prefix}.em_checkpoint.npz"
@@ -281,7 +281,7 @@ workflow popout {
     File? checkpoint      = popout_task.checkpoint
     File? checkpoint_meta = popout_task.checkpoint_meta
 
-    Array[File] decode_npz = popout_task.decode_npz
+    Array[File] decode_parquet = popout_task.decode_parquet
 
     File? em_checkpoint   = popout_task.em_checkpoint
   }

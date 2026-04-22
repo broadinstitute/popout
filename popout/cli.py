@@ -314,10 +314,10 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--write-dense-decode", action="store_true",
-        help="Write {out}.chr{N}.decode.npz per chromosome with dense calls, "
+        help="Write {out}.chr{N}.decode.parquet per chromosome with dense calls, "
              "pos_bp, and (when --probs) max_post. Required input for "
-             "'popout convert --to vcf'. Disk cost at AoU chr1: ~10 GB (calls "
-             "only) or ~30 GB (with --probs).",
+             "'popout convert --to vcf'. Disk cost at AoU chr1: ~2 GB (calls "
+             "only) or ~16 GB (with --probs).",
     )
     parser.add_argument(
         "--seed", type=int, default=42,
@@ -563,7 +563,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     # --- Write outputs ---
-    from .output import write_global_ancestry, write_model, write_ancestry_tracts, write_decode_npz
+    from .output import write_global_ancestry, write_model, write_ancestry_tracts, write_decode_parquet
     from .names import parse_ancestry_names
 
     out_prefix = args.out
@@ -597,9 +597,9 @@ def main(argv: list[str] | None = None) -> None:
 
     if write_dense_decode:
         for res, cdata in zip(results, chrom_data_list):
-            write_decode_npz(
+            write_decode_parquet(
                 res, cdata,
-                f"{out_prefix}.chr{cdata.chrom}.decode.npz",
+                f"{out_prefix}.chr{cdata.chrom}.decode.parquet",
                 include_max_post=args.probs,
             )
 

@@ -22,10 +22,14 @@ The convert subcommand reads popout's native output files:
 | File | Required | Description |
 |------|----------|-------------|
 | `{prefix}.model.npz` | yes | Model parameters, ancestry names |
-| `{prefix}.chr{N}.decode.npz` | yes | Per-chromosome dense calls, pos_bp, max_post |
+| `{prefix}.chr{N}.decode.parquet` | yes | Per-chromosome dense calls, pos_bp, max_post |
 | `{prefix}.global.tsv` | no | Per-sample global ancestry proportions |
 
-The `decode.npz` files are produced by `--write-dense-decode` or `--probs`. If you ran popout without either flag, re-run with `--write-dense-decode` to generate them.
+The `decode.parquet` files are produced by `--write-dense-decode` or `--probs`. If you ran popout without either flag, re-run with `--write-dense-decode` to generate them.
+
+### File format rationale
+
+Decode arrays are persisted as Parquet with ZSTD-1 compression and binary-blob-per-haplotype columns. At biobank scale this writes ~14x faster than `np.savez_compressed` (97 s/chrom vs 1362 s/chrom at projected AoU H=1.07M) with the same on-disk footprint. The win comes from ZSTD being SIMD-optimized and GIL-free, and Parquet compressing columns in parallel.
 
 ## Outputs
 
@@ -70,7 +74,7 @@ When popout was run with `--thin-cm`, it processes a subset of the input VCF sit
 
 ## ANP1/ANP2: the posterior approximation
 
-FLARE emits K floats per haplotype per site for ANP1/ANP2 — one posterior probability per ancestry. Popout stores only the max posterior (one float per haplotype per site in `decode.npz`).
+FLARE emits K floats per haplotype per site for ANP1/ANP2 — one posterior probability per ancestry. Popout stores only the max posterior (one float per haplotype per site in `decode.parquet`).
 
 To produce FLARE-compatible K-vectors, popout places `max_post` at the called ancestry's index and distributes the remaining probability mass uniformly:
 
@@ -102,7 +106,7 @@ Popout's own `popout.benchmark.parsers.flare.parse_flare` can parse the output, 
 
 ## WDL
 
-A separate `popout_convert.wdl` workflow runs the conversion on CPU (no GPU required). Wire popout's `decode_npz` output array into the convert workflow's input:
+A separate `popout_convert.wdl` workflow runs the conversion on CPU (no GPU required). Wire popout's `decode_parquet` output array into the convert workflow's input:
 
 ```json
 {
@@ -110,7 +114,7 @@ A separate `popout_convert.wdl` workflow runs the conversion on CPU (no GPU requ
   "popout_convert.tracts_tsv_gz": "gs://bucket/cohort.tracts.tsv.gz",
   "popout_convert.model_npz": "gs://bucket/cohort.model.npz",
   "popout_convert.global_tsv": "gs://bucket/cohort.global.tsv",
-  "popout_convert.decode_npz": ["gs://bucket/cohort.chr1.decode.npz", ...],
+  "popout_convert.decode_parquet": ["gs://bucket/cohort.chr1.decode.parquet", ...],
   "popout_convert.input_vcf": "gs://bucket/cohort.phased.vcf.gz",
   "popout_convert.input_vcf_tbi": "gs://bucket/cohort.phased.vcf.gz.tbi"
 }

@@ -135,7 +135,7 @@ docker run --gpus all -v /data:/data \
 | `{prefix}.tracts.tsv.gz` | Local ancestry tracts (BED-like intervals per haplotype) |
 | `{prefix}.model` | Fitted model parameters (n_ancestries, mu, T) |
 | `{prefix}.model.npz` | Full-precision model arrays (allele_freq, mu, ancestry_names) |
-| `{prefix}.chr{N}.decode.npz` | Per-chromosome dense calls + max_post (with `--probs` or `--write-dense-decode`) |
+| `{prefix}.chr{N}.decode.parquet` | Per-chromosome dense calls + max_post (with `--probs` or `--write-dense-decode`) |
 | `{prefix}.stats.jsonl` | Timestamped runtime metrics (for live monitoring) |
 | `{prefix}.summary.json` | Aggregated QC stats (consumed by `popout report`) |
 | `{prefix}.panel.haplotypes.tsv` | Single-ancestry whole haplotypes (with `--export-panel`) |

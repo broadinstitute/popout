@@ -283,7 +283,7 @@ def run_convert_demo(
 
     from .simulate import simulate_admixed, evaluate_accuracy
     from .em import run_em
-    from .output import write_global_ancestry, write_model, write_ancestry_tracts, write_decode_npz
+    from .output import write_global_ancestry, write_model, write_ancestry_tracts, write_decode_parquet
     from .convert import convert_to_vcf
     from .benchmark.parsers.flare import parse_flare
 
@@ -318,8 +318,8 @@ def run_convert_demo(
                      ancestry_names=ancestry_names)
         write_ancestry_tracts([result], [chrom_data], n_samples, sample_names,
                               f"{prefix}.tracts.tsv.gz", write_posteriors=True)
-        write_decode_npz(result, chrom_data,
-                         f"{prefix}.chr{chrom_data.chrom}.decode.npz",
+        write_decode_parquet(result, chrom_data,
+                         f"{prefix}.chr{chrom_data.chrom}.decode.parquet",
                          include_max_post=True)
 
         # Write input VCF

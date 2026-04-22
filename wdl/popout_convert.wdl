@@ -12,7 +12,7 @@ task convert_task {
     File        tracts_tsv_gz
     File        model_npz
     File        global_tsv
-    Array[File] decode_npz
+    Array[File] decode_parquet
     File        input_vcf
     File        input_vcf_tbi
     Boolean     write_probs        = false
@@ -35,7 +35,7 @@ task convert_task {
     ln -sf ~{global_tsv} "popout_outputs/~{output_prefix}.global.tsv"
     ln -sf ~{tracts_tsv_gz} "popout_outputs/~{output_prefix}.tracts.tsv.gz"
 
-    decode_files=(~{sep=' ' decode_npz})
+    decode_files=(~{sep=' ' decode_parquet})
     for f in "${decode_files[@]}"; do
       ln -sf "$f" "popout_outputs/$(basename $f)"
     done
@@ -78,7 +78,7 @@ workflow popout_convert {
     File        tracts_tsv_gz
     File        model_npz
     File        global_tsv
-    Array[File] decode_npz
+    Array[File] decode_parquet
     File        input_vcf
     File        input_vcf_tbi
     Boolean     write_probs        = false
@@ -98,7 +98,7 @@ workflow popout_convert {
       tracts_tsv_gz      = tracts_tsv_gz,
       model_npz          = model_npz,
       global_tsv         = global_tsv,
-      decode_npz         = decode_npz,
+      decode_parquet         = decode_parquet,
       input_vcf          = input_vcf,
       input_vcf_tbi      = input_vcf_tbi,
       write_probs        = write_probs,
