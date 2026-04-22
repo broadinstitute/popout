@@ -129,6 +129,9 @@ def main(argv: list[str] | None = None) -> None:
         from .build_ref import build_ref_main
         build_ref_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "convert":
+        _cmd_convert(raw_args[1:])
+        return
 
     parser = argparse.ArgumentParser(
         description="GPU-accelerated self-bootstrapping local ancestry inference",
@@ -623,6 +626,58 @@ def main(argv: list[str] | None = None) -> None:
         stats.emit("runtime/t_compute", round(t_compute, 2))
         stats.emit("runtime/t_total", round(t_total, 2))
         stats.finalize()
+
+
+def _cmd_convert(argv: list[str]) -> None:
+    """Parse args and dispatch 'popout convert'."""
+    parser = argparse.ArgumentParser(
+        prog="popout convert",
+        description="Convert popout native outputs to other formats",
+    )
+    parser.add_argument(
+        "--to", choices=["vcf"], required=True,
+        help="Target format",
+    )
+    parser.add_argument(
+        "--popout-prefix", required=True,
+        help="Path prefix of popout outputs (matches --out from the run)",
+    )
+    parser.add_argument(
+        "--input-vcf", required=True,
+        help="Original phased VCF that popout was run on (provides GT and site alleles)",
+    )
+    parser.add_argument(
+        "--out", required=True,
+        help="Output path for .anc.vcf.gz (companion .global.anc.gz is written alongside)",
+    )
+    parser.add_argument(
+        "--probs", action="store_true",
+        help="Emit ANP1/ANP2 posterior fields (requires popout run with --probs)",
+    )
+    parser.add_argument(
+        "--ancestry-names", type=str, default=None,
+        help="Override ancestry names from model.npz (comma-list or TSV)",
+    )
+    parser.add_argument(
+        "--thinned-sites", choices=["skip", "fill-missing"], default="skip",
+        help="How to handle input-VCF sites popout did not process. "
+             "'skip' drops them; 'fill-missing' writes AN1:AN2 = .:.",
+    )
+    parser.add_argument(
+        "--chroms", type=str, default=None,
+        help="Comma-separated list of chromosomes to convert (default: all in popout outputs)",
+    )
+
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)-12s %(levelname)-8s %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+    from .convert import convert_to_vcf
+    convert_to_vcf(args)
 
 
 if __name__ == "__main__":
