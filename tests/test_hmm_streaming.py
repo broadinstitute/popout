@@ -12,6 +12,8 @@ from popout.datatypes import AncestryModel
 from popout.hmm import (
     forward_backward,
     forward_backward_checkpointed,
+    forward_backward_em,
+    forward_backward_decode,
     _streaming_em_checkpointed,
     _streaming_decode_checkpointed,
     _precompute_streaming_tensors,
@@ -257,3 +259,72 @@ def test_streaming_em_explicit_checkpoint_intervals():
             np.array(soft_sw), np.array(soft_sw_ref), atol=1e-4, rtol=1e-4,
             err_msg=f"soft_sw mismatch at checkpoint_interval={C}",
         )
+
+
+# -- Host-resident (numpy) geno tests --
+
+def test_em_accepts_host_geno():
+    """Streaming EM path must work with numpy-array geno."""
+    geno, model, d_morgan = _tiny_setup(H=128, T=500, A=3)
+    geno_np = np.asarray(geno)  # host numpy
+
+    stats_host = forward_backward_em(geno_np, model, d_morgan, batch_size=32)
+    stats_dev = forward_backward_em(geno, model, d_morgan, batch_size=32)
+
+    np.testing.assert_allclose(stats_host.weighted_counts,
+                               stats_dev.weighted_counts, atol=1e-4)
+    np.testing.assert_allclose(stats_host.mu_sum,
+                               stats_dev.mu_sum, atol=1e-4)
+
+
+def test_decode_accepts_host_geno():
+    """Streaming decode path must work with numpy-array geno."""
+    geno, model, d_morgan = _tiny_setup(H=64, T=300, A=3)
+    geno_np = np.asarray(geno)
+
+    result_host = forward_backward_decode(geno_np, model, d_morgan, batch_size=32)
+    result_dev = forward_backward_decode(geno, model, d_morgan, batch_size=32)
+
+    np.testing.assert_array_equal(result_host.calls, result_dev.calls)
+    np.testing.assert_allclose(result_host.global_sums,
+                               result_dev.global_sums, atol=1e-4)
+
+
+def test_init_model_soft_accepts_host_geno():
+    """init_model_soft must work with numpy-array geno."""
+    from popout.em import init_model_soft
+    rng = np.random.default_rng(42)
+    H, T, A = 200, 500, 3
+    geno_np = rng.integers(0, 2, size=(H, T), dtype=np.uint8)
+    geno_jx = jnp.array(geno_np)
+    resp = jnp.array(rng.dirichlet(np.ones(A), size=H).astype(np.float32))
+
+    model_host = init_model_soft(geno_np, resp, A, window_refine=False)
+    model_dev = init_model_soft(geno_jx, resp, A, window_refine=False)
+
+    np.testing.assert_allclose(model_host.allele_freq,
+                               model_dev.allele_freq, atol=1e-4)
+
+
+def test_run_k2_em_split_respects_budget(monkeypatch):
+    """K=2 EM must not upload full geno when budget is tight."""
+    from popout import _device
+    from popout.recursive_seed import _run_k2_em_split
+    from popout.datatypes import ChromData
+    monkeypatch.setattr(_device, "_HEADROOM_BYTES", 10**18)  # force host path
+
+    rng = np.random.default_rng(7)
+    H, T = 500, 200
+    geno = rng.integers(0, 2, size=(H, T), dtype=np.uint8)
+    pos_bp = np.arange(T, dtype=np.int64) * 1000
+    pos_cm = pos_bp / 1e6
+
+    chrom_data = ChromData(geno=geno, pos_bp=pos_bp, pos_cm=pos_cm, chrom="chr1")
+    resp = jnp.array(rng.dirichlet(np.ones(2), size=H).astype(np.float32))
+
+    labels = _run_k2_em_split(
+        geno, np.arange(H), chrom_data,
+        n_iter=1, seed_resp=resp,
+    )
+    assert labels.shape == (H,)
+    assert set(np.unique(labels)).issubset({0, 1})

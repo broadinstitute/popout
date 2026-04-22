@@ -393,7 +393,7 @@ def init_model_from_labels(
 
 
 def init_model_soft(
-    geno: jnp.ndarray,
+    geno,
     responsibilities: jnp.ndarray,
     n_ancestries: int,
     gen_since_admix: float = 20.0,
@@ -426,11 +426,11 @@ def init_model_soft(
     # Global allele frequencies from soft assignments
     # resp.T @ geno → (A, T) weighted allele counts
     # Batched to avoid float32 copy of full geno (H×T×4 bytes)
-    _INIT_BATCH = 50_000
+    _INIT_BATCH = 20_000
     weighted_counts = jnp.zeros((A, T))
     for start in range(0, H, _INIT_BATCH):
         end = min(start + _INIT_BATCH, H)
-        batch_geno = geno[start:end].astype(jnp.float32)
+        batch_geno = jnp.asarray(geno[start:end]).astype(jnp.float32)
         weighted_counts += resp[start:end].T @ batch_geno
     totals = resp.sum(axis=0)[:, None]       # (A, 1)
     freq = (weighted_counts + 0.5) / (totals + 1.0)

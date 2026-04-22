@@ -700,13 +700,22 @@ def _run_k2_em_split(
     from .em import init_model_soft
     from .hmm import forward_backward_em
 
+    from ._device import fits_on_device
+
+    sub_geno = geno[indices] if len(indices) != geno.shape[0] else geno
     if geno_j is not None:
         if len(indices) == geno_j.shape[0]:
             sub_geno_j = geno_j  # root node — no copy needed
         else:
             sub_geno_j = geno_j[jnp.asarray(indices)]
+    elif fits_on_device(sub_geno.nbytes):
+        sub_geno_j = jnp.asarray(sub_geno)
     else:
-        sub_geno_j = jnp.asarray(geno[indices])
+        sub_geno_j = sub_geno  # keep on host; downstream batches upload
+        log.info(
+            "_run_k2_em_split: sub_geno %.1f GB → host-resident, "
+            "batched device transfers", sub_geno.nbytes / 1e9,
+        )
     H_sub, T = sub_geno_j.shape
 
     d_morgan = jnp.asarray(chrom_data.genetic_distances.astype(np.float64))

@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Optional, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+# geno may live on device (jax array) or host (numpy array).
+GenoArray = Union[jnp.ndarray, np.ndarray]
 
 
 @dataclass

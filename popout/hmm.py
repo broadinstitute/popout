@@ -1103,7 +1103,7 @@ def forward_backward_bucketed(
 # ---------------------------------------------------------------------------
 
 def forward_backward_em(
-    geno: jnp.ndarray,
+    geno,
     model: AncestryModel,
     d_morgan: jnp.ndarray,
     batch_size: int = 50_000,
@@ -1139,7 +1139,7 @@ def forward_backward_em(
 
     for start in range(0, H, batch_size):
         end = min(start + batch_size, H)
-        batch_geno = geno[start:end]
+        batch_geno = jnp.asarray(geno[start:end])
         if emit_pad > 0:
             batch_geno = jnp.concatenate(
                 [batch_geno, jnp.zeros((end - start, emit_pad), dtype=batch_geno.dtype)],
@@ -1169,7 +1169,7 @@ def forward_backward_em(
 
 
 def forward_backward_bucketed_em(
-    geno: jnp.ndarray,
+    geno,
     model: AncestryModel,
     d_morgan: jnp.ndarray,
     batch_size: int = 50_000,
@@ -1215,7 +1215,7 @@ def forward_backward_bucketed_em(
         for s in range(0, n_b, batch_size):
             e = min(s + batch_size, n_b)
             batch_hap_idx = hap_idx[s:e]
-            batch_geno = geno[batch_hap_idx]
+            batch_geno = jnp.asarray(geno[batch_hap_idx])
             if b_emit_pad > 0:
                 batch_geno = jnp.concatenate(
                     [batch_geno, jnp.zeros((e - s, b_emit_pad), dtype=batch_geno.dtype)],
@@ -1245,7 +1245,7 @@ def forward_backward_bucketed_em(
 
 
 def forward_backward_decode(
-    geno: jnp.ndarray,
+    geno,
     model: AncestryModel,
     d_morgan: jnp.ndarray,
     batch_size: int = 50_000,
@@ -1281,7 +1281,7 @@ def forward_backward_decode(
 
     for start in range(0, H, batch_size):
         end = min(start + batch_size, H)
-        batch_geno = geno[start:end]
+        batch_geno = jnp.asarray(geno[start:end])
         if emit_pad > 0:
             batch_geno = jnp.concatenate(
                 [batch_geno, jnp.zeros((end - start, emit_pad), dtype=batch_geno.dtype)],
@@ -1303,7 +1303,7 @@ def forward_backward_decode(
 
 
 def forward_backward_bucketed_decode(
-    geno: jnp.ndarray,
+    geno,
     model: AncestryModel,
     d_morgan: jnp.ndarray,
     batch_size: int = 50_000,
@@ -1348,7 +1348,7 @@ def forward_backward_bucketed_decode(
         for s in range(0, n_b, batch_size):
             e = min(s + batch_size, n_b)
             batch_hap_idx = hap_idx[s:e]
-            batch_geno = geno[batch_hap_idx]
+            batch_geno = jnp.asarray(geno[batch_hap_idx])
             if b_emit_pad > 0:
                 batch_geno = jnp.concatenate(
                     [batch_geno, jnp.zeros((e - s, b_emit_pad), dtype=batch_geno.dtype)],
