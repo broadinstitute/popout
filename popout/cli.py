@@ -310,6 +310,13 @@ def main(argv: list[str] | None = None) -> None:
              "Length must equal the final K. Default: 'anc_0','anc_1',... ",
     )
     parser.add_argument(
+        "--write-dense-decode", action="store_true",
+        help="Write {out}.chr{N}.decode.npz per chromosome with dense calls, "
+             "pos_bp, and (when --probs) max_post. Required input for "
+             "'popout convert --to vcf'. Disk cost at AoU chr1: ~10 GB (calls "
+             "only) or ~30 GB (with --probs).",
+    )
+    parser.add_argument(
         "--seed", type=int, default=42,
         help="Random seed (default: 42)",
     )
@@ -516,6 +523,8 @@ def main(argv: list[str] | None = None) -> None:
                 balance_bic_tolerance=args.recursive_balance_tolerance,
             )
 
+        write_dense_decode = args.probs or args.write_dense_decode
+
         results = run_em_genome(
             chrom_iter_with_save(),
             n_ancestries=args.n_ancestries,
@@ -537,6 +546,7 @@ def main(argv: list[str] | None = None) -> None:
             stop_after_seeding=args.stop_after_seeding,
             resume_from_checkpoint=args.resume_from_checkpoint,
             checkpoint_after_em=args.checkpoint_after_em,
+            write_dense_decode=write_dense_decode,
         )
 
     t_compute = time.perf_counter() - t0
@@ -550,7 +560,7 @@ def main(argv: list[str] | None = None) -> None:
         return
 
     # --- Write outputs ---
-    from .output import write_global_ancestry, write_model, write_ancestry_tracts
+    from .output import write_global_ancestry, write_model, write_ancestry_tracts, write_decode_npz
     from .names import parse_ancestry_names
 
     out_prefix = args.out
@@ -581,6 +591,14 @@ def main(argv: list[str] | None = None) -> None:
         write_posteriors=args.probs,
         stats=stats,
     )
+
+    if write_dense_decode:
+        for res, cdata in zip(results, chrom_data_list):
+            write_decode_npz(
+                res, cdata,
+                f"{out_prefix}.chr{cdata.chrom}.decode.npz",
+                include_max_post=args.probs,
+            )
 
     # --- Optional panel export ---
     if args.export_panel:

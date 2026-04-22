@@ -335,3 +335,29 @@ def write_model(
         save_dict["ancestry_names"] = np.array(ancestry_names, dtype=object)
     np.savez_compressed(f"{out_path}.npz", **save_dict)
     log.info("Wrote model to %s (+ .npz)", out_path)
+
+
+def write_decode_npz(
+    result: AncestryResult,
+    chrom_data: ChromData,
+    out_path: str,
+    include_max_post: bool = True,
+) -> None:
+    """Write per-chromosome dense decode arrays for use by 'popout convert'.
+
+    Contents:
+      calls:     (H, T) uint8
+      pos_bp:    (T,)   int64
+      chrom:     str
+      max_post:  (H, T) float16  [only if include_max_post and available]
+    """
+    calls = np.asarray(result.calls, dtype=np.uint8)
+    save_dict = dict(
+        calls=calls,
+        pos_bp=np.asarray(chrom_data.pos_bp, dtype=np.int64),
+        chrom=np.array(chrom_data.chrom),
+    )
+    if include_max_post and result.decode is not None and result.decode.max_post is not None:
+        save_dict["max_post"] = np.asarray(result.decode.max_post, dtype=np.float16)
+    np.savez_compressed(out_path, **save_dict)
+    log.info("Wrote decode npz to %s", out_path)

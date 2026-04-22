@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from popout.datatypes import AncestryModel, AncestryResult, ChromData, DecodeResult
-from popout.output import write_model, write_ancestry_tracts
+from popout.output import write_model, write_ancestry_tracts, write_decode_npz
 
 
 def _make_minimal_result(n_ancestries=3, n_haps=10, n_sites=100):
@@ -245,3 +245,73 @@ def test_block_emissions_no_max_post_by_default():
     )
     assert result.decode is not None
     assert result.decode.max_post is None
+
+
+def test_write_decode_npz():
+    """write_decode_npz round-trips calls, pos_bp, and max_post."""
+    import jax.numpy as jnp
+
+    n_ancestries, n_haps, n_sites = 3, 6, 50
+    rng = np.random.default_rng(55)
+    calls = rng.integers(0, n_ancestries, size=(n_haps, n_sites)).astype(np.int8)
+    max_post_orig = rng.random((n_haps, n_sites)).astype(np.float32) * 0.3 + 0.7
+    pos_bp = np.arange(n_sites, dtype=np.int64) * 1000 + 100000
+
+    model = AncestryModel(
+        n_ancestries=n_ancestries,
+        mu=jnp.array([0.4, 0.3, 0.3]),
+        gen_since_admix=20.0,
+        allele_freq=jnp.array(rng.random((n_ancestries, n_sites)).astype(np.float32)),
+    )
+    decode = DecodeResult(calls=calls, max_post=max_post_orig)
+    result = AncestryResult(calls=calls, model=model, chrom="chr1", decode=decode)
+    chrom_data = ChromData(
+        geno=rng.integers(0, 2, size=(n_haps, n_sites)).astype(np.uint8),
+        pos_bp=pos_bp,
+        pos_cm=np.linspace(0, 10, n_sites),
+        chrom="chr1",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = str(Path(tmp) / "test.chr1.decode.npz")
+        write_decode_npz(result, chrom_data, out_path, include_max_post=True)
+
+        data = np.load(out_path)
+        np.testing.assert_array_equal(data["calls"], calls.astype(np.uint8))
+        np.testing.assert_array_equal(data["pos_bp"], pos_bp)
+        assert str(data["chrom"]) == "chr1"
+        # float16 precision: about 3 decimal digits
+        np.testing.assert_allclose(
+            data["max_post"].astype(np.float32), max_post_orig, atol=0.002,
+        )
+
+
+def test_write_decode_npz_no_max_post():
+    """write_decode_npz omits max_post when include_max_post=False."""
+    import jax.numpy as jnp
+
+    n_ancestries, n_haps, n_sites = 2, 4, 20
+    rng = np.random.default_rng(66)
+    calls = rng.integers(0, n_ancestries, size=(n_haps, n_sites)).astype(np.int8)
+
+    model = AncestryModel(
+        n_ancestries=n_ancestries,
+        mu=jnp.array([0.5, 0.5]),
+        gen_since_admix=20.0,
+        allele_freq=jnp.array(rng.random((n_ancestries, n_sites)).astype(np.float32)),
+    )
+    result = AncestryResult(calls=calls, model=model, chrom="chr2")
+    chrom_data = ChromData(
+        geno=rng.integers(0, 2, size=(n_haps, n_sites)).astype(np.uint8),
+        pos_bp=np.arange(n_sites, dtype=np.int64) * 1000,
+        pos_cm=np.linspace(0, 5, n_sites),
+        chrom="chr2",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = str(Path(tmp) / "test.chr2.decode.npz")
+        write_decode_npz(result, chrom_data, out_path, include_max_post=False)
+
+        data = np.load(out_path)
+        assert "max_post" not in data
+        np.testing.assert_array_equal(data["calls"], calls.astype(np.uint8))
