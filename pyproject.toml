@@ -15,6 +15,7 @@ dependencies = [
     "Pgenlib>=0.90.0",
     "scipy>=1.10",
     "psutil>=5.9",
+    "pyarrow>=14.0",
 ]
 
 [project.optional-dependencies]
