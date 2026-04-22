@@ -476,6 +476,7 @@ def run_em(
     freeze_anchors_iters: int = 0,
     checkpoint_after_em: Optional[str] = None,
     ancestry_names: Optional[list[str]] = None,
+    write_dense_decode: bool = False,
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -818,7 +819,8 @@ def run_em(
     if bd is not None and model.pattern_freq is not None:
         # Block emissions: block-level decode. Preallocate final arrays and
         # write chunks into slices to avoid retaining per-chunk lists.
-        # max_post is omitted (40 GB at AoU scale, not needed for outputs).
+        # max_post is computed only when write_dense_decode is True (40 GB
+        # at AoU scale); otherwise omitted to save memory.
         from .blocks import BlockData
         block_batch = _auto_batch_size_blocks(
             bd.n_blocks, n_anc, chrom_data.n_haps,
@@ -836,6 +838,10 @@ def run_em(
         H_total = chrom_data.n_haps
         calls = np.empty((H_total, chrom_data.n_sites), dtype=np.int8)
         global_sums = np.zeros((H_total, n_anc), dtype=np.float64)
+        max_post = (
+            np.empty((H_total, chrom_data.n_sites), dtype=np.float32)
+            if write_dense_decode else None
+        )
         for bs in range(0, H_total, block_batch):
             be = min(bs + block_batch, H_total)
             bd_chunk = BlockData(
@@ -855,11 +861,14 @@ def run_em(
                 jnp.einsum('hba,b->ha', gb_chunk, block_widths_j),
                 dtype=np.float64,
             )
+            if max_post is not None:
+                max_post_block = np.array(jnp.max(gb_chunk, axis=2), dtype=np.float32)
+                max_post[bs:be] = max_post_block[:, site_to_block]
             del gb_chunk
             # Expand calls to per-site via integer gather (int8, no A dimension)
             calls[bs:be] = calls_block[:, site_to_block]
             log.info("  decode chunk %d–%d / %d", bs, be, H_total)
-        decode = DecodeResult(calls=calls, global_sums=global_sums)
+        decode = DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)
         result = AncestryResult(
             calls=calls, model=model, chrom=chrom_data.chrom,
             decode=decode,
@@ -1078,6 +1087,7 @@ def run_em_genome(
     resume_from_checkpoint: Optional[str] = None,
     checkpoint_after_em: bool = False,
     ancestry_names: Optional[list[str]] = None,
+    write_dense_decode: bool = False,
 ) -> list[AncestryResult] | None:
     """Run self-bootstrapping LAI across all chromosomes.
 
@@ -1137,6 +1147,7 @@ def run_em_genome(
                     seed_responsibilities=seed_resp,
                     freeze_anchors_iters=freeze_anchors_iters,
                     checkpoint_after_em=em_ckpt_path,
+                    write_dense_decode=write_dense_decode,
                 )
                 fitted_model = result.model
             else:
@@ -1221,6 +1232,7 @@ def run_em_genome(
                     seed_responsibilities=seed_resp,
                     freeze_anchors_iters=freeze_anchors_iters,
                     checkpoint_after_em=em_ckpt_path,
+                    write_dense_decode=write_dense_decode,
                 )
                 fitted_model = result.model
 

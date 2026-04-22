@@ -197,3 +197,51 @@ def test_tracts_posteriors_fallback():
     expected = float(expected_max_post[0, :].mean())
     actual = float(hap0_line[mp_col])
     np.testing.assert_almost_equal(actual, expected, decimal=3)
+
+
+def test_block_emissions_max_post():
+    """Block-emissions decode computes max_post when write_dense_decode=True."""
+    from popout.simulate import simulate_admixed
+    from popout.em import run_em
+
+    chrom_data, true_ancestry, true_params = simulate_admixed(
+        n_samples=50, n_sites=200, n_ancestries=3,
+        gen_since_admix=20, rng_seed=42,
+    )
+    result = run_em(
+        chrom_data,
+        n_ancestries=3,
+        n_em_iter=2,
+        gen_since_admix=20.0,
+        use_block_emissions=True,
+        block_size=8,
+        write_dense_decode=True,
+    )
+    assert result.decode is not None
+    assert result.decode.max_post is not None
+    assert result.decode.max_post.shape == result.calls.shape
+    # max_post values should be valid probabilities
+    assert result.decode.max_post.min() >= 0.0
+    assert result.decode.max_post.max() <= 1.0 + 1e-6
+
+
+def test_block_emissions_no_max_post_by_default():
+    """Block-emissions decode omits max_post when write_dense_decode=False."""
+    from popout.simulate import simulate_admixed
+    from popout.em import run_em
+
+    chrom_data, true_ancestry, true_params = simulate_admixed(
+        n_samples=50, n_sites=200, n_ancestries=3,
+        gen_since_admix=20, rng_seed=42,
+    )
+    result = run_em(
+        chrom_data,
+        n_ancestries=3,
+        n_em_iter=2,
+        gen_since_admix=20.0,
+        use_block_emissions=True,
+        block_size=8,
+        write_dense_decode=False,
+    )
+    assert result.decode is not None
+    assert result.decode.max_post is None
