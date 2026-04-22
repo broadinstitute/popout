@@ -16,10 +16,13 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import datetime
 import faulthandler
 import logging
 import os
+import shlex
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -65,12 +68,43 @@ def _start_heartbeat():
 _start_heartbeat()
 
 
-def main(argv: list[str] | None = None) -> None:
-    from . import __version__
-    print(f"popout {__version__}", file=sys.stderr)
+def _git_revision() -> str:
+    """Return short git revision string, or 'unknown' if not in a repo."""
+    try:
+        pkg_dir = Path(__file__).resolve().parent
+        rev = subprocess.check_output(
+            ["git", "describe", "--always", "--dirty", "--tags"],
+            cwd=pkg_dir,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return rev
+    except Exception:
+        return "unknown"
 
+
+def _boot_banner(argv: list[str]) -> None:
+    """Print startup banner with version, git rev, timestamp, and CLI args."""
+    from . import __version__
+
+    rev = _git_revision()
+    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cmd = "popout " + " ".join(shlex.quote(a) for a in argv) if argv else "popout"
+
+    print(
+        f"popout {__version__} (rev {rev})\n"
+        f"  started: {now}\n"
+        f"  command: {cmd}",
+        file=sys.stderr,
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
     # Dispatch subcommands before parsing main args
     raw_args = argv if argv is not None else sys.argv[1:]
+
+    _boot_banner(raw_args)
+
     if raw_args and raw_args[0] == "report":
         from .report import report_main
         report_main(raw_args[1:])
