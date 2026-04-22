@@ -421,11 +421,74 @@ def forward_backward_checkpointed(
 # Streaming forward-backward (no full-tensor emission or gamma)
 # ---------------------------------------------------------------------------
 
+def _precompute_streaming_tensors(
+    model: AncestryModel,
+    d_morgan: jnp.ndarray,
+    T: int,
+    checkpoint_interval: int | None = None,
+) -> dict:
+    """Precompute model-derived tensors shared across all batches.
+
+    Avoids redundant recomputation of log-emission tables, transition
+    matrices, and index arrays on every batch call.
+    """
+    A = model.n_ancestries
+    if checkpoint_interval is None:
+        checkpoint_interval = max(1, int(math.isqrt(T)))
+    C = checkpoint_interval
+    S = (T + C - 1) // C
+    n_fwd_steps = S * C
+
+    log_trans = model.log_transition_matrix(d_morgan)
+    log_prior = jnp.log(model.mu)
+
+    freq = jnp.clip(model.allele_freq, 1e-6, 1.0 - 1e-6)
+    log_f0 = jnp.log(1.0 - freq)
+    log_odds = jnp.log(freq) - log_f0
+
+    emit_pad = n_fwd_steps + 1 - T
+    if emit_pad > 0:
+        log_f0 = jnp.concatenate(
+            [log_f0, jnp.zeros((A, emit_pad))], axis=1,
+        )
+        log_odds = jnp.concatenate(
+            [log_odds, jnp.zeros((A, emit_pad))], axis=1,
+        )
+
+    trans_pad = n_fwd_steps - (T - 1)
+    log_eye = jnp.where(jnp.eye(A, dtype=bool), 0.0, -1e30)
+    if trans_pad > 0:
+        log_trans_fwd = jnp.concatenate(
+            [log_trans, jnp.broadcast_to(log_eye, (trans_pad, A, A))],
+            axis=0,
+        )
+    else:
+        log_trans_fwd = log_trans[:n_fwd_steps]
+    seg_trans = log_trans_fwd.reshape(S, C, A, A)
+
+    site_idx = jnp.arange(1, n_fwd_steps + 1).reshape(S, C)
+    gamma_site_idx = jnp.arange(0, n_fwd_steps).reshape(S, C)
+
+    return {
+        "log_f0": log_f0,
+        "log_odds": log_odds,
+        "seg_trans": seg_trans,
+        "site_idx": site_idx,
+        "gamma_site_idx": gamma_site_idx,
+        "log_prior": log_prior,
+        "C": C,
+        "S": S,
+        "n_fwd_steps": n_fwd_steps,
+        "emit_pad": emit_pad,
+    }
+
+
 def _streaming_em_checkpointed(
     geno: jnp.ndarray,
     model: AncestryModel,
     d_morgan: jnp.ndarray,
     checkpoint_interval: int | None = None,
+    _precomputed: dict | None = None,
 ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
     """Checkpointed forward-backward returning sufficient statistics only.
 
@@ -442,6 +505,10 @@ def _streaming_em_checkpointed(
     model : AncestryModel
     d_morgan : (T-1,)
     checkpoint_interval : sites between checkpoints (default: sqrt(T))
+    _precomputed : optional dict with precomputed model-derived tensors
+        (log_f0, log_odds, log_trans, seg_trans, site_idx, gamma_site_idx,
+        log_prior, C, S, n_fwd_steps, emit_pad) to avoid recomputation
+        across batches.
 
     Returns
     -------
@@ -453,51 +520,60 @@ def _streaming_em_checkpointed(
     B, T = geno.shape
     A = model.n_ancestries
 
-    if checkpoint_interval is None:
-        checkpoint_interval = max(1, int(math.isqrt(T)))
-    C = checkpoint_interval
-    S = (T + C - 1) // C
-    n_fwd_steps = S * C
+    if _precomputed is not None:
+        log_f0 = _precomputed["log_f0"]
+        log_odds = _precomputed["log_odds"]
+        seg_trans = _precomputed["seg_trans"]
+        site_idx = _precomputed["site_idx"]
+        gamma_site_idx = _precomputed["gamma_site_idx"]
+        log_prior = _precomputed["log_prior"]
+        C = _precomputed["C"]
+        S = _precomputed["S"]
+        n_fwd_steps = _precomputed["n_fwd_steps"]
+        emit_pad = _precomputed["emit_pad"]
+    else:
+        if checkpoint_interval is None:
+            checkpoint_interval = max(1, int(math.isqrt(T)))
+        C = checkpoint_interval
+        S = (T + C - 1) // C
+        n_fwd_steps = S * C
 
-    # --- Small precomputed tensors ------------------------------------------
-    log_trans = model.log_transition_matrix(d_morgan)  # (T-1, A, A)
-    log_prior = jnp.log(model.mu)                       # (A,)
+        log_trans = model.log_transition_matrix(d_morgan)
+        log_prior = jnp.log(model.mu)
 
-    freq = jnp.clip(model.allele_freq, 1e-6, 1.0 - 1e-6)
-    log_f0 = jnp.log(1.0 - freq)       # (A, T)
-    log_odds = jnp.log(freq) - log_f0   # (A, T)
+        freq = jnp.clip(model.allele_freq, 1e-6, 1.0 - 1e-6)
+        log_f0 = jnp.log(1.0 - freq)
+        log_odds = jnp.log(freq) - log_f0
 
-    # --- Pad to S*C + 1 sites -----------------------------------------------
-    emit_pad = n_fwd_steps + 1 - T
-    if emit_pad > 0:
-        log_f0 = jnp.concatenate(
-            [log_f0, jnp.zeros((A, emit_pad))], axis=1,
-        )
-        log_odds = jnp.concatenate(
-            [log_odds, jnp.zeros((A, emit_pad))], axis=1,
-        )
+        emit_pad = n_fwd_steps + 1 - T
+        if emit_pad > 0:
+            log_f0 = jnp.concatenate(
+                [log_f0, jnp.zeros((A, emit_pad))], axis=1,
+            )
+            log_odds = jnp.concatenate(
+                [log_odds, jnp.zeros((A, emit_pad))], axis=1,
+            )
 
-    geno_j = jnp.array(geno)
+        trans_pad = n_fwd_steps - (T - 1)
+        log_eye = jnp.where(jnp.eye(A, dtype=bool), 0.0, -1e30)
+        if trans_pad > 0:
+            log_trans_fwd = jnp.concatenate(
+                [log_trans, jnp.broadcast_to(log_eye, (trans_pad, A, A))],
+                axis=0,
+            )
+        else:
+            log_trans_fwd = log_trans[:n_fwd_steps]
+        seg_trans = log_trans_fwd.reshape(S, C, A, A)
+
+        site_idx = jnp.arange(1, n_fwd_steps + 1).reshape(S, C)
+        gamma_site_idx = jnp.arange(0, n_fwd_steps).reshape(S, C)
+
+    # Pad geno to match n_fwd_steps + 1 sites (avoid copy if already a JAX array)
+    geno_j = geno if isinstance(geno, jnp.ndarray) else jnp.array(geno)
     if emit_pad > 0:
         geno_j = jnp.concatenate(
             [geno_j, jnp.zeros((B, emit_pad), dtype=geno_j.dtype)], axis=1,
         )
-
-    # Pad transitions to n_fwd_steps
-    trans_pad = n_fwd_steps - (T - 1)
-    log_eye = jnp.where(jnp.eye(A, dtype=bool), 0.0, -1e30)
-    if trans_pad > 0:
-        log_trans_fwd = jnp.concatenate(
-            [log_trans, jnp.broadcast_to(log_eye, (trans_pad, A, A))],
-            axis=0,
-        )
-    else:
-        log_trans_fwd = log_trans[:n_fwd_steps]
-    seg_trans = log_trans_fwd.reshape(S, C, A, A)
-
-    # Site index arrays
-    site_idx = jnp.arange(1, n_fwd_steps + 1).reshape(S, C)
-    gamma_site_idx = jnp.arange(0, n_fwd_steps).reshape(S, C)
 
     # Helper: compute emissions at a batch of sites → (C, B, A)
     def _emit_batch(sites):
@@ -615,6 +691,7 @@ def _streaming_decode_checkpointed(
     d_morgan: jnp.ndarray,
     checkpoint_interval: int | None = None,
     compute_max_post: bool = True,
+    _precomputed: dict | None = None,
 ) -> DecodeResult:
     """Checkpointed forward-backward that writes decode outputs per segment.
 
@@ -628,6 +705,7 @@ def _streaming_decode_checkpointed(
     d_morgan : (T-1,)
     checkpoint_interval : sites between checkpoints (default: sqrt(T))
     compute_max_post : whether to compute max_post and global_sums
+    _precomputed : optional dict from _precompute_streaming_tensors
 
     Returns
     -------
@@ -636,47 +714,56 @@ def _streaming_decode_checkpointed(
     B, T = geno.shape
     A = model.n_ancestries
 
-    if checkpoint_interval is None:
-        checkpoint_interval = max(1, int(math.isqrt(T)))
-    C = checkpoint_interval
-    S = (T + C - 1) // C
-    n_fwd_steps = S * C
+    if _precomputed is not None:
+        log_f0 = _precomputed["log_f0"]
+        log_odds = _precomputed["log_odds"]
+        seg_trans = _precomputed["seg_trans"]
+        site_idx = _precomputed["site_idx"]
+        log_prior = _precomputed["log_prior"]
+        C = _precomputed["C"]
+        S = _precomputed["S"]
+        n_fwd_steps = _precomputed["n_fwd_steps"]
+        emit_pad = _precomputed["emit_pad"]
+    else:
+        if checkpoint_interval is None:
+            checkpoint_interval = max(1, int(math.isqrt(T)))
+        C = checkpoint_interval
+        S = (T + C - 1) // C
+        n_fwd_steps = S * C
 
-    # --- Small precomputed tensors ------------------------------------------
-    log_trans = model.log_transition_matrix(d_morgan)
-    log_prior = jnp.log(model.mu)
+        log_trans = model.log_transition_matrix(d_morgan)
+        log_prior = jnp.log(model.mu)
 
-    freq = jnp.clip(model.allele_freq, 1e-6, 1.0 - 1e-6)
-    log_f0 = jnp.log(1.0 - freq)
-    log_odds = jnp.log(freq) - log_f0
+        freq = jnp.clip(model.allele_freq, 1e-6, 1.0 - 1e-6)
+        log_f0 = jnp.log(1.0 - freq)
+        log_odds = jnp.log(freq) - log_f0
 
-    emit_pad = n_fwd_steps + 1 - T
-    if emit_pad > 0:
-        log_f0 = jnp.concatenate(
-            [log_f0, jnp.zeros((A, emit_pad))], axis=1,
-        )
-        log_odds = jnp.concatenate(
-            [log_odds, jnp.zeros((A, emit_pad))], axis=1,
-        )
+        emit_pad = n_fwd_steps + 1 - T
+        if emit_pad > 0:
+            log_f0 = jnp.concatenate(
+                [log_f0, jnp.zeros((A, emit_pad))], axis=1,
+            )
+            log_odds = jnp.concatenate(
+                [log_odds, jnp.zeros((A, emit_pad))], axis=1,
+            )
 
-    geno_j = jnp.array(geno)
+        trans_pad = n_fwd_steps - (T - 1)
+        log_eye = jnp.where(jnp.eye(A, dtype=bool), 0.0, -1e30)
+        if trans_pad > 0:
+            log_trans_fwd = jnp.concatenate(
+                [log_trans, jnp.broadcast_to(log_eye, (trans_pad, A, A))],
+                axis=0,
+            )
+        else:
+            log_trans_fwd = log_trans[:n_fwd_steps]
+        seg_trans = log_trans_fwd.reshape(S, C, A, A)
+        site_idx = jnp.arange(1, n_fwd_steps + 1).reshape(S, C)
+
+    geno_j = geno if isinstance(geno, jnp.ndarray) else jnp.array(geno)
     if emit_pad > 0:
         geno_j = jnp.concatenate(
             [geno_j, jnp.zeros((B, emit_pad), dtype=geno_j.dtype)], axis=1,
         )
-
-    trans_pad = n_fwd_steps - (T - 1)
-    log_eye = jnp.where(jnp.eye(A, dtype=bool), 0.0, -1e30)
-    if trans_pad > 0:
-        log_trans_fwd = jnp.concatenate(
-            [log_trans, jnp.broadcast_to(log_eye, (trans_pad, A, A))],
-            axis=0,
-        )
-    else:
-        log_trans_fwd = log_trans[:n_fwd_steps]
-    seg_trans = log_trans_fwd.reshape(S, C, A, A)
-
-    site_idx = jnp.arange(1, n_fwd_steps + 1).reshape(S, C)
 
     def _emit_batch(sites):
         g = geno_j[:, sites].astype(jnp.float32)
@@ -1131,6 +1218,9 @@ def forward_backward_em(
     H, T = geno.shape
     A = model.n_ancestries
 
+    # Precompute model-derived tensors once (shared across all batches).
+    precomputed = _precompute_streaming_tensors(model, d_morgan, T)
+
     weighted_counts = jnp.zeros((A, T))
     total_weights = jnp.zeros((A, T))
     mu_sum = jnp.zeros((A,))
@@ -1140,6 +1230,7 @@ def forward_backward_em(
         end = min(start + batch_size, H)
         wc_b, tw_b, mu_b, sw_b = _streaming_em_checkpointed(
             geno[start:end], model, d_morgan,
+            _precomputed=precomputed,
         )
         weighted_counts = weighted_counts + wc_b
         total_weights = total_weights + tw_b
@@ -1251,6 +1342,8 @@ def forward_backward_decode(
     H, T = geno.shape
     A = model.n_ancestries
 
+    precomputed = _precompute_streaming_tensors(model, d_morgan, T)
+
     calls = _np.zeros((H, T), dtype=_np.int8)
     max_post = _np.zeros((H, T), dtype=_np.float32) if compute_max_post else None
     global_sums = _np.zeros((H, A), dtype=_np.float64) if compute_max_post else None
@@ -1260,6 +1353,7 @@ def forward_backward_decode(
         result = _streaming_decode_checkpointed(
             geno[start:end], model, d_morgan,
             compute_max_post=compute_max_post,
+            _precomputed=precomputed,
         )
         calls[start:end] = result.calls
         if compute_max_post:
