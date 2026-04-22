@@ -339,6 +339,23 @@ magnitude larger than any curated panel.
 See [docs/PANEL.md](docs/PANEL.md) for full details and the two-stage
 popout → FLARE pipeline.
 
+## Debugging
+
+### Device memory issues (OOM)
+
+popout streams all large computations (forward-backward, M-step, window
+refinement, parquet output) through bounded batches.  If you hit an OOM
+on a new code path:
+
+1. Set `POPOUT_TRACE_JIT=1` to log every `traced_jit` call's input shapes.
+2. Check `popout/_device.py` for `fits_on_device()` / `device_free_bytes()`.
+3. See [docs/BIOBANK_SCALE.md](docs/BIOBANK_SCALE.md) for the full memory audit.
+
+### Large-copy detection
+
+Set `POPOUT_WARN_LARGE_COPY=1` to log warnings when output functions
+produce redundant copies of arrays exceeding 1 GB.
+
 ## Limitations
 
 - No multi-GPU support yet. Use `--chromosomes` to manually partition across GPUs.
