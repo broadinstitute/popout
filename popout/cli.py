@@ -304,6 +304,12 @@ def main(argv: list[str] | None = None) -> None:
         help="Write posterior probabilities to output files",
     )
     parser.add_argument(
+        "--ancestry-names", type=str, default=None,
+        help="Ancestry names for output headers, either a comma-separated list "
+             "(e.g. 'afr,eas,eur,sas,amr') or a path to a single-column TSV. "
+             "Length must equal the final K. Default: 'anc_0','anc_1',... ",
+    )
+    parser.add_argument(
         "--seed", type=int, default=42,
         help="Random seed (default: 42)",
     )
@@ -545,8 +551,12 @@ def main(argv: list[str] | None = None) -> None:
 
     # --- Write outputs ---
     from .output import write_global_ancestry, write_model, write_ancestry_tracts
+    from .names import parse_ancestry_names
 
     out_prefix = args.out
+
+    K = results[0].model.n_ancestries
+    ancestry_names = parse_ancestry_names(args.ancestry_names, K)
 
     write_global_ancestry(
         results, n_samples, sample_names,
@@ -554,7 +564,11 @@ def main(argv: list[str] | None = None) -> None:
         stats=stats,
     )
 
-    write_model(results[0], f"{out_prefix}.model", chrom_data=chrom_data_list[0])
+    write_model(
+        results[0], f"{out_prefix}.model",
+        chrom_data=chrom_data_list[0],
+        ancestry_names=ancestry_names,
+    )
 
     if results[0].spectral is not None:
         import numpy as np

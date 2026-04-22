@@ -475,6 +475,7 @@ def run_em(
     seed_responsibilities: Optional[jnp.ndarray] = None,
     freeze_anchors_iters: int = 0,
     checkpoint_after_em: Optional[str] = None,
+    ancestry_names: Optional[list[str]] = None,
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -1076,6 +1077,7 @@ def run_em_genome(
     stop_after_seeding: bool = False,
     resume_from_checkpoint: Optional[str] = None,
     checkpoint_after_em: bool = False,
+    ancestry_names: Optional[list[str]] = None,
 ) -> list[AncestryResult] | None:
     """Run self-bootstrapping LAI across all chromosomes.
 

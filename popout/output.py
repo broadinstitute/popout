@@ -279,7 +279,12 @@ def write_global_ancestry(
         stats.emit("output/genome_wide_ancestry_proportions", mean_props)
 
 
-def write_model(result: AncestryResult, out_path: str, chrom_data: ChromData | None = None) -> None:
+def write_model(
+    result: AncestryResult,
+    out_path: str,
+    chrom_data: ChromData | None = None,
+    ancestry_names: list[str] | None = None,
+) -> None:
     """Write model parameters to a human-readable file.
 
     Also saves a companion ``.npz`` archive with full-precision arrays
@@ -305,5 +310,12 @@ def write_model(result: AncestryResult, out_path: str, chrom_data: ChromData | N
         save_dict["gen_per_hap"] = np.array(model.gen_per_hap)
     if getattr(model, "bucket_centers", None) is not None:
         save_dict["bucket_centers"] = np.array(model.bucket_centers)
+    if ancestry_names is not None:
+        if len(ancestry_names) != model.n_ancestries:
+            raise ValueError(
+                f"ancestry_names has {len(ancestry_names)} entries but "
+                f"model has {model.n_ancestries} ancestries"
+            )
+        save_dict["ancestry_names"] = np.array(ancestry_names, dtype=object)
     np.savez_compressed(f"{out_path}.npz", **save_dict)
     log.info("Wrote model to %s (+ .npz)", out_path)
