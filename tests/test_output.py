@@ -5,8 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
-from popout.datatypes import AncestryModel, AncestryResult, ChromData
-from popout.output import write_model
+from popout.datatypes import AncestryModel, AncestryResult, ChromData, DecodeResult
+from popout.output import write_model, write_ancestry_tracts
 
 
 def _make_minimal_result(n_ancestries=3, n_haps=10, n_sites=100):
@@ -72,3 +72,128 @@ def test_write_model_names_length_mismatch():
         except ValueError as e:
             assert "2 entries" in str(e)
             assert "3 ancestries" in str(e)
+
+
+def test_tracts_mean_posterior_from_max_post():
+    """mean_posterior column computed from decode.max_post matches expected values."""
+    import jax.numpy as jnp
+    import gzip
+
+    n_ancestries, n_haps, n_sites = 3, 4, 20
+    rng = np.random.default_rng(99)
+    calls = np.zeros((n_haps, n_sites), dtype=np.int8)
+    # Set up known tracts: hap0 = all ancestry 0, hap1 = first 10 anc 1 then anc 2
+    calls[0, :] = 0
+    calls[1, :] = 0
+    calls[2, :10] = 1
+    calls[2, 10:] = 2
+    calls[3, :10] = 1
+    calls[3, 10:] = 2
+
+    max_post = rng.random((n_haps, n_sites)).astype(np.float32) * 0.3 + 0.7
+
+    model = AncestryModel(
+        n_ancestries=n_ancestries,
+        mu=jnp.array([0.4, 0.3, 0.3]),
+        gen_since_admix=20.0,
+        allele_freq=jnp.array(rng.random((n_ancestries, n_sites)).astype(np.float32)),
+    )
+    decode = DecodeResult(calls=calls, max_post=max_post)
+    result = AncestryResult(calls=calls, model=model, chrom="chr1", decode=decode)
+    chrom_data = ChromData(
+        geno=rng.integers(0, 2, size=(n_haps, n_sites)).astype(np.uint8),
+        pos_bp=np.arange(n_sites, dtype=np.int64) * 1000 + 100000,
+        pos_cm=np.linspace(0, 10, n_sites),
+        chrom="chr1",
+    )
+
+    sample_names = ["S0", "S1"]
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = str(Path(tmp) / "test.tracts.tsv.gz")
+        write_ancestry_tracts(
+            [result], [chrom_data], 2, sample_names, out_path,
+            write_posteriors=True,
+        )
+        with gzip.open(out_path, "rt") as f:
+            lines = f.readlines()
+
+    # Parse mean_posterior from the output
+    header = lines[0].strip().split("\t")
+    assert "mean_posterior" in header
+    mp_col = header.index("mean_posterior")
+
+    for line in lines[1:]:
+        parts = line.strip().split("\t")
+        mean_val = float(parts[mp_col])
+        # Verify it's in a reasonable range
+        assert 0.0 < mean_val <= 1.0
+
+    # Check specific tract: hap 0 of sample S0 is all ancestry 0, all 20 sites
+    # mean_posterior should be mean(max_post[0, 0:20])
+    data_lines = [l.strip().split("\t") for l in lines[1:]]
+    hap0_lines = [l for l in data_lines if l[3] == "S0" and l[4] == "0"]
+    assert len(hap0_lines) == 1  # single tract
+    expected = float(max_post[0, :].mean())
+    actual = float(hap0_lines[0][mp_col])
+    np.testing.assert_almost_equal(actual, expected, decimal=3)
+
+
+def test_tracts_posteriors_fallback():
+    """Legacy fallback: posteriors tensor produces same output as max_post path."""
+    import jax.numpy as jnp
+    import gzip
+
+    n_ancestries, n_haps, n_sites = 2, 2, 10
+    rng = np.random.default_rng(77)
+    calls = np.zeros((n_haps, n_sites), dtype=np.int8)
+    calls[0, :] = 0
+    calls[1, :] = 1
+
+    # Build posteriors tensor where argmax matches calls
+    posteriors = np.zeros((n_haps, n_sites, n_ancestries), dtype=np.float32)
+    for h in range(n_haps):
+        for t in range(n_sites):
+            anc = calls[h, t]
+            posteriors[h, t, anc] = 0.8 + rng.random() * 0.15
+            for a in range(n_ancestries):
+                if a != anc:
+                    posteriors[h, t, a] = (1 - posteriors[h, t, anc]) / max(n_ancestries - 1, 1)
+
+    model = AncestryModel(
+        n_ancestries=n_ancestries,
+        mu=jnp.array([0.5, 0.5]),
+        gen_since_admix=20.0,
+        allele_freq=jnp.array(rng.random((n_ancestries, n_sites)).astype(np.float32)),
+    )
+    # No decode — fallback to posteriors
+    result = AncestryResult(
+        calls=calls, model=model, chrom="chr1",
+        posteriors=jnp.array(posteriors),
+    )
+    chrom_data = ChromData(
+        geno=rng.integers(0, 2, size=(n_haps, n_sites)).astype(np.uint8),
+        pos_bp=np.arange(n_sites, dtype=np.int64) * 1000 + 100000,
+        pos_cm=np.linspace(0, 10, n_sites),
+        chrom="chr1",
+    )
+
+    sample_names = ["S0"]
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = str(Path(tmp) / "test.tracts.tsv.gz")
+        write_ancestry_tracts(
+            [result], [chrom_data], 1, sample_names, out_path,
+            write_posteriors=True,
+        )
+        with gzip.open(out_path, "rt") as f:
+            lines = f.readlines()
+
+    header = lines[0].strip().split("\t")
+    mp_col = header.index("mean_posterior")
+
+    # For hap 0 (all anc 0), mean_post = posteriors[0,:,0].mean() = max_post[0,:].mean()
+    expected_max_post = posteriors.max(axis=2)  # (H, T)
+    data_lines = [l.strip().split("\t") for l in lines[1:]]
+    hap0_line = [l for l in data_lines if l[4] == "0"][0]
+    expected = float(expected_max_post[0, :].mean())
+    actual = float(hap0_line[mp_col])
+    np.testing.assert_almost_equal(actual, expected, decimal=3)

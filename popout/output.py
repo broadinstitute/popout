@@ -168,9 +168,24 @@ def write_ancestry_tracts(
             if n_sites == 0:
                 continue
 
-            posteriors = None
-            if write_posteriors and result.posteriors is not None:
-                posteriors = np.array(result.posteriors)  # (n_haps, n_sites, A)
+            # Load max_post for mean_posterior column.
+            # Within a tract where hap_calls[s..e] == anc, by construction
+            # hap_calls[t] = argmax_a posteriors[h,t,a], so
+            # posteriors[h,t,anc] = max_a posteriors[h,t,a] = max_post[h,t].
+            # Therefore posteriors[hi,s:e+1,anc].mean() == max_post[hi,s:e+1].mean().
+            max_post = None
+            if write_posteriors:
+                if result.decode is not None and result.decode.max_post is not None:
+                    max_post = result.decode.max_post          # (H, T) float32
+                elif result.posteriors is not None:
+                    # Legacy fallback for test fixtures that still populate posteriors.
+                    max_post = np.asarray(result.posteriors).max(axis=2)  # (H, T)
+                else:
+                    log.warning(
+                        "--probs requested but chrom %s has no max_post or posteriors; "
+                        "mean_posterior column will be blank for this chromosome",
+                        result.chrom,
+                    )
 
             # Vectorized switch detection per haplotype:
             # find where ancestry changes between consecutive sites
@@ -190,21 +205,22 @@ def write_ancestry_tracts(
                     anc = int(hap_calls[s])
                     n_sites_tract = e - s + 1
                     line = f"{chrom}\t{pos_bp[s]}\t{pos_bp[e]}\t{sample}\t{hap}\t{anc}\t{n_sites_tract}"
-                    if write_posteriors and posteriors is not None:
-                        mean_post = float(posteriors[hi, s:e + 1, anc].mean())
-                        line += f"\t{mean_post:.4f}"
+                    if write_posteriors:
+                        if max_post is not None:
+                            mean_post = float(max_post[hi, s:e + 1].mean())
+                            line += f"\t{mean_post:.4f}"
+                        else:
+                            line += "\t."  # column present but missing
                     f.write(line + "\n")
                     n_tracts += 1
                     # Accumulate for stats
                     tract_lengths_by_anc.setdefault(anc, []).append(n_sites_tract)
 
             # Posterior confidence: mean of max posterior per site
-            if result.decode is not None and result.decode.max_post is not None:
+            # max_post was resolved above (from decode.max_post or posteriors fallback)
+            if max_post is None and result.decode is not None and result.decode.max_post is not None:
                 max_post = result.decode.max_post
-                confidence_sum += float(max_post.sum())
-                confidence_count += max_post.size
-            elif posteriors is not None:
-                max_post = posteriors.max(axis=2)  # (n_haps, n_sites)
+            if max_post is not None:
                 confidence_sum += float(max_post.sum())
                 confidence_count += max_post.size
 
