@@ -4,7 +4,7 @@ Produces:
   - Ancestry tract BED/TSV (compact interval-based local ancestry)
   - Global ancestry proportions TSV
   - Model parameters file
-  - (Optional) Ancestry VCF with AN1/AN2 FORMAT fields (FLARE-compatible)
+  - Per-chromosome dense decode arrays (for 'popout convert')
 """
 
 from __future__ import annotations
@@ -13,98 +13,10 @@ import logging
 from pathlib import Path
 
 import numpy as np
-import pysam
 
 from .datatypes import AncestryResult, ChromData
 
 log = logging.getLogger(__name__)
-
-
-def write_ancestry_vcf(
-    results: list[AncestryResult],
-    chrom_data_list: list[ChromData],
-    vcf_in_path: str,
-    vcf_out_path: str,
-    write_probs: bool = False,
-) -> None:
-    """Write ancestry calls to a VCF file.
-
-    Mimics FLARE output format: AN1/AN2 FORMAT fields for the most probable
-    ancestry on each haplotype.  Optionally writes ANP1/ANP2 posterior
-    probability fields.
-    """
-    vcf_in = pysam.VariantFile(vcf_in_path)
-    n_samples = len(vcf_in.header.samples)
-
-    # Build new header
-    new_header = vcf_in.header.copy()
-    new_header.add_meta("FORMAT", items=[
-        ("ID", "AN1"), ("Number", "1"), ("Type", "Integer"),
-        ("Description", "Most probable ancestry for haplotype 1"),
-    ])
-    new_header.add_meta("FORMAT", items=[
-        ("ID", "AN2"), ("Number", "1"), ("Type", "Integer"),
-        ("Description", "Most probable ancestry for haplotype 2"),
-    ])
-    if write_probs:
-        new_header.add_meta("FORMAT", items=[
-            ("ID", "ANP1"), ("Number", "."), ("Type", "Float"),
-            ("Description", "Ancestry posterior probabilities for haplotype 1"),
-        ])
-        new_header.add_meta("FORMAT", items=[
-            ("ID", "ANP2"), ("Number", "."), ("Type", "Float"),
-            ("Description", "Ancestry posterior probabilities for haplotype 2"),
-        ])
-
-    # Add ancestry labels
-    for r in results:
-        for a in range(r.model.n_ancestries):
-            new_header.add_meta(
-                "ANCESTRY",
-                f"<ID={a},Description=\"Ancestry {a}\">"
-            )
-
-    vcf_out = pysam.VariantFile(vcf_out_path, "wz", header=new_header)
-
-    for result, cdata in zip(results, chrom_data_list):
-        calls = result.calls  # (n_haps, n_sites)
-        n_sites = cdata.n_sites
-
-        # Build a lookup from pos_bp to site index
-        pos_to_idx = {int(bp): i for i, bp in enumerate(cdata.pos_bp)}
-
-        for rec in vcf_in.fetch(cdata.chrom):
-            if rec.pos not in pos_to_idx:
-                continue
-            site_idx = pos_to_idx[rec.pos]
-
-            new_rec = vcf_out.new_record()
-            new_rec.contig = rec.contig
-            new_rec.pos = rec.pos
-            new_rec.id = rec.id
-            new_rec.alleles = rec.alleles
-            new_rec.qual = rec.qual
-
-            for si, sample_name in enumerate(vcf_in.header.samples):
-                hap1_idx = 2 * si
-                hap2_idx = 2 * si + 1
-                new_rec.samples[sample_name]["AN1"] = int(calls[hap1_idx, site_idx])
-                new_rec.samples[sample_name]["AN2"] = int(calls[hap2_idx, site_idx])
-                if write_probs and result.posteriors is not None:
-                    p1 = result.posteriors[hap1_idx, site_idx, :]
-                    p2 = result.posteriors[hap2_idx, site_idx, :]
-                    new_rec.samples[sample_name]["ANP1"] = tuple(
-                        round(float(x), 4) for x in p1
-                    )
-                    new_rec.samples[sample_name]["ANP2"] = tuple(
-                        round(float(x), 4) for x in p2
-                    )
-
-            vcf_out.write(new_rec)
-
-    vcf_out.close()
-    vcf_in.close()
-    log.info("Wrote ancestry VCF to %s", vcf_out_path)
 
 
 def write_ancestry_tracts(
