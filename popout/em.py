@@ -418,6 +418,12 @@ def init_model_soft(
     Returns
     -------
     AncestryModel
+
+    Notes
+    -----
+    When ``window_refine=True``, frequencies are refined via per-window
+    local ancestry reassignment, streaming over haplotypes in batches
+    (default 50k).  Safe at biobank scale without full geno on device.
     """
     H, T = geno.shape
     A = n_ancestries
@@ -889,9 +895,11 @@ def run_em(
             spectral={"pca_proj": pca_proj, "gmm_labels": np.array(labels)},
         )
 
-    # Summary stats
+    # Summary stats — single pass via bincount instead of A boolean arrays
+    bincount = np.bincount(result.calls.ravel(), minlength=n_anc)
+    total = result.calls.size
     for a in range(n_anc):
-        prop = float((result.calls == a).mean())
+        prop = float(bincount[a]) / total
         log.info("  Ancestry %d: %.1f%% of genome", a, 100 * prop)
         if stats is not None:
             stats.emit("em/ancestry_proportion", prop,
