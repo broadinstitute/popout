@@ -483,32 +483,30 @@ def _precompute_streaming_tensors(
     }
 
 
+@partial(jax.jit, static_argnames=("C", "S", "n_fwd_steps", "emit_pad"))
 def _streaming_em_checkpointed(
-    geno: jnp.ndarray,
-    model: AncestryModel,
-    d_morgan: jnp.ndarray,
-    checkpoint_interval: int | None = None,
-    _precomputed: dict | None = None,
-) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, jnp.ndarray]:
-    """Checkpointed forward-backward returning sufficient statistics only.
+    geno_j, log_f0, log_odds, seg_trans, site_idx, gamma_site_idx, log_prior,
+    *, C, S, n_fwd_steps, emit_pad,
+):
+    """JIT-compiled checkpointed forward-backward returning sufficient statistics.
 
     Never materializes (B, T, A). Emissions are computed on the fly from
     (geno, allele_freq) slices; posteriors are reduced to M-step accumulators
     per segment inside the scan carry.
 
-    Peak per-call GPU residency: O(sqrt(T) * B * A) from checkpoints and
-    per-segment scratch, plus O(B * T) uint8 for the geno input.
+    All model-derived tensors are precomputed by _precompute_streaming_tensors
+    and passed in directly. Shape-sensitive Python ints are static.
 
     Parameters
     ----------
-    geno : (B, T) uint8
-    model : AncestryModel
-    d_morgan : (T-1,)
-    checkpoint_interval : sites between checkpoints (default: sqrt(T))
-    _precomputed : optional dict with precomputed model-derived tensors
-        (log_f0, log_odds, log_trans, seg_trans, site_idx, gamma_site_idx,
-        log_prior, C, S, n_fwd_steps, emit_pad) to avoid recomputation
-        across batches.
+    geno_j : (B, T_padded) uint8 — already padded to n_fwd_steps + 1 sites
+    log_f0 : (A, T_padded) float32
+    log_odds : (A, T_padded) float32
+    seg_trans : (S, C, A, A) float32
+    site_idx : (S, C) int32
+    gamma_site_idx : (S, C) int32
+    log_prior : (A,) float32
+    C, S, n_fwd_steps, emit_pad : static ints
 
     Returns
     -------
@@ -517,264 +515,22 @@ def _streaming_em_checkpointed(
     mu_sum          : (A,) float32
     soft_switches   : (B,) float32
     """
-    B, T = geno.shape
-    A = model.n_ancestries
-
-    if _precomputed is not None:
-        log_f0 = _precomputed["log_f0"]
-        log_odds = _precomputed["log_odds"]
-        seg_trans = _precomputed["seg_trans"]
-        site_idx = _precomputed["site_idx"]
-        gamma_site_idx = _precomputed["gamma_site_idx"]
-        log_prior = _precomputed["log_prior"]
-        C = _precomputed["C"]
-        S = _precomputed["S"]
-        n_fwd_steps = _precomputed["n_fwd_steps"]
-        emit_pad = _precomputed["emit_pad"]
-    else:
-        if checkpoint_interval is None:
-            checkpoint_interval = max(1, int(math.isqrt(T)))
-        C = checkpoint_interval
-        S = (T + C - 1) // C
-        n_fwd_steps = S * C
-
-        log_trans = model.log_transition_matrix(d_morgan)
-        log_prior = jnp.log(model.mu)
-
-        freq = jnp.clip(model.allele_freq, 1e-6, 1.0 - 1e-6)
-        log_f0 = jnp.log(1.0 - freq)
-        log_odds = jnp.log(freq) - log_f0
-
-        emit_pad = n_fwd_steps + 1 - T
-        if emit_pad > 0:
-            log_f0 = jnp.concatenate(
-                [log_f0, jnp.zeros((A, emit_pad))], axis=1,
-            )
-            log_odds = jnp.concatenate(
-                [log_odds, jnp.zeros((A, emit_pad))], axis=1,
-            )
-
-        trans_pad = n_fwd_steps - (T - 1)
-        log_eye = jnp.where(jnp.eye(A, dtype=bool), 0.0, -1e30)
-        if trans_pad > 0:
-            log_trans_fwd = jnp.concatenate(
-                [log_trans, jnp.broadcast_to(log_eye, (trans_pad, A, A))],
-                axis=0,
-            )
-        else:
-            log_trans_fwd = log_trans[:n_fwd_steps]
-        seg_trans = log_trans_fwd.reshape(S, C, A, A)
-
-        site_idx = jnp.arange(1, n_fwd_steps + 1).reshape(S, C)
-        gamma_site_idx = jnp.arange(0, n_fwd_steps).reshape(S, C)
-
-    # Pad geno to match n_fwd_steps + 1 sites (avoid copy if already a JAX array)
-    geno_j = geno if isinstance(geno, jnp.ndarray) else jnp.array(geno)
-    if emit_pad > 0:
-        geno_j = jnp.concatenate(
-            [geno_j, jnp.zeros((B, emit_pad), dtype=geno_j.dtype)], axis=1,
-        )
+    B = geno_j.shape[0]
+    T = geno_j.shape[1] - emit_pad
+    A = log_prior.shape[0]
 
     # Helper: compute emissions at a batch of sites → (C, B, A)
     def _emit_batch(sites):
         g = geno_j[:, sites].astype(jnp.float32)  # (B, C)
         f0 = log_f0[:, sites]                       # (A, C)
         lo = log_odds[:, sites]                     # (A, C)
-        # (C, 1, A) + (C, B, 1) * (C, 1, A) → (C, B, A)
         return f0.T[:, None, :] + g.T[:, :, None] * lo.T[:, None, :]
 
     # Initial alpha at site 0
     e0 = log_f0[:, 0][None, :] + geno_j[:, 0].astype(jnp.float32)[:, None] * log_odds[:, 0][None, :]
     log_alpha_0 = log_prior[None, :] + e0  # (B, A)
 
-    # ------------------------------------------------------------------
-    # Phase 1: Checkpointed forward — emit on the fly
-    # ------------------------------------------------------------------
-    def _ckpt_fwd_body(alpha, xs):
-        st, idx = xs  # (C, A, A), (C,)
-        se = _emit_batch(idx)  # (C, B, A)
-        def _inner(a, x):
-            e, t = x
-            return _log_matvec_batch(a, t) + e, None
-        final, _ = jax.lax.scan(_inner, alpha, (se, st))
-        return final, final
-
-    _, ckpt_ends = jax.lax.scan(
-        _ckpt_fwd_body, log_alpha_0, (seg_trans, site_idx),
-    )
-    checkpoints = jnp.concatenate([log_alpha_0[None], ckpt_ends], axis=0)
-    # checkpoints: (S+1, B, A)
-
-    # ------------------------------------------------------------------
-    # Phase 2: Reverse backward scan + streaming M-step accumulation
-    # ------------------------------------------------------------------
-    seg_trans_rev = jnp.flip(seg_trans, axis=0)
-    ckpt_rev = jnp.flip(checkpoints[:S], axis=0)
-    site_idx_rev = jnp.flip(site_idx, axis=0)
-    gamma_idx_rev = jnp.flip(gamma_site_idx, axis=0)
-
-    def _bwd_segment(carry, xs):
-        beta_right, soft_sw, wc, tw = carry
-        st, ckpt, e_sites, g_sites = xs
-
-        # Emissions for this segment (lives only during this iteration)
-        se = _emit_batch(e_sites)  # (C, B, A)
-
-        # Forward recompute from checkpoint
-        def _fwd(a, x):
-            e, t = x
-            a_new = _log_matvec_batch(a, t) + e
-            return a_new, a_new
-        _, alphas_inner = jax.lax.scan(_fwd, ckpt, (se[:C - 1], st[:C - 1]))
-        alphas = jnp.concatenate([ckpt[None], alphas_inner], axis=0)  # (C, B, A)
-
-        # Backward from beta_right
-        se_bwd = jnp.flip(se, axis=0)
-        st_bwd = jnp.flip(st, axis=0)
-        def _bwd(beta, x):
-            e, t = x
-            b_new = _log_matvec_batch_transpose(e + beta, t)
-            return b_new, b_new
-        beta_left, betas_rev = jax.lax.scan(_bwd, beta_right, (se_bwd, st_bwd))
-        betas = jnp.flip(betas_rev, axis=0)  # (C, B, A)
-
-        # Posteriors
-        log_gamma = alphas + betas
-        log_norm = jax.nn.logsumexp(log_gamma, axis=2, keepdims=True)
-        gamma_seg = jnp.exp(log_gamma - log_norm)  # (C, B, A)
-
-        # --- Xi-based soft switches ---
-        betas_ext = jnp.concatenate(
-            [betas[1:], beta_right[None]], axis=0,
-        )  # (C, B, A)
-        log_P = jax.nn.logsumexp(alphas[0] + betas[0], axis=1)  # (B,)
-        st_diag = jnp.diagonal(st, axis1=1, axis2=2)  # (C, A)
-        log_xi_diag = (
-            alphas + st_diag[:, None, :] + se + betas_ext
-        )  # (C, B, A)
-        xi_diag = jnp.exp(log_xi_diag - log_P[None, :, None])
-        stay = xi_diag.sum(axis=2)                                # (C, B)
-        seg_soft = jnp.clip(1.0 - stay, 0.0, 1.0).sum(axis=0)   # (B,)
-
-        # --- Accumulate sufficient statistics ---
-        geno_at_gamma = geno_j[:, g_sites].astype(jnp.float32)  # (B, C)
-        wc_seg = jnp.einsum('cba,bc->ac', gamma_seg, geno_at_gamma)  # (A, C)
-        tw_seg = gamma_seg.sum(axis=1).T  # (C, A).T → (A, C)
-
-        wc = wc.at[:, g_sites].add(wc_seg)
-        tw = tw.at[:, g_sites].add(tw_seg)
-
-        return (beta_left, soft_sw + seg_soft, wc, tw), None
-
-    init_carry = (
-        jnp.zeros((B, A)),                         # beta_right
-        jnp.zeros(B),                               # soft_sw
-        jnp.zeros((A, n_fwd_steps), jnp.float32),   # wc
-        jnp.zeros((A, n_fwd_steps), jnp.float32),   # tw
-    )
-    (_, soft_switches, wc_pad, tw_pad), _ = jax.lax.scan(
-        _bwd_segment, init_carry,
-        (seg_trans_rev, ckpt_rev, site_idx_rev, gamma_idx_rev),
-    )
-
-    # Trim padding and derive mu_sum from total_weights
-    weighted_counts = wc_pad[:, :T]
-    total_weights = tw_pad[:, :T]
-    mu_sum = total_weights.sum(axis=1)  # (A,)
-
-    return weighted_counts, total_weights, mu_sum, soft_switches
-
-
-def _streaming_decode_checkpointed(
-    geno: jnp.ndarray,
-    model: AncestryModel,
-    d_morgan: jnp.ndarray,
-    checkpoint_interval: int | None = None,
-    compute_max_post: bool = True,
-    _precomputed: dict | None = None,
-) -> DecodeResult:
-    """Checkpointed forward-backward that writes decode outputs per segment.
-
-    Never materializes the full (B, T, A) posterior tensor. Uses a Python
-    for-loop over segments with per-segment device-to-host transfer.
-
-    Parameters
-    ----------
-    geno : (B, T) uint8
-    model : AncestryModel
-    d_morgan : (T-1,)
-    checkpoint_interval : sites between checkpoints (default: sqrt(T))
-    compute_max_post : whether to compute max_post and global_sums
-    _precomputed : optional dict from _precompute_streaming_tensors
-
-    Returns
-    -------
-    DecodeResult
-    """
-    B, T = geno.shape
-    A = model.n_ancestries
-
-    if _precomputed is not None:
-        log_f0 = _precomputed["log_f0"]
-        log_odds = _precomputed["log_odds"]
-        seg_trans = _precomputed["seg_trans"]
-        site_idx = _precomputed["site_idx"]
-        log_prior = _precomputed["log_prior"]
-        C = _precomputed["C"]
-        S = _precomputed["S"]
-        n_fwd_steps = _precomputed["n_fwd_steps"]
-        emit_pad = _precomputed["emit_pad"]
-    else:
-        if checkpoint_interval is None:
-            checkpoint_interval = max(1, int(math.isqrt(T)))
-        C = checkpoint_interval
-        S = (T + C - 1) // C
-        n_fwd_steps = S * C
-
-        log_trans = model.log_transition_matrix(d_morgan)
-        log_prior = jnp.log(model.mu)
-
-        freq = jnp.clip(model.allele_freq, 1e-6, 1.0 - 1e-6)
-        log_f0 = jnp.log(1.0 - freq)
-        log_odds = jnp.log(freq) - log_f0
-
-        emit_pad = n_fwd_steps + 1 - T
-        if emit_pad > 0:
-            log_f0 = jnp.concatenate(
-                [log_f0, jnp.zeros((A, emit_pad))], axis=1,
-            )
-            log_odds = jnp.concatenate(
-                [log_odds, jnp.zeros((A, emit_pad))], axis=1,
-            )
-
-        trans_pad = n_fwd_steps - (T - 1)
-        log_eye = jnp.where(jnp.eye(A, dtype=bool), 0.0, -1e30)
-        if trans_pad > 0:
-            log_trans_fwd = jnp.concatenate(
-                [log_trans, jnp.broadcast_to(log_eye, (trans_pad, A, A))],
-                axis=0,
-            )
-        else:
-            log_trans_fwd = log_trans[:n_fwd_steps]
-        seg_trans = log_trans_fwd.reshape(S, C, A, A)
-        site_idx = jnp.arange(1, n_fwd_steps + 1).reshape(S, C)
-
-    geno_j = geno if isinstance(geno, jnp.ndarray) else jnp.array(geno)
-    if emit_pad > 0:
-        geno_j = jnp.concatenate(
-            [geno_j, jnp.zeros((B, emit_pad), dtype=geno_j.dtype)], axis=1,
-        )
-
-    def _emit_batch(sites):
-        g = geno_j[:, sites].astype(jnp.float32)
-        f0 = log_f0[:, sites]
-        lo = log_odds[:, sites]
-        return f0.T[:, None, :] + g.T[:, :, None] * lo.T[:, None, :]
-
-    e0 = log_f0[:, 0][None, :] + geno_j[:, 0].astype(jnp.float32)[:, None] * log_odds[:, 0][None, :]
-    log_alpha_0 = log_prior[None, :] + e0
-
-    # Phase 1: Checkpointed forward (identical to EM path)
+    # Phase 1: Checkpointed forward
     def _ckpt_fwd_body(alpha, xs):
         st, idx = xs
         se = _emit_batch(idx)
@@ -789,7 +545,179 @@ def _streaming_decode_checkpointed(
     )
     checkpoints = jnp.concatenate([log_alpha_0[None], ckpt_ends], axis=0)
 
-    # Phase 2: Python for-loop for per-segment decode + D2H
+    # Phase 2: Reverse backward scan + streaming M-step accumulation
+    seg_trans_rev = jnp.flip(seg_trans, axis=0)
+    ckpt_rev = jnp.flip(checkpoints[:S], axis=0)
+    site_idx_rev = jnp.flip(site_idx, axis=0)
+    gamma_idx_rev = jnp.flip(gamma_site_idx, axis=0)
+
+    def _bwd_segment(carry, xs):
+        beta_right, soft_sw, wc, tw = carry
+        st, ckpt, e_sites, g_sites = xs
+
+        se = _emit_batch(e_sites)
+
+        def _fwd(a, x):
+            e, t = x
+            a_new = _log_matvec_batch(a, t) + e
+            return a_new, a_new
+        _, alphas_inner = jax.lax.scan(_fwd, ckpt, (se[:C - 1], st[:C - 1]))
+        alphas = jnp.concatenate([ckpt[None], alphas_inner], axis=0)
+
+        se_bwd = jnp.flip(se, axis=0)
+        st_bwd = jnp.flip(st, axis=0)
+        def _bwd(beta, x):
+            e, t = x
+            b_new = _log_matvec_batch_transpose(e + beta, t)
+            return b_new, b_new
+        beta_left, betas_rev = jax.lax.scan(_bwd, beta_right, (se_bwd, st_bwd))
+        betas = jnp.flip(betas_rev, axis=0)
+
+        log_gamma = alphas + betas
+        log_norm = jax.nn.logsumexp(log_gamma, axis=2, keepdims=True)
+        gamma_seg = jnp.exp(log_gamma - log_norm)
+
+        betas_ext = jnp.concatenate(
+            [betas[1:], beta_right[None]], axis=0,
+        )
+        log_P = jax.nn.logsumexp(alphas[0] + betas[0], axis=1)
+        st_diag = jnp.diagonal(st, axis1=1, axis2=2)
+        log_xi_diag = (
+            alphas + st_diag[:, None, :] + se + betas_ext
+        )
+        xi_diag = jnp.exp(log_xi_diag - log_P[None, :, None])
+        stay = xi_diag.sum(axis=2)
+        seg_soft = jnp.clip(1.0 - stay, 0.0, 1.0).sum(axis=0)
+
+        geno_at_gamma = geno_j[:, g_sites].astype(jnp.float32)
+        wc_seg = jnp.einsum('cba,bc->ac', gamma_seg, geno_at_gamma)
+        tw_seg = gamma_seg.sum(axis=1).T
+
+        wc = wc.at[:, g_sites].add(wc_seg)
+        tw = tw.at[:, g_sites].add(tw_seg)
+
+        return (beta_left, soft_sw + seg_soft, wc, tw), None
+
+    init_carry = (
+        jnp.zeros((B, A)),
+        jnp.zeros(B),
+        jnp.zeros((A, n_fwd_steps), jnp.float32),
+        jnp.zeros((A, n_fwd_steps), jnp.float32),
+    )
+    (_, soft_switches, wc_pad, tw_pad), _ = jax.lax.scan(
+        _bwd_segment, init_carry,
+        (seg_trans_rev, ckpt_rev, site_idx_rev, gamma_idx_rev),
+    )
+
+    weighted_counts = wc_pad[:, :T]
+    total_weights = tw_pad[:, :T]
+    mu_sum = total_weights.sum(axis=1)
+
+    return weighted_counts, total_weights, mu_sum, soft_switches
+
+
+@partial(jax.jit, static_argnames=("C", "S", "n_fwd_steps", "emit_pad"))
+def _streaming_decode_fwd_checkpoints(
+    geno_j, log_f0, log_odds, seg_trans, site_idx, log_prior,
+    *, C, S, n_fwd_steps, emit_pad,
+):
+    """JIT-compiled forward checkpoint pass for decode (shared with EM)."""
+    e0 = log_f0[:, 0][None, :] + geno_j[:, 0].astype(jnp.float32)[:, None] * log_odds[:, 0][None, :]
+    log_alpha_0 = log_prior[None, :] + e0
+
+    def _emit_batch(sites):
+        g = geno_j[:, sites].astype(jnp.float32)
+        f0 = log_f0[:, sites]
+        lo = log_odds[:, sites]
+        return f0.T[:, None, :] + g.T[:, :, None] * lo.T[:, None, :]
+
+    def _ckpt_fwd_body(alpha, xs):
+        st, idx = xs
+        se = _emit_batch(idx)
+        def _inner(a, x):
+            e, t = x
+            return _log_matvec_batch(a, t) + e, None
+        final, _ = jax.lax.scan(_inner, alpha, (se, st))
+        return final, final
+
+    _, ckpt_ends = jax.lax.scan(
+        _ckpt_fwd_body, log_alpha_0, (seg_trans, site_idx),
+    )
+    return jnp.concatenate([log_alpha_0[None], ckpt_ends], axis=0)
+
+
+@partial(jax.jit, static_argnames=("C",))
+def _streaming_decode_segment(
+    geno_j, log_f0, log_odds, ckpt, st, e_sites, beta_right,
+    *, C,
+):
+    """JIT-compiled per-segment backward + posterior for decode."""
+    def _emit_batch(sites):
+        g = geno_j[:, sites].astype(jnp.float32)
+        f0 = log_f0[:, sites]
+        lo = log_odds[:, sites]
+        return f0.T[:, None, :] + g.T[:, :, None] * lo.T[:, None, :]
+
+    se = _emit_batch(e_sites)
+
+    def _fwd(a, x):
+        e, t = x
+        a_new = _log_matvec_batch(a, t) + e
+        return a_new, a_new
+    _, alphas_inner = jax.lax.scan(_fwd, ckpt, (se[:C - 1], st[:C - 1]))
+    alphas = jnp.concatenate([ckpt[None], alphas_inner], axis=0)
+
+    se_bwd = jnp.flip(se, axis=0)
+    st_bwd = jnp.flip(st, axis=0)
+    def _bwd(beta, x):
+        e, t = x
+        b_new = _log_matvec_batch_transpose(e + beta, t)
+        return b_new, b_new
+    beta_left, betas_rev = jax.lax.scan(_bwd, beta_right, (se_bwd, st_bwd))
+    betas = jnp.flip(betas_rev, axis=0)
+
+    log_gamma = alphas + betas
+    log_norm = jax.nn.logsumexp(log_gamma, axis=2, keepdims=True)
+    gamma_seg = jnp.exp(log_gamma - log_norm)
+
+    return gamma_seg, beta_left
+
+
+def _streaming_decode_checkpointed(
+    geno_j, log_f0, log_odds, seg_trans, site_idx, log_prior,
+    *, C, S, n_fwd_steps, emit_pad,
+    compute_max_post=True,
+) -> DecodeResult:
+    """Checkpointed forward-backward that writes decode outputs per segment.
+
+    Never materializes the full (B, T, A) posterior tensor. The forward
+    checkpoint pass and per-segment backward are JIT-compiled; the outer
+    segment loop stays in Python for D2H transfers.
+
+    Parameters
+    ----------
+    geno_j : (B, T_padded) uint8 — already padded
+    log_f0 : (A, T_padded) float32
+    log_odds : (A, T_padded) float32
+    seg_trans : (S, C, A, A) float32
+    site_idx : (S, C) int32
+    log_prior : (A,) float32
+    C, S, n_fwd_steps, emit_pad : static ints
+    compute_max_post : whether to compute max_post and global_sums
+
+    Returns
+    -------
+    DecodeResult
+    """
+    B = geno_j.shape[0]
+    T = geno_j.shape[1] - emit_pad
+    A = log_prior.shape[0]
+
+    checkpoints = _streaming_decode_fwd_checkpoints(
+        geno_j, log_f0, log_odds, seg_trans, site_idx, log_prior,
+        C=C, S=S, n_fwd_steps=n_fwd_steps, emit_pad=emit_pad,
+    )
+
     calls = _np.zeros((B, T), dtype=_np.int8)
     max_post = _np.zeros((B, T), dtype=_np.float32) if compute_max_post else None
     global_sums = jnp.zeros((B, A))
@@ -797,46 +725,19 @@ def _streaming_decode_checkpointed(
     beta_right = jnp.zeros((B, A))
 
     for g_rev in range(S):
-        g = S - 1 - g_rev  # forward-order segment index
+        g = S - 1 - g_rev
 
-        ckpt = checkpoints[g]
-        st = seg_trans[g]
-        e_sites = site_idx[g]
+        gamma_seg, beta_left = _streaming_decode_segment(
+            geno_j, log_f0, log_odds,
+            checkpoints[g], seg_trans[g], site_idx[g], beta_right,
+            C=C,
+        )
 
-        se = _emit_batch(e_sites)  # (C, B, A)
-
-        # Forward recompute from checkpoint
-        def _fwd(a, x):
-            e, t = x
-            a_new = _log_matvec_batch(a, t) + e
-            return a_new, a_new
-
-        _, alphas_inner = jax.lax.scan(_fwd, ckpt, (se[:C - 1], st[:C - 1]))
-        alphas = jnp.concatenate([ckpt[None], alphas_inner], axis=0)
-
-        # Backward
-        se_bwd = jnp.flip(se, axis=0)
-        st_bwd = jnp.flip(st, axis=0)
-
-        def _bwd(beta, x):
-            e, t = x
-            b_new = _log_matvec_batch_transpose(e + beta, t)
-            return b_new, b_new
-
-        beta_left, betas_rev = jax.lax.scan(_bwd, beta_right, (se_bwd, st_bwd))
-        betas = jnp.flip(betas_rev, axis=0)
-
-        # Posteriors
-        log_gamma = alphas + betas
-        log_norm = jax.nn.logsumexp(log_gamma, axis=2, keepdims=True)
-        gamma_seg = jnp.exp(log_gamma - log_norm)  # (C, B, A)
-
-        # Write valid sites to host
         t_start = g * C
         t_end = min(t_start + C, T)
         n_valid = t_end - t_start
         if n_valid > 0:
-            gamma_np = _np.array(gamma_seg[:n_valid])  # (n_valid, B, A) → host
+            gamma_np = _np.array(gamma_seg[:n_valid])
             calls[:, t_start:t_end] = gamma_np.argmax(axis=2).astype(_np.int8).T
             if compute_max_post:
                 max_post[:, t_start:t_end] = gamma_np.max(axis=2).T
@@ -1219,7 +1120,8 @@ def forward_backward_em(
     A = model.n_ancestries
 
     # Precompute model-derived tensors once (shared across all batches).
-    precomputed = _precompute_streaming_tensors(model, d_morgan, T)
+    pc = _precompute_streaming_tensors(model, d_morgan, T)
+    emit_pad = pc["emit_pad"]
 
     weighted_counts = jnp.zeros((A, T))
     total_weights = jnp.zeros((A, T))
@@ -1228,9 +1130,17 @@ def forward_backward_em(
 
     for start in range(0, H, batch_size):
         end = min(start + batch_size, H)
+        batch_geno = geno[start:end]
+        if emit_pad > 0:
+            batch_geno = jnp.concatenate(
+                [batch_geno, jnp.zeros((end - start, emit_pad), dtype=batch_geno.dtype)],
+                axis=1,
+            )
         wc_b, tw_b, mu_b, sw_b = _streaming_em_checkpointed(
-            geno[start:end], model, d_morgan,
-            _precomputed=precomputed,
+            batch_geno, pc["log_f0"], pc["log_odds"], pc["seg_trans"],
+            pc["site_idx"], pc["gamma_site_idx"], pc["log_prior"],
+            C=pc["C"], S=pc["S"], n_fwd_steps=pc["n_fwd_steps"],
+            emit_pad=emit_pad,
         )
         weighted_counts = weighted_counts + wc_b
         total_weights = total_weights + tw_b
@@ -1290,12 +1200,23 @@ def forward_backward_bucketed_em(
             gen_since_admix=float(model.bucket_centers[b]),
             allele_freq=model.allele_freq,
         )
+        b_pc = _precompute_streaming_tensors(b_model, d_morgan, T)
+        b_emit_pad = b_pc["emit_pad"]
 
         for s in range(0, n_b, batch_size):
             e = min(s + batch_size, n_b)
             batch_hap_idx = hap_idx[s:e]
+            batch_geno = geno[batch_hap_idx]
+            if b_emit_pad > 0:
+                batch_geno = jnp.concatenate(
+                    [batch_geno, jnp.zeros((e - s, b_emit_pad), dtype=batch_geno.dtype)],
+                    axis=1,
+                )
             wc_b, tw_b, mu_b, sw_b = _streaming_em_checkpointed(
-                geno[batch_hap_idx], b_model, d_morgan,
+                batch_geno, b_pc["log_f0"], b_pc["log_odds"], b_pc["seg_trans"],
+                b_pc["site_idx"], b_pc["gamma_site_idx"], b_pc["log_prior"],
+                C=b_pc["C"], S=b_pc["S"], n_fwd_steps=b_pc["n_fwd_steps"],
+                emit_pad=b_emit_pad,
             )
             weighted_counts = weighted_counts + wc_b
             total_weights = total_weights + tw_b
@@ -1342,7 +1263,8 @@ def forward_backward_decode(
     H, T = geno.shape
     A = model.n_ancestries
 
-    precomputed = _precompute_streaming_tensors(model, d_morgan, T)
+    pc = _precompute_streaming_tensors(model, d_morgan, T)
+    emit_pad = pc["emit_pad"]
 
     calls = _np.zeros((H, T), dtype=_np.int8)
     max_post = _np.zeros((H, T), dtype=_np.float32) if compute_max_post else None
@@ -1350,10 +1272,18 @@ def forward_backward_decode(
 
     for start in range(0, H, batch_size):
         end = min(start + batch_size, H)
+        batch_geno = geno[start:end]
+        if emit_pad > 0:
+            batch_geno = jnp.concatenate(
+                [batch_geno, jnp.zeros((end - start, emit_pad), dtype=batch_geno.dtype)],
+                axis=1,
+            )
         result = _streaming_decode_checkpointed(
-            geno[start:end], model, d_morgan,
+            batch_geno, pc["log_f0"], pc["log_odds"], pc["seg_trans"],
+            pc["site_idx"], pc["log_prior"],
+            C=pc["C"], S=pc["S"], n_fwd_steps=pc["n_fwd_steps"],
+            emit_pad=emit_pad,
             compute_max_post=compute_max_post,
-            _precomputed=precomputed,
         )
         calls[start:end] = result.calls
         if compute_max_post:
@@ -1403,12 +1333,23 @@ def forward_backward_bucketed_decode(
             gen_since_admix=float(model.bucket_centers[b]),
             allele_freq=model.allele_freq,
         )
+        b_pc = _precompute_streaming_tensors(b_model, d_morgan, T)
+        b_emit_pad = b_pc["emit_pad"]
 
         for s in range(0, n_b, batch_size):
             e = min(s + batch_size, n_b)
             batch_hap_idx = hap_idx[s:e]
+            batch_geno = geno[batch_hap_idx]
+            if b_emit_pad > 0:
+                batch_geno = jnp.concatenate(
+                    [batch_geno, jnp.zeros((e - s, b_emit_pad), dtype=batch_geno.dtype)],
+                    axis=1,
+                )
             result = _streaming_decode_checkpointed(
-                geno[batch_hap_idx], b_model, d_morgan,
+                batch_geno, b_pc["log_f0"], b_pc["log_odds"], b_pc["seg_trans"],
+                b_pc["site_idx"], b_pc["log_prior"],
+                C=b_pc["C"], S=b_pc["S"], n_fwd_steps=b_pc["n_fwd_steps"],
+                emit_pad=b_emit_pad,
                 compute_max_post=compute_max_post,
             )
             calls[batch_hap_idx] = result.calls
