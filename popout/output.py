@@ -249,27 +249,129 @@ def write_model(
     log.info("Wrote model to %s (+ .npz)", out_path)
 
 
-def write_decode_npz(
+def write_decode_parquet(
     result: AncestryResult,
     chrom_data: ChromData,
     out_path: str,
     include_max_post: bool = True,
 ) -> None:
-    """Write per-chromosome dense decode arrays for use by 'popout convert'.
+    """Write per-chromosome dense decode arrays as a Parquet file.
 
-    Contents:
-      calls:     (H, T) uint8
-      pos_bp:    (T,)   int64
-      chrom:     str
-      max_post:  (H, T) float16  [only if include_max_post and available]
+    Uses binary-blob-per-haplotype column layout with ZSTD-1 compression.
+    On-disk size matches np.savez_compressed; write is ~14x faster at
+    biobank scale because ZSTD releases the GIL and Parquet compresses
+    columns in parallel.
+
+    File contents:
+        Column ``calls``    : large_binary, H rows x T bytes (uint8)
+        Column ``max_post`` : large_binary, H rows x 2T bytes (float16)  [optional]
+    Metadata: T, K, chrom, dtypes, pos_bp serialized as int64 bytes.
+
+    Uses pa.large_binary() (int64 offsets) because H*T exceeds 2^31 bytes
+    at biobank scale (e.g. H=1.07M, T=9471 -> 10.1 GB).
     """
-    calls = np.asarray(result.calls, dtype=np.uint8)
-    save_dict = dict(
-        calls=calls,
-        pos_bp=np.asarray(chrom_data.pos_bp, dtype=np.int64),
-        chrom=np.array(chrom_data.chrom),
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    calls = np.ascontiguousarray(np.asarray(result.calls, dtype=np.uint8))
+    H, T = calls.shape
+    K = int(result.model.n_ancestries)
+    pos_bp = np.ascontiguousarray(np.asarray(chrom_data.pos_bp, dtype=np.int64))
+    assert pos_bp.shape == (T,), f"pos_bp length {pos_bp.shape[0]} != T={T}"
+
+    calls_buf = pa.py_buffer(calls.tobytes())
+    calls_offsets = pa.py_buffer(
+        np.arange(0, H * T + 1, T, dtype=np.int64).tobytes()
     )
+    calls_col = pa.Array.from_buffers(
+        pa.large_binary(), H, [None, calls_offsets, calls_buf],
+    )
+
+    columns = {"calls": calls_col}
+    metadata = {
+        b"T": str(T).encode("ascii"),
+        b"K": str(K).encode("ascii"),
+        b"chrom": str(chrom_data.chrom).encode("ascii"),
+        b"calls_dtype": b"uint8",
+        b"pos_bp": pos_bp.tobytes(),
+    }
+
     if include_max_post and result.decode is not None and result.decode.max_post is not None:
-        save_dict["max_post"] = np.asarray(result.decode.max_post, dtype=np.float16)
-    np.savez_compressed(out_path, **save_dict)
-    log.info("Wrote decode npz to %s", out_path)
+        max_post = np.ascontiguousarray(
+            np.asarray(result.decode.max_post, dtype=np.float16)
+        )
+        assert max_post.shape == (H, T), (
+            f"max_post shape {max_post.shape} != ({H}, {T})"
+        )
+        mp_buf = pa.py_buffer(max_post.tobytes())
+        mp_offsets = pa.py_buffer(
+            np.arange(0, H * T * 2 + 1, T * 2, dtype=np.int64).tobytes()
+        )
+        mp_col = pa.Array.from_buffers(
+            pa.large_binary(), H, [None, mp_offsets, mp_buf],
+        )
+        columns["max_post"] = mp_col
+        metadata[b"max_post_dtype"] = b"float16"
+
+    schema = pa.schema(
+        [(name, col.type) for name, col in columns.items()],
+        metadata=metadata,
+    )
+    table = pa.table(columns, schema=schema)
+
+    pq.write_table(
+        table, out_path,
+        compression="zstd",
+        compression_level=1,
+        row_group_size=H,
+        use_dictionary=False,
+    )
+    log.info("Wrote decode parquet to %s", out_path)
+
+
+def read_decode_parquet(path: str) -> dict:
+    """Read a decode parquet file.
+
+    Returns dict with keys:
+        calls    : (H, T) uint8
+        max_post : (H, T) float16  [present only if the file has it]
+        pos_bp   : (T,)  int64
+        chrom    : str
+        T, K     : int
+    """
+    import pyarrow.parquet as pq
+
+    table = pq.read_table(path)
+    meta = table.schema.metadata or {}
+    T = int(meta[b"T"])
+    K = int(meta[b"K"])
+    chrom = meta[b"chrom"].decode("ascii")
+    pos_bp = np.frombuffer(meta[b"pos_bp"], dtype=np.int64).copy()
+    assert pos_bp.shape == (T,)
+
+    calls_col = table.column("calls")
+    H = len(calls_col)
+    calls_combined = calls_col.combine_chunks()
+    calls_bytes = b"".join(calls_combined.to_pylist())
+    assert len(calls_bytes) == H * T, (
+        f"calls buffer {len(calls_bytes)} != H*T {H * T}"
+    )
+    calls = np.frombuffer(calls_bytes, dtype=np.uint8).reshape(H, T)
+
+    out = {
+        "calls": calls,
+        "pos_bp": pos_bp,
+        "chrom": chrom,
+        "T": T,
+        "K": K,
+    }
+
+    if "max_post" in table.column_names:
+        mp_combined = table.column("max_post").combine_chunks()
+        mp_bytes = b"".join(mp_combined.to_pylist())
+        assert len(mp_bytes) == H * T * 2
+        out["max_post"] = np.frombuffer(
+            mp_bytes, dtype=np.float16,
+        ).reshape(H, T)
+
+    return out

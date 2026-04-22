@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from popout.datatypes import AncestryModel, AncestryResult, ChromData, DecodeResult
-from popout.output import write_model, write_ancestry_tracts, write_decode_npz
+from popout.output import write_model, write_ancestry_tracts, write_decode_parquet, read_decode_parquet
 
 
 def _make_minimal_result(n_ancestries=3, n_haps=10, n_sites=100):
@@ -247,8 +247,8 @@ def test_block_emissions_no_max_post_by_default():
     assert result.decode.max_post is None
 
 
-def test_write_decode_npz():
-    """write_decode_npz round-trips calls, pos_bp, and max_post."""
+def test_write_decode_parquet_roundtrip():
+    """write_decode_parquet round-trips calls, pos_bp, max_post, T, K, chrom."""
     import jax.numpy as jnp
 
     n_ancestries, n_haps, n_sites = 3, 6, 50
@@ -273,21 +273,22 @@ def test_write_decode_npz():
     )
 
     with tempfile.TemporaryDirectory() as tmp:
-        out_path = str(Path(tmp) / "test.chr1.decode.npz")
-        write_decode_npz(result, chrom_data, out_path, include_max_post=True)
+        out_path = str(Path(tmp) / "test.chr1.decode.parquet")
+        write_decode_parquet(result, chrom_data, out_path, include_max_post=True)
 
-        data = np.load(out_path)
+        data = read_decode_parquet(out_path)
         np.testing.assert_array_equal(data["calls"], calls.astype(np.uint8))
         np.testing.assert_array_equal(data["pos_bp"], pos_bp)
-        assert str(data["chrom"]) == "chr1"
-        # float16 precision: about 3 decimal digits
-        np.testing.assert_allclose(
-            data["max_post"].astype(np.float32), max_post_orig, atol=0.002,
-        )
+        assert data["chrom"] == "chr1"
+        assert data["T"] == n_sites
+        assert data["K"] == n_ancestries
+        # float16 precision: exact bit-pattern round-trip
+        expected_f16 = max_post_orig.astype(np.float16)
+        np.testing.assert_array_equal(data["max_post"], expected_f16)
 
 
-def test_write_decode_npz_no_max_post():
-    """write_decode_npz omits max_post when include_max_post=False."""
+def test_write_decode_parquet_no_max_post():
+    """write_decode_parquet omits max_post when include_max_post=False."""
     import jax.numpy as jnp
 
     n_ancestries, n_haps, n_sites = 2, 4, 20
@@ -309,9 +310,9 @@ def test_write_decode_npz_no_max_post():
     )
 
     with tempfile.TemporaryDirectory() as tmp:
-        out_path = str(Path(tmp) / "test.chr2.decode.npz")
-        write_decode_npz(result, chrom_data, out_path, include_max_post=False)
+        out_path = str(Path(tmp) / "test.chr2.decode.parquet")
+        write_decode_parquet(result, chrom_data, out_path, include_max_post=False)
 
-        data = np.load(out_path)
+        data = read_decode_parquet(out_path)
         assert "max_post" not in data
         np.testing.assert_array_equal(data["calls"], calls.astype(np.uint8))
