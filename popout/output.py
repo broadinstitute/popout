@@ -71,8 +71,11 @@ def write_ancestry_tracts(
             cols.append("mean_posterior")
         f.write("\t".join(cols) + "\n")
 
+        from ._memcheck import check_no_copy
+
         for result, cdata in zip(results, chrom_data_list):
-            calls = np.array(result.calls)  # (n_haps, n_sites) int8
+            calls = np.asarray(result.calls)  # (n_haps, n_sites) int8
+            check_no_copy("write_ancestry_tracts:calls", result.calls, calls)
             pos_bp = cdata.pos_bp           # (n_sites,) int64
             chrom = cdata.chrom
             n_sites = cdata.n_sites
@@ -254,6 +257,7 @@ def write_decode_parquet(
     chrom_data: ChromData,
     out_path: str,
     include_max_post: bool = True,
+    hap_chunk: int = 50_000,
 ) -> None:
     """Write per-chromosome dense decode arrays as a Parquet file.
 
@@ -261,6 +265,11 @@ def write_decode_parquet(
     On-disk size matches np.savez_compressed; write is ~14x faster at
     biobank scale because ZSTD releases the GIL and Parquet compresses
     columns in parallel.
+
+    Streams in ``hap_chunk``-sized row groups so peak transient memory is
+    O(hap_chunk * T * 2) rather than O(H * T).  The only full-H arrays
+    held are the input ``result.calls`` and ``result.decode.max_post``
+    (which already exist as part of the result).
 
     File contents:
         Column ``calls``    : large_binary, H rows x T bytes (uint8)
@@ -273,21 +282,23 @@ def write_decode_parquet(
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    calls = np.ascontiguousarray(np.asarray(result.calls, dtype=np.uint8))
-    H, T = calls.shape
+    from ._memcheck import check_no_copy
+
+    # Zero-copy uint8 view of int8 calls — same byte width, no allocation
+    calls_arr = np.asarray(result.calls)
+    if calls_arr.dtype != np.uint8:
+        calls_arr = calls_arr.view(np.uint8)
+    calls_arr = np.ascontiguousarray(calls_arr)
+    check_no_copy("write_decode_parquet:calls", result.calls, calls_arr)
+    H, T = calls_arr.shape
     K = int(result.model.n_ancestries)
     pos_bp = np.ascontiguousarray(np.asarray(chrom_data.pos_bp, dtype=np.int64))
     assert pos_bp.shape == (T,), f"pos_bp length {pos_bp.shape[0]} != T={T}"
 
-    calls_buf = pa.py_buffer(calls.tobytes())
-    calls_offsets = pa.py_buffer(
-        np.arange(0, H * T + 1, T, dtype=np.int64).tobytes()
-    )
-    calls_col = pa.Array.from_buffers(
-        pa.large_binary(), H, [None, calls_offsets, calls_buf],
-    )
+    has_mp = (include_max_post
+              and result.decode is not None
+              and result.decode.max_post is not None)
 
-    columns = {"calls": calls_col}
     metadata = {
         b"T": str(T).encode("ascii"),
         b"K": str(K).encode("ascii"),
@@ -295,42 +306,57 @@ def write_decode_parquet(
         b"calls_dtype": b"uint8",
         b"pos_bp": pos_bp.tobytes(),
     }
-
-    if include_max_post and result.decode is not None and result.decode.max_post is not None:
-        max_post = np.ascontiguousarray(
-            np.asarray(result.decode.max_post, dtype=np.float16)
-        )
-        assert max_post.shape == (H, T), (
-            f"max_post shape {max_post.shape} != ({H}, {T})"
-        )
-        mp_buf = pa.py_buffer(max_post.tobytes())
-        mp_offsets = pa.py_buffer(
-            np.arange(0, H * T * 2 + 1, T * 2, dtype=np.int64).tobytes()
-        )
-        mp_col = pa.Array.from_buffers(
-            pa.large_binary(), H, [None, mp_offsets, mp_buf],
-        )
-        columns["max_post"] = mp_col
+    if has_mp:
         metadata[b"max_post_dtype"] = b"float16"
 
-    schema = pa.schema(
-        [(name, col.type) for name, col in columns.items()],
-        metadata=metadata,
-    )
-    table = pa.table(columns, schema=schema)
+    schema_fields = [("calls", pa.large_binary())]
+    if has_mp:
+        schema_fields.append(("max_post", pa.large_binary()))
+    schema = pa.schema(schema_fields, metadata=metadata)
 
-    pq.write_table(
-        table, out_path,
-        compression="zstd",
-        compression_level=1,
-        row_group_size=H,
+    with pq.ParquetWriter(
+        out_path, schema,
+        compression="zstd", compression_level=1,
         use_dictionary=False,
-    )
+    ) as writer:
+        for cs in range(0, H, hap_chunk):
+            ce = min(cs + hap_chunk, H)
+            chunk_H = ce - cs
+
+            # calls column — zero-copy slice of the contiguous view
+            c_chunk = calls_arr[cs:ce]
+            c_offsets = np.arange(0, chunk_H * T + 1, T, dtype=np.int64)
+            c_col = pa.Array.from_buffers(
+                pa.large_binary(), chunk_H,
+                [None, pa.py_buffer(c_offsets), pa.py_buffer(c_chunk)],
+            )
+            batch_cols = {"calls": c_col}
+
+            if has_mp:
+                # fp32→fp16 cast only for this chunk; ~1 GB transient at 50k×10k
+                mp_chunk = np.ascontiguousarray(
+                    result.decode.max_post[cs:ce].astype(np.float16)
+                )
+                mp_offsets = np.arange(
+                    0, chunk_H * T * 2 + 1, T * 2, dtype=np.int64,
+                )
+                mp_col = pa.Array.from_buffers(
+                    pa.large_binary(), chunk_H,
+                    [None, pa.py_buffer(mp_offsets), pa.py_buffer(mp_chunk)],
+                )
+                batch_cols["max_post"] = mp_col
+
+            batch = pa.record_batch(batch_cols, schema=schema)
+            writer.write_batch(batch)
+
     log.info("Wrote decode parquet to %s", out_path)
 
 
 def read_decode_parquet(path: str) -> dict:
     """Read a decode parquet file.
+
+    Streams row groups so peak memory is the preallocated output arrays
+    plus one row group's decompressed buffers — not the full file twice.
 
     Returns dict with keys:
         calls    : (H, T) uint8
@@ -341,22 +367,44 @@ def read_decode_parquet(path: str) -> dict:
     """
     import pyarrow.parquet as pq
 
-    table = pq.read_table(path)
-    meta = table.schema.metadata or {}
+    pf = pq.ParquetFile(path)
+    meta = pf.schema_arrow.metadata or {}
     T = int(meta[b"T"])
     K = int(meta[b"K"])
     chrom = meta[b"chrom"].decode("ascii")
     pos_bp = np.frombuffer(meta[b"pos_bp"], dtype=np.int64).copy()
     assert pos_bp.shape == (T,)
 
-    calls_col = table.column("calls")
-    H = len(calls_col)
-    calls_combined = calls_col.combine_chunks()
-    calls_bytes = b"".join(calls_combined.to_pylist())
-    assert len(calls_bytes) == H * T, (
-        f"calls buffer {len(calls_bytes)} != H*T {H * T}"
-    )
-    calls = np.frombuffer(calls_bytes, dtype=np.uint8).reshape(H, T)
+    H = pf.metadata.num_rows
+    has_mp = "max_post" in pf.schema_arrow.names
+
+    # Preallocate output arrays — one O(H·T) allocation each
+    calls = np.empty((H, T), dtype=np.uint8)
+    max_post = np.empty((H, T), dtype=np.float16) if has_mp else None
+
+    row = 0
+    for rg_idx in range(pf.num_row_groups):
+        rg = pf.read_row_group(rg_idx)
+        c_col = rg.column("calls")
+
+        for chunk in c_col.chunks:
+            n_rows = len(chunk)
+            # buffers(): [validity, offsets, data] for large_binary
+            data_buf = chunk.buffers()[2]
+            flat = np.frombuffer(data_buf, dtype=np.uint8, count=n_rows * T)
+            calls[row:row + n_rows] = flat.reshape(n_rows, T)
+
+            if has_mp:
+                mp_chunk = rg.column("max_post").chunks[0]
+                mp_buf = mp_chunk.buffers()[2]
+                mp_flat = np.frombuffer(
+                    mp_buf, dtype=np.float16, count=n_rows * T,
+                )
+                max_post[row:row + n_rows] = mp_flat.reshape(n_rows, T)
+
+            row += n_rows
+
+    assert row == H, f"read {row} rows, expected {H}"
 
     out = {
         "calls": calls,
@@ -365,13 +413,7 @@ def read_decode_parquet(path: str) -> dict:
         "T": T,
         "K": K,
     }
-
-    if "max_post" in table.column_names:
-        mp_combined = table.column("max_post").combine_chunks()
-        mp_bytes = b"".join(mp_combined.to_pylist())
-        assert len(mp_bytes) == H * T * 2
-        out["max_post"] = np.frombuffer(
-            mp_bytes, dtype=np.float16,
-        ).reshape(H, T)
+    if has_mp:
+        out["max_post"] = max_post
 
     return out
