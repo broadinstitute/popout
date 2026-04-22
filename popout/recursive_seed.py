@@ -743,17 +743,18 @@ def _run_k2_em_split(
             allele_freq=new_freq,
         )
 
-    # Final decode to get per-haplotype labels
-    from .hmm import forward_backward_decode
-    decode = forward_backward_decode(sub_geno_j, model, d_morgan, batch_size)
-    if not bool(jnp.all(jnp.isfinite(decode.global_sums))):
+    # Final decode to get per-haplotype ancestry labels (sums only —
+    # skip allocating the (H, T) calls/max_post arrays).
+    from .hmm import forward_backward_ancestry_sums
+    global_sums = forward_backward_ancestry_sums(sub_geno_j, model, d_morgan, batch_size)
+    if not bool(np.all(np.isfinite(global_sums))):
         raise RuntimeError(
             "K=2 EM produced non-finite posteriors during final decode. "
             "This usually means a component collapsed (empty or near-empty "
             "cluster). Check gen_since_admix and seed responsibilities."
         )
-    hap_resp = decode.global_sums / T
-    labels = np.asarray(jnp.argmax(hap_resp, axis=1)).astype(np.int32)
+    hap_resp = global_sums / T
+    labels = np.argmax(hap_resp, axis=1).astype(np.int32)
 
     return labels
 

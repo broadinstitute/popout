@@ -13,6 +13,7 @@ from popout.hmm import (
     forward_backward_batched,
     forward_backward_em,
     forward_backward_decode,
+    forward_backward_ancestry_sums,
 )
 from popout.em import (
     init_model_soft,
@@ -142,6 +143,16 @@ def test_decode_result_matches_full():
         decode.global_sums, expected_gs, atol=1e-4,
         err_msg="global_sums mismatch",
     )
+
+
+def test_ancestry_sums_matches_decode():
+    """forward_backward_ancestry_sums must match decode.global_sums."""
+    _, geno, model, d_morgan = _make_model(n_samples=100, n_sites=150)
+
+    gs = forward_backward_ancestry_sums(geno, model, d_morgan, batch_size=50)
+    decode = forward_backward_decode(geno, model, d_morgan, batch_size=50)
+
+    np.testing.assert_allclose(gs, decode.global_sums, atol=1e-6)
 
 
 # -----------------------------------------------------------------------

@@ -687,6 +687,7 @@ def _streaming_decode_checkpointed(
     geno_j, log_f0, log_odds, seg_trans, site_idx, log_prior,
     *, C, S, n_fwd_steps, emit_pad,
     compute_max_post=True,
+    sums_only=False,
 ) -> DecodeResult:
     """Checkpointed forward-backward that writes decode outputs per segment.
 
@@ -704,6 +705,7 @@ def _streaming_decode_checkpointed(
     log_prior : (A,) float32
     C, S, n_fwd_steps, emit_pad : static ints
     compute_max_post : whether to compute max_post and global_sums
+    sums_only : when True, skip calls/max_post and return only global_sums
 
     Returns
     -------
@@ -718,8 +720,10 @@ def _streaming_decode_checkpointed(
         C=C, S=S, n_fwd_steps=n_fwd_steps, emit_pad=emit_pad,
     )
 
-    calls = _np.zeros((B, T), dtype=_np.int8)
-    max_post = _np.zeros((B, T), dtype=_np.float32) if compute_max_post else None
+    calls = None if sums_only else _np.zeros((B, T), dtype=_np.int8)
+    max_post = None if sums_only else (
+        _np.zeros((B, T), dtype=_np.float32) if compute_max_post else None
+    )
     global_sums = jnp.zeros((B, A))
 
     beta_right = jnp.zeros((B, A))
@@ -737,18 +741,23 @@ def _streaming_decode_checkpointed(
         t_end = min(t_start + C, T)
         n_valid = t_end - t_start
         if n_valid > 0:
-            gamma_np = _np.array(gamma_seg[:n_valid])
-            calls[:, t_start:t_end] = gamma_np.argmax(axis=2).astype(_np.int8).T
-            if compute_max_post:
-                max_post[:, t_start:t_end] = gamma_np.max(axis=2).T
+            if sums_only:
                 global_sums = global_sums + gamma_seg[:n_valid].sum(axis=0)
+            else:
+                gamma_np = _np.array(gamma_seg[:n_valid])
+                calls[:, t_start:t_end] = gamma_np.argmax(axis=2).astype(_np.int8).T
+                if compute_max_post:
+                    max_post[:, t_start:t_end] = gamma_np.max(axis=2).T
+                    global_sums = global_sums + gamma_seg[:n_valid].sum(axis=0)
 
         beta_right = beta_left
 
     return DecodeResult(
         calls=calls,
         max_post=max_post,
-        global_sums=_np.array(global_sums, dtype=_np.float64) if compute_max_post else None,
+        global_sums=_np.array(global_sums, dtype=_np.float64) if (
+            sums_only or compute_max_post
+        ) else None,
     )
 
 
@@ -1358,3 +1367,116 @@ def forward_backward_bucketed_decode(
                 global_sums[batch_hap_idx] = result.global_sums
 
     return DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)
+
+
+# ---------------------------------------------------------------------------
+# Lightweight ancestry-sums-only streaming decode
+# ---------------------------------------------------------------------------
+
+def forward_backward_ancestry_sums(
+    geno: jnp.ndarray,
+    model: AncestryModel,
+    d_morgan: jnp.ndarray,
+    batch_size: int = 50_000,
+) -> _np.ndarray:
+    """Streaming decode returning only per-haplotype ancestry sums.
+
+    Equivalent to ``forward_backward_decode(...).global_sums`` but never
+    allocates the (H, T) ``calls`` or ``max_post`` arrays, avoiding
+    ~135 GB of host memory at biobank scale.
+
+    Returns
+    -------
+    global_sums : (H, A) float64
+        Sum_t gamma[h, t, a] per haplotype.
+    """
+    H, T = geno.shape
+    A = model.n_ancestries
+
+    pc = _precompute_streaming_tensors(model, d_morgan, T)
+    emit_pad = pc["emit_pad"]
+
+    global_sums = _np.zeros((H, A), dtype=_np.float64)
+
+    for start in range(0, H, batch_size):
+        end = min(start + batch_size, H)
+        batch_geno = geno[start:end]
+        if emit_pad > 0:
+            batch_geno = jnp.concatenate(
+                [batch_geno, jnp.zeros((end - start, emit_pad), dtype=batch_geno.dtype)],
+                axis=1,
+            )
+        result = _streaming_decode_checkpointed(
+            batch_geno, pc["log_f0"], pc["log_odds"], pc["seg_trans"],
+            pc["site_idx"], pc["log_prior"],
+            C=pc["C"], S=pc["S"], n_fwd_steps=pc["n_fwd_steps"],
+            emit_pad=emit_pad,
+            sums_only=True,
+        )
+        global_sums[start:end] = result.global_sums
+
+    return global_sums
+
+
+def forward_backward_bucketed_ancestry_sums(
+    geno: jnp.ndarray,
+    model: AncestryModel,
+    d_morgan: jnp.ndarray,
+    batch_size: int = 50_000,
+) -> _np.ndarray:
+    """Bucketed streaming decode returning only per-haplotype ancestry sums.
+
+    Falls back to ``forward_backward_ancestry_sums`` when no bucket
+    assignments exist.
+
+    Returns
+    -------
+    global_sums : (H, A) float64
+    """
+    if model.bucket_assignments is None:
+        return forward_backward_ancestry_sums(geno, model, d_morgan, batch_size)
+
+    H, T = geno.shape
+    A = model.n_ancestries
+    B = len(model.bucket_centers)
+
+    global_sums = _np.zeros((H, A), dtype=_np.float64)
+
+    bucket_np = _np.array(model.bucket_assignments)
+
+    for b in range(B):
+        mask = bucket_np == b
+        n_b = int(mask.sum())
+        if n_b == 0:
+            continue
+
+        hap_idx = _np.where(mask)[0]
+
+        b_model = AncestryModel(
+            n_ancestries=A,
+            mu=model.mu,
+            gen_since_admix=float(model.bucket_centers[b]),
+            allele_freq=model.allele_freq,
+        )
+        b_pc = _precompute_streaming_tensors(b_model, d_morgan, T)
+        b_emit_pad = b_pc["emit_pad"]
+
+        for s in range(0, n_b, batch_size):
+            e = min(s + batch_size, n_b)
+            batch_hap_idx = hap_idx[s:e]
+            batch_geno = geno[batch_hap_idx]
+            if b_emit_pad > 0:
+                batch_geno = jnp.concatenate(
+                    [batch_geno, jnp.zeros((e - s, b_emit_pad), dtype=batch_geno.dtype)],
+                    axis=1,
+                )
+            result = _streaming_decode_checkpointed(
+                batch_geno, b_pc["log_f0"], b_pc["log_odds"], b_pc["seg_trans"],
+                b_pc["site_idx"], b_pc["log_prior"],
+                C=b_pc["C"], S=b_pc["S"], n_fwd_steps=b_pc["n_fwd_steps"],
+                emit_pad=b_emit_pad,
+                sums_only=True,
+            )
+            global_sums[batch_hap_idx] = result.global_sums
+
+    return global_sums
