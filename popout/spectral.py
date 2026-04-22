@@ -139,10 +139,11 @@ def seed_ancestry_soft(
 # ---------------------------------------------------------------------------
 
 def window_init_allele_freq(
-    geno: jnp.ndarray,
+    geno,
     global_freq: jnp.ndarray,
     n_ancestries: int,
     window_size: int = 50,
+    hap_batch: int = 50_000,
 ) -> jnp.ndarray:
     """Refine allele frequencies using local window assignments.
 
@@ -153,13 +154,36 @@ def window_init_allele_freq(
     This handles admixed haplotypes properly: a haplotype that's ancestry A
     in one window and ancestry B in another contributes its alleles to the
     correct population in each region.
+
+    Parameters
+    ----------
+    geno : (H, T) uint8 — numpy or jax array.  May be host-resident numpy
+        at biobank scale (too large for device).  Slices are uploaded per
+        window per haplotype batch.
+    global_freq : (A, T) — initial allele frequencies per ancestry
+    n_ancestries : A
+    window_size : SNPs per window
+    hap_batch : haplotypes per inner batch.  Controls peak device memory:
+        O(hap_batch * window_size * 4) bytes per batch.
+
+    Returns
+    -------
+    refined_freq : (A, T) jax array — fully materialized, no lazy
+        dependency on ``geno``.
     """
+    import numpy as _np
+
     H, T = geno.shape
     A = n_ancestries
     freq = jnp.clip(global_freq, 1e-4, 1.0 - 1e-4)
 
-    weighted_counts = jnp.zeros((A, T))
-    weighted_totals = jnp.zeros((A, T))
+    # Precompute log-probs once on device — (A, T), small
+    log_f1 = jnp.log(freq)
+    log_f0 = jnp.log(1.0 - freq)
+
+    # Host-side float64 accumulators — no lazy JAX graph across windows
+    weighted_counts = _np.zeros((A, T), dtype=_np.float64)
+    weighted_totals = _np.zeros((A, T), dtype=_np.float64)
 
     n_windows = (T + window_size - 1) // window_size
 
@@ -167,26 +191,37 @@ def window_init_allele_freq(
         start = w * window_size
         end = min(start + window_size, T)
         w_len = end - start
-        w_geno = geno[:, start:end].astype(jnp.float32)   # (H, W)
-        w_freq = freq[:, start:end]      # (A, W)
 
-        # Log-likelihood per haplotype per ancestry in this window
-        log_f1 = jnp.log(w_freq)         # (A, W)
-        log_f0 = jnp.log(1.0 - w_freq)   # (A, W)
-        # ll[h, a] = sum over sites in window
-        ll = jnp.einsum("ht,at->ha", w_geno, log_f1) + \
-             jnp.einsum("ht,at->ha", 1.0 - w_geno, log_f0)  # (H, A)
+        lf1 = log_f1[:, start:end]  # (A, W)
+        lf0 = log_f0[:, start:end]  # (A, W)
 
-        resp = jax.nn.softmax(ll, axis=1)  # (H, A)
+        w_counts = jnp.zeros((A, w_len))
+        w_total = jnp.zeros((A,))
 
-        w_counts = resp.T @ w_geno                          # (A, W)
-        w_totals = resp.sum(axis=0)[:, None] * jnp.ones((1, w_len))
+        for bs in range(0, H, hap_batch):
+            be = min(bs + hap_batch, H)
+            # jnp.asarray handles both numpy (uploads) and jax (no-op)
+            bg = jnp.asarray(geno[bs:be, start:end]).astype(jnp.float32)
 
-        weighted_counts = weighted_counts.at[:, start:end].set(w_counts)
-        weighted_totals = weighted_totals.at[:, start:end].set(w_totals)
+            ll = bg @ lf1.T + (1.0 - bg) @ lf0.T   # (B, A)
+            resp = jax.nn.softmax(ll, axis=1)        # (B, A)
+
+            w_counts = w_counts + resp.T @ bg        # (A, W)
+            w_total = w_total + resp.sum(axis=0)     # (A,)
+
+            # Force per-batch completion so device memory doesn't pile up
+            w_counts.block_until_ready()
+
+        # Write per-window results into host accumulators
+        weighted_counts[:, start:end] = _np.array(w_counts)
+        weighted_totals[:, start:end] = _np.array(
+            w_total[:, None] * jnp.ones((1, w_len))
+        )
 
     refined_freq = (weighted_counts + 0.5) / (weighted_totals + 1.0)
-    return refined_freq
+
+    # Return a fresh device array with no lazy dependency on geno
+    return jnp.asarray(refined_freq.astype(_np.float32))
 
 
 # ---------------------------------------------------------------------------
