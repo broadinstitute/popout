@@ -15,6 +15,23 @@ Usage:
 
 from __future__ import annotations
 
+# Thread-count hygiene. MUST run before numpy/scipy/jax import — the
+# BLAS thread pools size themselves at library-load time and ignore
+# env changes afterward.  All scientific imports in this module are
+# deferred inside main(), so module-level is early enough.
+import os as _os
+_cpu_count = _os.cpu_count() or 4
+_n_threads = _os.environ.get("POPOUT_BLAS_THREADS", str(_cpu_count))
+for _var in (
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+):
+    _os.environ.setdefault(_var, _n_threads)
+del _os, _cpu_count, _n_threads, _var
+
 import argparse
 import datetime
 import faulthandler
@@ -413,6 +430,14 @@ def main(argv: list[str] | None = None) -> None:
     if devices[0].device_kind == "cpu":
         log.warning("Running on CPU — this will be slow for large datasets.")
         log.warning("Install jax[cuda12] for GPU acceleration.")
+
+    try:
+        from threadpoolctl import threadpool_info
+        for p in threadpool_info():
+            log.info("threadpool: %s num_threads=%d",
+                     p.get("prefix", "?"), p.get("num_threads", -1))
+    except ImportError:
+        pass
 
     t0 = time.perf_counter()
 

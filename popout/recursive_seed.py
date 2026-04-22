@@ -21,6 +21,7 @@ from __future__ import annotations
 import heapq
 import itertools
 import logging
+import time
 from dataclasses import dataclass
 from typing import Optional
 
@@ -305,6 +306,7 @@ def recursive_split_seed(
             continue
 
         # Sub-PCA on this cluster's raw genotypes
+        t_prep_start = time.perf_counter()
         key, subkey = jax.random.split(key)
         if len(node.indices) == H:
             sub_geno = geno          # root node: avoid full-matrix host copy
@@ -320,6 +322,9 @@ def recursive_split_seed(
         should_split, gate_labels = _bic_split_test(sub_proj, subkey, bic_per_sample)
 
         if not should_split:
+            t_prep = time.perf_counter() - t_prep_start
+            log.info("node %s depth=%d n=%d: prep=%.1fs (no split)",
+                     node.path, node.depth, n, t_prep)
             leaves.append(node)
             split_log.append({
                 "path": node.path, "n": n,
@@ -337,8 +342,11 @@ def recursive_split_seed(
             bic_tolerance=balance_bic_tolerance, node_path=node.path,
             prior_labels=gate_labels,
         )
+        t_prep = time.perf_counter() - t_prep_start
 
         if selected_labels is None:
+            log.info("node %s depth=%d n=%d: prep=%.1fs (no valid split)",
+                     node.path, node.depth, n, t_prep)
             leaves.append(node)
             split_log.append({
                 "path": node.path, "n": n,
@@ -350,6 +358,7 @@ def recursive_split_seed(
         # Build seed responsibilities from GMM labels
         seed_resp_k2 = jax.nn.one_hot(selected_labels, 2, dtype=jnp.float32)
 
+        t_em_start = time.perf_counter()
         child_labels = _run_k2_em_split(
             geno, node.indices, chrom_data,
             geno_j=geno_j,
@@ -357,6 +366,9 @@ def recursive_split_seed(
             gen_since_admix=gen_since_admix,
             seed_resp=seed_resp_k2,
         )
+        t_em = time.perf_counter() - t_em_start
+        log.info("node %s depth=%d n=%d: prep=%.1fs em=%.1fs",
+                 node.path, node.depth, n, t_prep, t_em)
 
         idx_0 = node.indices[child_labels == 0]
         idx_1 = node.indices[child_labels == 1]
