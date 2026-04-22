@@ -31,6 +31,9 @@ task popout_task {
     Float   gen_since_admix    = 20.0
     Boolean export_panel       = false
     Boolean block_emissions    = false
+    Boolean write_probs        = false
+    Boolean write_dense_decode = false
+    String? ancestry_names      # comma list or gs:// URL to a TSV
 
     # Recursive seeding (--seed-method recursive)
     String  seed_method              = "gmm"
@@ -107,6 +110,9 @@ task popout_task {
     ~{if defined(thin_cm) then 'CMD="$CMD --thin-cm ~{thin_cm}"' else ''}
     ~{if export_panel then 'CMD="$CMD --export-panel"' else ''}
     ~{if block_emissions then 'CMD="$CMD --block-emissions"' else ''}
+    ~{if write_probs then 'CMD="$CMD --probs"' else ''}
+    ~{if write_dense_decode then 'CMD="$CMD --write-dense-decode"' else ''}
+    ~{if defined(ancestry_names) then 'CMD="$CMD --ancestry-names ~{ancestry_names}"' else ''}
 
     CMD="$CMD --seed-method ~{seed_method}"
     CMD="$CMD --recursive-merge-hellinger ~{recursive_merge_hellinger}"
@@ -156,6 +162,9 @@ task popout_task {
     File? checkpoint      = "~{output_prefix}.checkpoint.npz"
     File? checkpoint_meta = "~{output_prefix}.checkpoint.meta.json"
 
+    # Dense decode (produced when write_probs or write_dense_decode = true)
+    Array[File] decode_npz = glob("~{output_prefix}.chr*.decode.npz")
+
     # Post-EM checkpoint (produced when checkpoint_after_em = true)
     File? em_checkpoint   = "~{output_prefix}.em_checkpoint.npz"
   }
@@ -191,6 +200,9 @@ workflow popout {
     Float   gen_since_admix    = 20.0
     Boolean export_panel       = false
     Boolean block_emissions    = false
+    Boolean write_probs        = false
+    Boolean write_dense_decode = false
+    String? ancestry_names
 
     # Recursive seeding
     String  seed_method              = "gmm"
@@ -229,6 +241,9 @@ workflow popout {
       gen_since_admix = gen_since_admix,
       export_panel    = export_panel,
       block_emissions = block_emissions,
+      write_probs        = write_probs,
+      write_dense_decode = write_dense_decode,
+      ancestry_names     = ancestry_names,
       seed_method               = seed_method,
       freeze_anchors_iters      = freeze_anchors_iters,
       recursive_merge_hellinger = recursive_merge_hellinger,
@@ -265,6 +280,8 @@ workflow popout {
 
     File? checkpoint      = popout_task.checkpoint
     File? checkpoint_meta = popout_task.checkpoint_meta
+
+    Array[File] decode_npz = popout_task.decode_npz
 
     File? em_checkpoint   = popout_task.em_checkpoint
   }
