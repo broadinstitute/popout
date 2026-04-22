@@ -134,6 +134,8 @@ docker run --gpus all -v /data:/data \
 | `{prefix}.global.tsv` | Per-sample global ancestry proportions |
 | `{prefix}.tracts.tsv.gz` | Local ancestry tracts (BED-like intervals per haplotype) |
 | `{prefix}.model` | Fitted model parameters (n_ancestries, mu, T) |
+| `{prefix}.model.npz` | Full-precision model arrays (allele_freq, mu, ancestry_names) |
+| `{prefix}.chr{N}.decode.npz` | Per-chromosome dense calls + max_post (with `--probs` or `--write-dense-decode`) |
 | `{prefix}.stats.jsonl` | Timestamped runtime metrics (for live monitoring) |
 | `{prefix}.summary.json` | Aggregated QC stats (consumed by `popout report`) |
 | `{prefix}.panel.haplotypes.tsv` | Single-ancestry whole haplotypes (with `--export-panel`) |
@@ -143,6 +145,23 @@ docker run --gpus all -v /data:/data \
 
 See [docs/PANEL.md](docs/PANEL.md) for output formats, thresholds, and a
 worked example of the two-stage popout → FLARE pipeline.
+
+### Converting to FLARE-compatible VCF
+
+Use `popout convert` to transform native outputs into a FLARE-compatible `.anc.vcf.gz`:
+
+```bash
+# Run with --probs to generate per-chromosome decode files
+popout --pgen data/ --map map.txt --out results/cohort --probs
+
+# Convert to ancestry VCF
+popout convert --to vcf \
+    --popout-prefix results/cohort \
+    --input-vcf data/cohort.phased.vcf.gz \
+    --out results/cohort.anc.vcf.gz
+```
+
+This produces `{out}.anc.vcf.gz` (per-site AN1/AN2 calls, optional ANP1/ANP2 posteriors) and a companion `.global.anc.gz` with named ancestry columns. See [docs/CONVERT.md](docs/CONVERT.md) for full details, including the ANP1/ANP2 posterior approximation.
 
 ### Tract format
 
