@@ -3,7 +3,7 @@
 Input:
   {prefix}.tracts.tsv.gz          per-tract calls (required)
   {prefix}.model.npz              ancestry_names (optional; overridden by --ancestry-names)
-  {prefix}.chr{N}.decode.npz      per-chrom pos_bp, calls, optional max_post
+  {prefix}.chr{N}.decode.parquet   per-chrom pos_bp, calls, optional max_post
 
 Output:
   {out}.anc.vcf.gz                per-site AN1/AN2 (and ANP1/ANP2 if --probs)
@@ -43,10 +43,10 @@ def convert_to_vcf(args) -> None:
     log.info("Ancestry names (K=%d): %s", K, ancestry_names)
 
     # 2. Determine which chromosomes to convert.
-    available_chroms = _scan_decode_npz_chroms(prefix)
+    available_chroms = _scan_decode_parquet_chroms(prefix)
     if not available_chroms:
         raise ValueError(
-            f"No decode.npz files found matching {prefix}.chr*.decode.npz. "
+            f"No decode.parquet files found matching {prefix}.chr*.decode.parquet. "
             f"Run popout with --write-dense-decode or --probs first."
         )
     requested = (
@@ -70,7 +70,7 @@ def convert_to_vcf(args) -> None:
     total_written = 0
     total_skipped = 0
     for chrom in requested:
-        decode_path = prefix.parent / f"{prefix.name}.chr{chrom}.decode.npz"
+        decode_path = prefix.parent / f"{prefix.name}.chr{chrom}.decode.parquet"
         written, skipped = _convert_chrom(
             vcf_in, vcf_out, decode_path, chrom,
             write_probs=args.probs,
@@ -124,18 +124,18 @@ def _natural_sort_key(s: str):
     return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', s)]
 
 
-def _scan_decode_npz_chroms(prefix: Path) -> list[str]:
-    """Find available decode.npz files and extract chromosome names."""
-    pattern = f"{prefix.name}.chr*.decode.npz"
+def _scan_decode_parquet_chroms(prefix: Path) -> list[str]:
+    """Find available decode.parquet files and extract chromosome names."""
+    pattern = f"{prefix.name}.chr*.decode.parquet"
     parent = prefix.parent
     files = sorted(parent.glob(pattern))
     chroms = []
     for f in files:
-        # Extract chrom from {prefix.name}.chr{CHROM}.decode.npz
+        # Extract chrom from {prefix.name}.chr{CHROM}.decode.parquet
         stem = f.name
         # Remove prefix and suffix
         after_prefix = stem[len(prefix.name) + 4:]  # skip "{name}.chr"
-        chrom = after_prefix.removesuffix(".decode.npz")
+        chrom = after_prefix.removesuffix(".decode.parquet")
         chroms.append(chrom)
     return sorted(chroms, key=_natural_sort_key)
 
@@ -201,14 +201,16 @@ def _convert_chrom(
     n_ancestries: int,
 ) -> tuple[int, int]:
     """Convert one chromosome. Returns (written, skipped) site counts."""
-    data = np.load(str(decode_path))
-    calls = data["calls"]      # (H, T) uint8
-    pos_bp = data["pos_bp"]    # (T,) int64
-    max_post = data["max_post"] if "max_post" in data else None  # (H, T) float16
+    from .output import read_decode_parquet
+
+    data = read_decode_parquet(str(decode_path))
+    calls = data["calls"]          # (H, T) uint8
+    pos_bp = data["pos_bp"]        # (T,) int64
+    max_post = data.get("max_post")  # (H, T) float16 or None
 
     if write_probs and max_post is None:
         log.warning(
-            "chrom %s: --probs requested but decode.npz has no max_post; "
+            "chrom %s: --probs requested but decode.parquet has no max_post; "
             "ANP1/ANP2 will be omitted. Re-run popout with --probs.",
             chrom,
         )

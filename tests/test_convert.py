@@ -7,7 +7,11 @@ from pathlib import Path
 import numpy as np
 import pysam
 
+import jax.numpy as jnp
+
 from popout.convert import convert_to_vcf, _expand_max_post
+from popout.datatypes import AncestryModel, AncestryResult, ChromData, DecodeResult
+from popout.output import write_decode_parquet
 
 
 def _create_synthetic_popout_outputs(
@@ -25,18 +29,34 @@ def _create_synthetic_popout_outputs(
     n_haps = 2 * n_samples
 
     # Calls and max_post
-    calls = rng.integers(0, K, size=(n_haps, n_sites)).astype(np.uint8)
+    calls = rng.integers(0, K, size=(n_haps, n_sites)).astype(np.int8)
     pos_bp = np.arange(n_sites, dtype=np.int64) * 1000 + 100000
 
-    decode_dict = dict(
-        calls=calls,
-        pos_bp=pos_bp,
-        chrom=np.array(chrom),
-    )
+    max_post_arr = None
     if include_max_post:
-        max_post = (rng.random((n_haps, n_sites)) * 0.3 + 0.7).astype(np.float16)
-        decode_dict["max_post"] = max_post
-    np.savez_compressed(str(prefix) + f".chr{chrom}.decode.npz", **decode_dict)
+        max_post_arr = (rng.random((n_haps, n_sites)) * 0.3 + 0.7).astype(np.float32)
+
+    model = AncestryModel(
+        n_ancestries=K,
+        mu=jnp.array(rng.dirichlet(np.ones(K))),
+        gen_since_admix=20.0,
+        allele_freq=jnp.array(rng.random((K, n_sites)).astype(np.float32)),
+    )
+    decode = DecodeResult(calls=calls, max_post=max_post_arr) if max_post_arr is not None else None
+    result = AncestryResult(calls=calls, model=model, chrom=chrom, decode=decode)
+    chrom_data = ChromData(
+        geno=rng.integers(0, 2, size=(n_haps, n_sites)).astype(np.uint8),
+        pos_bp=pos_bp,
+        pos_cm=np.linspace(0, 10, n_sites),
+        chrom=chrom,
+    )
+    write_decode_parquet(
+        result, chrom_data,
+        str(prefix) + f".chr{chrom}.decode.parquet",
+        include_max_post=include_max_post,
+    )
+    # Read back calls as uint8 for comparison (write_decode_parquet casts to uint8)
+    calls = calls.astype(np.uint8)
 
     # Model npz
     model_dict = dict(
@@ -129,8 +149,8 @@ def test_convert_roundtrip_via_parse_flare():
         assert ts.label_map == {0: "afr", 1: "eas", 2: "eur"}
 
 
-def test_convert_missing_decode_npz_fails():
-    """Convert with no decode.npz files raises a clear error."""
+def test_convert_missing_decode_parquet_fails():
+    """Convert with no decode.parquet files raises a clear error."""
     with tempfile.TemporaryDirectory() as tmp:
         prefix = Path(tmp) / "nonexistent"
         # Create a minimal model.npz so it gets past that check
@@ -150,7 +170,7 @@ def test_convert_missing_decode_npz_fails():
             convert_to_vcf(Args())
             assert False, "Should have raised ValueError"
         except ValueError as e:
-            assert "No decode.npz files found" in str(e)
+            assert "No decode.parquet files found" in str(e)
 
 
 def test_convert_thinned_sites_skip_vs_fill():
