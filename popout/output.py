@@ -91,7 +91,7 @@ def write_ancestry_tracts(
             max_post = None
             if write_posteriors:
                 if result.decode is not None and result.decode.max_post is not None:
-                    max_post = result.decode.max_post          # (H, T) float32
+                    max_post = result.decode.max_post          # (H, T) float16
                 elif result.posteriors is not None:
                     # Legacy fallback for test fixtures that still populate posteriors.
                     max_post = np.asarray(result.posteriors).max(axis=2)  # (H, T)
@@ -136,7 +136,7 @@ def write_ancestry_tracts(
             if max_post is None and result.decode is not None and result.decode.max_post is not None:
                 max_post = result.decode.max_post
             if max_post is not None:
-                confidence_sum += float(max_post.sum())
+                confidence_sum += float(max_post.sum(dtype=np.float32))
                 confidence_count += max_post.size
 
     log.info("Wrote %d ancestry tracts to %s", n_tracts, out_path)
@@ -333,7 +333,6 @@ def write_decode_parquet(
             batch_cols = {"calls": c_col}
 
             if has_mp:
-                # fp32→fp16 cast only for this chunk; ~1 GB transient at 50k×10k
                 mp_chunk = np.ascontiguousarray(
                     result.decode.max_post[cs:ce].astype(np.float16)
                 )

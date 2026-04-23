@@ -845,7 +845,7 @@ def run_em(
         calls = np.empty((H_total, chrom_data.n_sites), dtype=np.int8)
         global_sums = np.zeros((H_total, n_anc), dtype=np.float64)
         max_post = (
-            np.empty((H_total, chrom_data.n_sites), dtype=np.float32)
+            np.empty((H_total, chrom_data.n_sites), dtype=np.float16)
             if write_dense_decode else None
         )
         for bs in range(0, H_total, block_batch):
@@ -868,12 +868,16 @@ def run_em(
                 dtype=np.float64,
             )
             if max_post is not None:
-                max_post_block = np.array(jnp.max(gb_chunk, axis=2), dtype=np.float32)
+                max_post_block = np.array(jnp.max(gb_chunk, axis=2), dtype=np.float16)
                 max_post[bs:be] = max_post_block[:, site_to_block]
             del gb_chunk
             # Expand calls to per-site via integer gather (int8, no A dimension)
             calls[bs:be] = calls_block[:, site_to_block]
             log.info("  decode chunk %d–%d / %d", bs, be, H_total)
+        if max_post is not None:
+            assert max_post.dtype == np.float16, (
+                f"max_post must be float16 for memory; got {max_post.dtype}"
+            )
         decode = DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)
         result = AncestryResult(
             calls=calls, model=model, chrom=chrom_data.chrom,

@@ -250,7 +250,7 @@ class DecodeResult:
     """
 
     calls: np.ndarray              # (H, T) int8 — hard ancestry calls
-    max_post: Optional[np.ndarray] = None  # (H, T) float32 — max posterior per site
+    max_post: Optional[np.ndarray] = None  # (H, T) float16 — max posterior per site
     global_sums: Optional[np.ndarray] = None  # (H, A) float64 — Σ_t gamma[h,t,a]
 
 
