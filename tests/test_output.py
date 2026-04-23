@@ -316,3 +316,71 @@ def test_write_decode_parquet_no_max_post():
         data = read_decode_parquet(out_path)
         assert "max_post" not in data
         np.testing.assert_array_equal(data["calls"], calls.astype(np.uint8))
+
+
+def test_read_decode_parquet_multichunk_max_post(tmp_path):
+    """Regression: max_post must not be silently overwritten with chunks[0]
+    when a row group has multiple chunks per column."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    import pytest
+
+    H_per_chunk, T, n_chunks = 10, 4, 3
+    total_H = H_per_chunk * n_chunks
+
+    calls_arrays = []
+    mp_arrays = []
+    for i in range(n_chunks):
+        # Distinct content per chunk so any cross-contamination is detectable
+        c_bytes = bytes([i + 1] * (H_per_chunk * T))
+        c_off = np.arange(0, H_per_chunk * T + 1, T, dtype=np.int64)
+        calls_arrays.append(pa.Array.from_buffers(
+            pa.large_binary(), H_per_chunk,
+            [None, pa.py_buffer(c_off), pa.py_buffer(c_bytes)],
+        ))
+
+        mp_vals = np.full(H_per_chunk * T, i * 10.0, dtype=np.float16)
+        mp_off = np.arange(0, H_per_chunk * T * 2 + 1, T * 2, dtype=np.int64)
+        mp_arrays.append(pa.Array.from_buffers(
+            pa.large_binary(), H_per_chunk,
+            [None, pa.py_buffer(mp_off), pa.py_buffer(mp_vals.tobytes())],
+        ))
+
+    schema = pa.schema(
+        [("calls", pa.large_binary()), ("max_post", pa.large_binary())],
+        metadata={
+            b"T": str(T).encode("ascii"),
+            b"K": b"4",
+            b"chrom": b"1",
+            b"calls_dtype": b"uint8",
+            b"max_post_dtype": b"float16",
+            b"pos_bp": np.arange(T, dtype=np.int64).tobytes(),
+        },
+    )
+    table = pa.table({
+        "calls": pa.chunked_array(calls_arrays),
+        "max_post": pa.chunked_array(mp_arrays),
+    }, schema=schema)
+
+    path = tmp_path / "multichunk.parquet"
+    # Row group covers the full table so all chunks land in one row group
+    pq.write_table(table, str(path), row_group_size=total_H * 2)
+
+    # Verify the file actually has the multi-chunk structure we need
+    pf = pq.ParquetFile(str(path))
+    rg = pf.read_row_group(0)
+    # If pyarrow fused chunks despite our setup, skip — test is moot
+    if len(rg.column("calls").chunks) <= 1:
+        pytest.skip("pyarrow fused chunks; cannot exercise multi-chunk path")
+
+    data = read_decode_parquet(str(path))
+
+    # Expected: chunk i's max_post is all-(i*10). If the bug is present,
+    # all rows will be zero (chunks[0]'s value).
+    for i in range(n_chunks):
+        s, e = i * H_per_chunk, (i + 1) * H_per_chunk
+        expected = np.full((H_per_chunk, T), i * 10.0, dtype=np.float16)
+        np.testing.assert_array_equal(
+            data["max_post"][s:e], expected,
+            err_msg=f"max_post chunk {i} corrupted — likely chunks[0] bug",
+        )

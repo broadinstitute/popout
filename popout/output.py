@@ -387,7 +387,15 @@ def read_decode_parquet(path: str) -> dict:
         rg = pf.read_row_group(rg_idx)
         c_col = rg.column("calls")
 
-        for chunk in c_col.chunks:
+        if has_mp:
+            mp_col = rg.column("max_post")
+            assert len(mp_col.chunks) == len(c_col.chunks), (
+                f"Chunk count mismatch in row group {rg_idx}: "
+                f"calls has {len(c_col.chunks)}, max_post has "
+                f"{len(mp_col.chunks)}"
+            )
+
+        for chunk_idx, chunk in enumerate(c_col.chunks):
             n_rows = len(chunk)
             # buffers(): [validity, offsets, data] for large_binary
             data_buf = chunk.buffers()[2]
@@ -395,7 +403,7 @@ def read_decode_parquet(path: str) -> dict:
             calls[row:row + n_rows] = flat.reshape(n_rows, T)
 
             if has_mp:
-                mp_chunk = rg.column("max_post").chunks[0]
+                mp_chunk = mp_col.chunks[chunk_idx]
                 mp_buf = mp_chunk.buffers()[2]
                 mp_flat = np.frombuffer(
                     mp_buf, dtype=np.float16, count=n_rows * T,
