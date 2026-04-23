@@ -546,8 +546,8 @@ def run_em(
     else:
         geno = geno_np
         log.info(
-            "  geno %.1f GB → host-resident (device budget exceeded); "
-            "batched transfers will be used", geno_np.nbytes / 1e9,
+            "  geno %.1f GB > device budget → host-resident, batched transfers",
+            geno_np.nbytes / 1e9,
         )
     d_morgan_j = jnp.array(d_morgan)
 
