@@ -345,3 +345,133 @@ def test_merge_disabled():
     )
     # No-merge should have >= as many leaves as merged
     assert len(li_no_merge) >= len(li_merge)
+
+
+# ---------------------------------------------------------------------------
+# Seeding exclusion tests
+# ---------------------------------------------------------------------------
+
+
+def test_parse_seeding_exclusion_list(tmp_path):
+    """load_seeding_exclusion_list parses valid TSV and rejects bad ones."""
+    from popout.cli import load_seeding_exclusion_list
+
+    # Good file: 3 unique sample IDs
+    good = tmp_path / "good.tsv"
+    good.write_text("sample_id\n1000039\n1000059\n1000091\n")
+    result = load_seeding_exclusion_list(str(good))
+    assert result == {"1000039", "1000059", "1000091"}
+
+    # Duplicates are deduped
+    dups = tmp_path / "dups.tsv"
+    dups.write_text("sample_id\n1000039\n1000039\n1000059\n")
+    result = load_seeding_exclusion_list(str(dups))
+    assert result == {"1000039", "1000059"}
+
+    # Header-only (empty body) returns empty set
+    empty = tmp_path / "empty.tsv"
+    empty.write_text("sample_id\n")
+    result = load_seeding_exclusion_list(str(empty))
+    assert result == set()
+
+    # Wrong header raises ValueError
+    bad_header = tmp_path / "bad.tsv"
+    bad_header.write_text("wrong_col\n1000039\n")
+    with pytest.raises(ValueError, match="sample_id"):
+        load_seeding_exclusion_list(str(bad_header))
+
+    # No header at all (first data row becomes header) raises ValueError
+    no_header = tmp_path / "no_header.tsv"
+    no_header.write_text("1000039\n1000059\n")
+    with pytest.raises(ValueError, match="sample_id"):
+        load_seeding_exclusion_list(str(no_header))
+
+
+def test_seeding_exclusion_mask():
+    """Seeding mask filters haplotypes; EM still runs on the full cohort."""
+    from popout.em import run_em
+
+    chrom_data, true_ancestry, _ = simulate_admixed(
+        n_samples=2500, n_sites=2000, n_ancestries=3,
+        gen_since_admix=20, pure_fraction=0.3, rng_seed=42,
+    )
+    H_total = chrom_data.n_haps  # 5000
+
+    # Exclude 500 samples (last 1000 haplotypes)
+    mask = np.ones(H_total, dtype=bool)
+    mask[4000:] = False
+    H_kept = int(mask.sum())  # 4000
+
+    # --- Without mask: seed from all 5000 haplotypes ---
+    ll_full, li_full = recursive_split_seed(
+        chrom_data.geno, min_cluster_size=500,
+        rng_seed=42, chrom_data=chrom_data,
+    )
+    assert ll_full.shape == (H_total,)
+
+    # --- With mask: seed from 4000 haplotypes ---
+    ll_masked, li_masked = recursive_split_seed(
+        chrom_data.geno, min_cluster_size=500,
+        rng_seed=42, chrom_data=chrom_data,
+        seeding_mask=mask,
+    )
+    assert ll_masked.shape == (H_kept,)
+    assert sum(li.n_haps for li in li_masked) == H_kept
+
+    # Build seed_resp for masked run: one-hot for kept, uniform for excluded
+    n_leaves = len(li_masked)
+    kept_idx = np.where(mask)[0]
+    seed_resp_np = np.full((H_total, n_leaves), 1.0 / n_leaves, dtype=np.float32)
+    seed_resp_np[kept_idx] = 0.0
+    seed_resp_np[kept_idx, ll_masked] = 1.0
+    seed_resp = jnp.array(seed_resp_np)
+
+    result = run_em(
+        chrom_data, n_em_iter=5, gen_since_admix=20.0, rng_seed=42,
+        seed_responsibilities=seed_resp,
+    )
+    # EM ran on ALL haplotypes — check full cohort size
+    assert result.calls.shape[0] == H_total
+    # All 2500 samples have calls
+    assert result.calls.shape[0] // 2 == 2500
+
+
+def test_excluded_samples_get_calls():
+    """Excluded samples still receive non-trivial ancestry assignments."""
+    from popout.em import run_em
+
+    chrom_data, true_ancestry, _ = simulate_admixed(
+        n_samples=2500, n_sites=2000, n_ancestries=3,
+        gen_since_admix=20, pure_fraction=0.3, rng_seed=42,
+    )
+    H_total = chrom_data.n_haps
+    mask = np.ones(H_total, dtype=bool)
+    mask[4000:] = False
+    kept_idx = np.where(mask)[0]
+
+    ll, li = recursive_split_seed(
+        chrom_data.geno, min_cluster_size=500,
+        rng_seed=42, chrom_data=chrom_data,
+        seeding_mask=mask,
+    )
+    n_leaves = len(li)
+
+    seed_resp_np = np.full((H_total, n_leaves), 1.0 / n_leaves, dtype=np.float32)
+    seed_resp_np[kept_idx] = 0.0
+    seed_resp_np[kept_idx, ll] = 1.0
+
+    result = run_em(
+        chrom_data, n_em_iter=5, gen_since_admix=20.0, rng_seed=42,
+        seed_responsibilities=jnp.array(seed_resp_np),
+    )
+
+    # Pick an excluded haplotype and verify it got real ancestry calls
+    excluded_hap = 4500
+    calls = result.calls[excluded_hap]
+    assert calls.shape[0] == chrom_data.n_sites
+    # Should have at least some non-zero ancestry assignments (not all ancestry-0)
+    unique_calls = np.unique(calls)
+    assert len(unique_calls) >= 1, "Excluded haplotype should have ancestry calls"
+    # Check accuracy for excluded haplotypes is still reasonable
+    metrics = evaluate_accuracy(result.calls, true_ancestry, n_leaves)
+    assert metrics["overall_accuracy"] > 0.60

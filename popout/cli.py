@@ -116,6 +116,28 @@ def _boot_banner(argv: list[str]) -> None:
     )
 
 
+def load_seeding_exclusion_list(path: str) -> set[str]:
+    """Load a single-column TSV of sample IDs to exclude from seeding.
+
+    The file must have a header row with column name ``sample_id``.
+    Blank lines and duplicates are tolerated; whitespace is stripped.
+
+    Returns a deduplicated ``set[str]`` of sample IDs.
+    """
+    import pandas as pd
+
+    df = pd.read_csv(path, sep="\t", dtype=str, skip_blank_lines=True)
+
+    if "sample_id" not in df.columns:
+        raise ValueError(
+            f"Seeding exclusion file {path!r} must have a 'sample_id' column "
+            f"header. Found columns: {list(df.columns)}"
+        )
+
+    ids = df["sample_id"].str.strip().dropna().unique()
+    return set(ids)
+
+
 def main(argv: list[str] | None = None) -> None:
     # Dispatch subcommands before parsing main args
     raw_args = argv if argv is not None else sys.argv[1:]
@@ -318,6 +340,12 @@ def main(argv: list[str] | None = None) -> None:
         help="Write a post-EM checkpoint before the final decode pass. "
              "Allows resuming from the converged model if decode OOMs.",
     )
+    parser.add_argument(
+        "--exclude-seeding-samples", type=str, default=None,
+        help="Path to a single-column TSV (header: sample_id) of samples to "
+             "exclude from recursive seeding only. They remain in EM and output. "
+             "Requires --seed-method recursive.",
+    )
 
     parser.add_argument(
         "--probs", action="store_true",
@@ -511,6 +539,44 @@ def main(argv: list[str] | None = None) -> None:
     n_samples = len(sample_names)
     log.info("Input: %d samples (%d haplotypes)", n_samples, 2 * n_samples)
 
+    # --- Seeding exclusion mask ---
+    import numpy as np
+    seeding_mask = None
+    if args.exclude_seeding_samples is not None:
+        if args.seed_method != "recursive":
+            log.error("--exclude-seeding-samples requires --seed-method recursive")
+            sys.exit(1)
+        exclude_set = load_seeding_exclusion_list(args.exclude_seeding_samples)
+        log.info("Loaded %d exclusion samples for seeding from %s",
+                 len(exclude_set), args.exclude_seeding_samples)
+
+        sample_set = set(str(s) for s in sample_names)
+        unknown = exclude_set - sample_set
+        if unknown:
+            log.warning(
+                "%d sample IDs in --exclude-seeding-samples not found in input: %s%s",
+                len(unknown), sorted(unknown)[:5],
+                " ..." if len(unknown) > 5 else "",
+            )
+
+        n_haps = 2 * n_samples
+        seeding_mask = np.ones(n_haps, dtype=bool)
+        n_excluded = 0
+        for i, name in enumerate(sample_names):
+            if str(name) in exclude_set:
+                seeding_mask[2 * i] = False
+                seeding_mask[2 * i + 1] = False
+                n_excluded += 1
+        H_kept = int(seeding_mask.sum())
+        log.info("Seeding on %d / %d haplotypes after excluding %d samples",
+                 H_kept, n_haps, n_excluded)
+        if H_kept < 1000:
+            log.error(
+                "Only %d haplotypes remain after excluding %d samples; "
+                "minimum 1000 required for seeding.", H_kept, n_excluded,
+            )
+            sys.exit(1)
+
     # --- Stream chromosomes and run pipeline ---
     # We need to keep ChromData for output writing, so collect them
     chrom_data_list = []
@@ -575,6 +641,7 @@ def main(argv: list[str] | None = None) -> None:
             resume_from_checkpoint=args.resume_from_checkpoint,
             checkpoint_after_em=args.checkpoint_after_em,
             write_dense_decode=write_dense_decode,
+            seeding_mask=seeding_mask,
         )
 
     t_compute = time.perf_counter() - t0

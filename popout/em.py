@@ -1117,6 +1117,7 @@ def run_em_genome(
     checkpoint_after_em: bool = False,
     ancestry_names: Optional[list[str]] = None,
     write_dense_decode: bool = False,
+    seeding_mask: np.ndarray | None = None,
 ) -> list[AncestryResult] | None:
     """Run self-bootstrapping LAI across all chromosomes.
 
@@ -1197,15 +1198,36 @@ def run_em_genome(
                         gen_since_admix=gen_since_admix,
                         rng_seed=rng_seed,
                         stats=stats,
+                        seeding_mask=seeding_mask,
                         **rkw,
                     )
                     n_leaves = len(leaf_info)
-                    seed_resp = jnp.zeros((chrom_data.n_haps, n_leaves), dtype=jnp.float32)
-                    seed_resp = seed_resp.at[
-                        jnp.arange(chrom_data.n_haps), jnp.array(leaf_labels)
-                    ].set(1.0)
+                    H_total = chrom_data.n_haps
+
+                    if seeding_mask is not None:
+                        # leaf_labels is (H_kept,) — map back to full cohort
+                        kept_idx = np.where(seeding_mask)[0]
+                        seed_resp_np = np.full(
+                            (H_total, n_leaves), 1.0 / n_leaves,
+                            dtype=np.float32,
+                        )
+                        seed_resp_np[kept_idx] = 0.0
+                        seed_resp_np[kept_idx, leaf_labels] = 1.0
+                        seed_resp = jnp.array(seed_resp_np)
+                        # Expand leaf_labels for checkpoint (excluded → -1)
+                        full_leaf_labels = np.full(H_total, -1, dtype=np.int32)
+                        full_leaf_labels[kept_idx] = leaf_labels
+                        leaf_labels_for_ckpt = full_leaf_labels
+                    else:
+                        seed_resp = jnp.zeros(
+                            (H_total, n_leaves), dtype=jnp.float32,
+                        )
+                        seed_resp = seed_resp.at[
+                            jnp.arange(H_total), jnp.array(leaf_labels)
+                        ].set(1.0)
+                        leaf_labels_for_ckpt = leaf_labels
+
                     em_n_ancestries = n_leaves
-                    leaf_labels_for_ckpt = leaf_labels
                     leaf_info_for_ckpt = leaf_info
 
                 if stop_after_seeding:

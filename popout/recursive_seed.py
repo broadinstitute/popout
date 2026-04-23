@@ -170,6 +170,7 @@ def recursive_split_seed(
     projection_batch: int = 50_000,
     dump_pre_merge_path: Optional[str] = None,
     device_memory_fraction: float = 0.5,
+    seeding_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[LeafInfo]]:
     """Recursively split haplotypes via K=2 EM.
 
@@ -190,13 +191,31 @@ def recursive_split_seed(
     merge_max_tree_distance : distance in the recursion tree at which two
         leaves may be considered for Hellinger merging. 1 = siblings only
         (conservative default). 2 = cousins.
+    seeding_mask : optional (H,) bool array, True for haplotypes to include
+        in seeding. When provided, excluded haplotypes are filtered out
+        before recursion; returned leaf_labels has shape (H_kept,).
 
     Returns
     -------
-    leaf_labels : (H,) int32 — flat labels 0..(n_leaves - 1) per haplotype
+    leaf_labels : (H,) int32 — flat labels 0..(n_leaves - 1) per haplotype.
+        When seeding_mask is provided, shape is (H_kept,) where
+        H_kept = seeding_mask.sum().
     leaf_info : list of LeafInfo — metadata per leaf, in label order
     """
     H, T = geno.shape
+
+    if seeding_mask is not None:
+        H_total = H
+        geno = geno[seeding_mask]
+        H, T = geno.shape
+        n_excluded = (H_total - H) // 2
+        log.info("Seeding on %d / %d haplotypes after excluding %d samples",
+                 H, H_total, n_excluded)
+        if H < 1000:
+            raise ValueError(
+                f"Only {H} haplotypes remain after seeding exclusion; "
+                "minimum 1000 required. Check the exclusion list."
+            )
 
     if H * T > 0:
         sample = geno[::max(1, H // 100), ::max(1, T // 100)]

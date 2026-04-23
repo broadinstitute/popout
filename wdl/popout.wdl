@@ -43,6 +43,7 @@ task popout_task {
     Boolean stop_after_seeding       = false
     Boolean checkpoint_after_em      = true
     File?   resume_from_checkpoint
+    File?   exclude_seeding_samples    # TSV of sample_ids to exclude from recursive seeding
     String  extra_args               = ""
 
     # Weights & Biases — API key string or gs:// URL to a file containing it
@@ -123,6 +124,7 @@ task popout_task {
     ~{if stop_after_seeding then 'CMD="$CMD --stop-after-seeding"' else ''}
     ~{if checkpoint_after_em then 'CMD="$CMD --checkpoint-after-em"' else ''}
     ~{if defined(resume_from_checkpoint) then 'CMD="$CMD --resume-from-checkpoint ~{resume_from_checkpoint}"' else ''}
+    ~{if defined(exclude_seeding_samples) then 'CMD="$CMD --exclude-seeding-samples ~{exclude_seeding_samples}"' else ''}
 
     if [ -n "$WANDB_RAW" ]; then CMD="$CMD --monitor wandb"; fi
 
@@ -212,6 +214,7 @@ workflow popout {
     Boolean stop_after_seeding       = false
     Boolean checkpoint_after_em      = true
     File?   resume_from_checkpoint
+    File?   exclude_seeding_samples
     String  extra_args               = ""
 
     # Weights & Biases
@@ -251,6 +254,7 @@ workflow popout {
       stop_after_seeding        = stop_after_seeding,
       checkpoint_after_em       = checkpoint_after_em,
       resume_from_checkpoint    = resume_from_checkpoint,
+      exclude_seeding_samples   = exclude_seeding_samples,
       extra_args                = extra_args,
       wandb_key       = wandb_key,
       machine_type    = machine_type,
