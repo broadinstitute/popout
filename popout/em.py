@@ -899,8 +899,16 @@ def run_em(
             spectral={"pca_proj": pca_proj, "gmm_labels": np.array(labels)},
         )
 
-    # Summary stats — single pass via bincount instead of A boolean arrays
-    bincount = np.bincount(result.calls.ravel(), minlength=n_anc)
+    # Summary stats — chunked bincount to avoid int64 promotion of full ravel
+    H = result.calls.shape[0]
+    bincount = np.zeros(n_anc, dtype=np.int64)
+    BINCOUNT_CHUNK = 50_000
+    for start in range(0, H, BINCOUNT_CHUNK):
+        end = min(start + BINCOUNT_CHUNK, H)
+        bincount += np.bincount(
+            result.calls[start:end].ravel(),
+            minlength=n_anc,
+        )
     total = result.calls.size
     for a in range(n_anc):
         prop = float(bincount[a]) / total

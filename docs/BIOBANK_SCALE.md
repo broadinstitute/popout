@@ -17,7 +17,7 @@ Last audited: 2026-04-22.
 | `output.py` `write_decode_parquet` | `.tobytes()` on 10 GB calls + 20 GB fp16 max_post; full-H row group | Zero-copy `pa.py_buffer(ndarray)`; streaming 50k-hap row groups via `ParquetWriter` |
 | `output.py` `read_decode_parquet` | `combine_chunks().to_pylist()` + `b"".join()` on multi-GB binary column | Iterate row groups; `buffers()[2]` + `np.frombuffer` into preallocated output |
 | `output.py` `write_ancestry_tracts` | `np.array(result.calls)` redundant 10 GB copy | `np.asarray()` — zero-copy when input is already ndarray |
-| `em.py` ancestry proportion logging | `(result.calls == a).mean()` creates 10 GB bool × 20 ancestries | Single `np.bincount` pass |
+| `em.py` ancestry proportion logging | `(result.calls == a).mean()` creates 10 GB bool × 20 ancestries | Chunked `np.bincount` in 50k-hap slices |
 
 ## Known remaining
 
@@ -49,3 +49,10 @@ must either:
 Similarly, any output function that converts a large numpy array to
 bytes for serialization should use zero-copy buffer wrapping (e.g.
 `pa.py_buffer(ndarray)`) rather than `.tobytes()`.
+
+### Numpy reductions on integer arrays
+
+`np.bincount`, `np.sum`, `np.cumsum` and similar reductions on
+int8/int16/int32 arrays internally promote to int64 working buffers of
+the same element count as the input. At 10 GB of int8, that's 80 GB of
+scratch. Always chunk these reductions when the input exceeds ~1 GB.
