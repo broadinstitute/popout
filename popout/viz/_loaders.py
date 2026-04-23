@@ -129,7 +129,7 @@ def collect_sample_names_from_tracts(path: str | Path) -> list[str]:
 
 def read_model_npz(path: str | Path) -> dict[str, np.ndarray]:
     """Read ``{prefix}.model.npz``."""
-    return dict(np.load(path, allow_pickle=False))
+    return dict(np.load(path, allow_pickle=True))
 
 
 def read_model_text(path: str | Path) -> dict[str, str | float | int]:
