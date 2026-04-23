@@ -539,7 +539,16 @@ def run_em(
              batch_size, chrom_data.n_sites, n_anc, chrom_data.n_haps)
 
     # Transfer to device
-    geno = jnp.array(geno_np)
+    from ._device import fits_on_device
+    if fits_on_device(geno_np.nbytes):
+        geno = jnp.array(geno_np)
+        log.info("  geno %.1f GB → device-resident", geno_np.nbytes / 1e9)
+    else:
+        geno = geno_np
+        log.info(
+            "  geno %.1f GB → host-resident (device budget exceeded); "
+            "batched transfers will be used", geno_np.nbytes / 1e9,
+        )
     d_morgan_j = jnp.array(d_morgan)
 
     # --- Stage 1: Init model from soft assignments + window refinement ---

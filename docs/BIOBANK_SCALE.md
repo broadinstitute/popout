@@ -18,6 +18,7 @@ Last audited: 2026-04-22.
 | `output.py` `read_decode_parquet` | `combine_chunks().to_pylist()` + `b"".join()` on multi-GB binary column | Iterate row groups; `buffers()[2]` + `np.frombuffer` into preallocated output |
 | `output.py` `write_ancestry_tracts` | `np.array(result.calls)` redundant 10 GB copy | `np.asarray()` — zero-copy when input is already ndarray |
 | `em.py` ancestry proportion logging | `(result.calls == a).mean()` creates 10 GB bool × 20 ancestries | Chunked `np.bincount` in 50k-hap slices |
+| `em.py` `run_em` line 542 | `jnp.array(geno_np)` unconditionally uploads 27 GB to 40 GB A100; OOMs at T≥25k | `fits_on_device` guard; host-resident with batched transfers when geno exceeds device budget |
 
 ## Known remaining
 

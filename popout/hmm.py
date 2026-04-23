@@ -1011,7 +1011,7 @@ def forward_backward_batched(
     gammas = []
     for start in range(0, H, batch_size):
         end = min(start + batch_size, H)
-        batch_geno = geno[start:end]
+        batch_geno = jnp.asarray(geno[start:end])
         gamma_batch = forward_backward(batch_geno, model, d_morgan)
         gammas.append(gamma_batch)
 
@@ -1400,7 +1400,7 @@ def forward_backward_ancestry_sums(
 
     for start in range(0, H, batch_size):
         end = min(start + batch_size, H)
-        batch_geno = geno[start:end]
+        batch_geno = jnp.asarray(geno[start:end])
         if emit_pad > 0:
             batch_geno = jnp.concatenate(
                 [batch_geno, jnp.zeros((end - start, emit_pad), dtype=batch_geno.dtype)],
