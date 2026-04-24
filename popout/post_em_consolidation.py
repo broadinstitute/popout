@@ -107,14 +107,20 @@ def consolidate(
 
     # Count high-posterior haplotype-sites per ancestry across all chroms
     high_post_counts = np.zeros(A, dtype=np.int64)
+    _CHUNK = 50_000
     for res in results:
         if res.decode is not None and res.decode.max_post is not None:
             mp = res.decode.max_post
             calls = res.calls
-            for a in range(A):
-                high_post_counts[a] += int(
-                    ((calls == a) & (mp > 0.8)).sum()
+            H_res = calls.shape[0]
+            for start in range(0, H_res, _CHUNK):
+                end = min(start + _CHUNK, H_res)
+                mask_hp = mp[start:end] > 0.8
+                bc = np.bincount(
+                    calls[start:end][mask_hp], minlength=A,
                 )
+                high_post_counts[:len(bc)] += bc[:A]
+                del mask_hp
         elif res.decode is not None and res.decode.parquet_path is not None:
             # Stream from parquet to avoid 54 GB allocation
             from .output import _iter_max_post_groups
@@ -123,15 +129,20 @@ def consolidate(
                 res.decode.parquet_path,
             ):
                 calls_chunk = calls[rg_start:rg_end]
-                for a in range(A):
-                    high_post_counts[a] += int(
-                        ((calls_chunk == a) & (mp_chunk > 0.8)).sum()
-                    )
+                mask_hp = mp_chunk > 0.8
+                bc = np.bincount(
+                    calls_chunk[mask_hp], minlength=A,
+                )
+                high_post_counts[:len(bc)] += bc[:A]
+                del mask_hp
         else:
             # No posterior info — use calls only (assume all high-conf)
             calls = res.calls
-            for a in range(A):
-                high_post_counts[a] += int((calls == a).sum())
+            H_res = calls.shape[0]
+            for start in range(0, H_res, _CHUNK):
+                end = min(start + _CHUNK, H_res)
+                bc = np.bincount(calls[start:end].ravel(), minlength=A)
+                high_post_counts[:len(bc)] += bc[:A]
 
     # Pairwise F_ST matrix
     fst_matrix = np.zeros((A, A), dtype=np.float64)

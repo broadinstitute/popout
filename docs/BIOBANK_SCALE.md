@@ -24,6 +24,8 @@ Last audited: 2026-04-24.
 | `hmm.py` `forward_backward_decode` | `max_post` allocated as `(H, T) float32` — 108 GB at T=25k | Changed to `float16`; matches the block-emissions decode path |
 | `hmm.py` `forward_backward_bucketed_decode` | Same `float32` `max_post` | Changed to `float16` |
 | `em.py` `init_model_from_labels` | `geno.astype(jnp.float32)` on full geno — 108 GB | Deleted (uncalled dead code) |
+| `post_em_consolidation.py` `consolidate` | `(calls == a)` and `(calls == a) & (mp > 0.8)` create 25 GB bool masks per ancestry in a loop | Chunked `np.bincount` in 50k-hap slices; parquet branch already chunked |
+| `recursive_seed.py` `_run_k2_em_split` + main loop | `geno[node.indices]` on `_MaskedGeno` triggers advanced-index copy (30+ GB) | `_sub_geno()` helper composes index arrays through `_MaskedGeno` — zero geno copy |
 
 ## Known remaining
 
@@ -115,3 +117,18 @@ A Python `for` loop that does `x.at[idx].add(...)` on a JAX array creates
 one XLA trace entry per iteration. They merge into a single graph whose
 compiled-kernel argument size exceeds device memory. Replace with
 `jax.vmap` or `jax.lax.scan`.
+
+### 10. `(arr == value)` in a per-ancestry loop
+`for a in range(A): mask = (calls == a)` allocates one full (H, T) bool
+mask per iteration. At H=1M, T=25k, that's 25 GB × A iterations. Use
+`np.bincount` on the flattened or filtered array in haplotype chunks
+instead.
+
+## Pattern recurrence policy
+
+Every pattern on this list has recurred at least once in a new call site
+after its first fix. Before landing any new feature that touches `calls`,
+`max_post`, `geno`, or `results[*]`, grep the codebase for all existing
+call sites of the same pattern and verify they are already guarded. The
+cost of re-auditing is hours; the cost of a crashed biobank run is two
+days.

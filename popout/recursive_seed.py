@@ -188,6 +188,20 @@ class _MaskedGeno:
         return np.array(arr, dtype=dtype) if dtype is not None else arr
 
 
+def _sub_geno(geno, indices: np.ndarray):
+    """Return a zero-copy sub-view of *geno* for *indices*.
+
+    When *geno* is a ``_MaskedGeno``, composes the index arrays instead
+    of materializing a contiguous copy (which at biobank scale is 30+ GB).
+    """
+    if len(indices) == geno.shape[0]:
+        return geno
+    if isinstance(geno, _MaskedGeno):
+        composed = geno._kept[indices]
+        return _MaskedGeno(geno._geno, composed)
+    return _MaskedGeno(geno, indices.astype(np.intp, copy=False))
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -371,10 +385,7 @@ def recursive_split_seed(
         # Sub-PCA on this cluster's raw genotypes
         t_prep_start = time.perf_counter()
         key, subkey = jax.random.split(key)
-        if len(node.indices) == H:
-            sub_geno = geno          # root node: avoid full-matrix host copy
-        else:
-            sub_geno = geno[node.indices]
+        sub_geno = _sub_geno(geno, node.indices)
         sub_proj = _geno_sub_pca(
             sub_geno, n_components=2, key=subkey,
             max_haps_svd=max_haps_svd, projection_batch=projection_batch,
@@ -895,7 +906,7 @@ def _run_k2_em_split(
 
     from ._device import fits_on_device
 
-    sub_geno = geno[indices] if len(indices) != geno.shape[0] else geno
+    sub_geno = _sub_geno(geno, indices)
     if geno_j is not None:
         if len(indices) == geno_j.shape[0]:
             sub_geno_j = geno_j  # root node — no copy needed
@@ -922,7 +933,7 @@ def _run_k2_em_split(
         if rng_key is None:
             rng_key = jax.random.PRNGKey(0)
         derived_seed = int(jax.random.bits(rng_key, dtype=jnp.uint32))
-        sub_geno = geno[indices]  # host-side copy only for fallback init
+        sub_geno = _sub_geno(geno, indices)
         _labels, resp, _n_anc, _proj = seed_ancestry_soft(
             sub_geno, n_ancestries=2, rng_seed=derived_seed,
         )
