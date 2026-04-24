@@ -631,6 +631,7 @@ def main(argv: list[str] | None = None) -> None:
 
     # --- Work directory for checkpoint/resume ---
     from .checkpoint import WorkDir
+    from . import __version__
     work_dir = None
     if not args.no_checkpoint and args.method not in ("cnn", "cnn-crf"):
         from pathlib import Path as _Path
