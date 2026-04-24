@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import jax.numpy as jnp
 
-from popout.datatypes import AncestryModel, AncestryResult, ChromData
+from popout.datatypes import AncestryModel, AncestryResult, ChromData, DecodeResult
 from popout.panel import (
     PanelConfig,
     WholeHapExtraction,
@@ -351,3 +351,119 @@ class TestExportPanel:
         assert (tmp_path / "test.panel.segments.tsv.gz").exists()
         assert (tmp_path / "test.panel.frequencies.tsv.gz").exists()
         assert (tmp_path / "test.panel.proportions.tsv").exists()
+
+
+# ---------------------------------------------------------------------------
+# Parquet-streaming path tests
+# ---------------------------------------------------------------------------
+
+def _write_test_decode_parquet(path, calls, max_post):
+    """Write a minimal decode parquet for testing _iter_max_post_groups."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    H, T = calls.shape
+    calls_u8 = calls.view(np.uint8)
+    mp_f16 = max_post.astype(np.float16)
+
+    metadata = {
+        b"T": str(T).encode("ascii"),
+        b"K": b"2",
+        b"chrom": b"1",
+        b"calls_dtype": b"uint8",
+        b"max_post_dtype": b"float16",
+    }
+
+    schema = pa.schema(
+        [("calls", pa.large_binary()), ("max_post", pa.large_binary())],
+        metadata=metadata,
+    )
+
+    c_offsets = np.arange(0, H * T + 1, T, dtype=np.int64)
+    c_col = pa.Array.from_buffers(
+        pa.large_binary(), H,
+        [None, pa.py_buffer(c_offsets), pa.py_buffer(np.ascontiguousarray(calls_u8))],
+    )
+    mp_offsets = np.arange(0, H * T * 2 + 1, T * 2, dtype=np.int64)
+    mp_col = pa.Array.from_buffers(
+        pa.large_binary(), H,
+        [None, pa.py_buffer(mp_offsets), pa.py_buffer(np.ascontiguousarray(mp_f16))],
+    )
+    batch = pa.record_batch({"calls": c_col, "max_post": mp_col}, schema=schema)
+
+    with pq.ParquetWriter(path, schema, compression="zstd",
+                          compression_level=1, use_dictionary=False) as w:
+        w.write_batch(batch)
+
+
+def _make_decode_result(calls, max_post=None, parquet_path=None):
+    """Build AncestryResult with DecodeResult fields."""
+    H, T = calls.shape
+    A = int(calls.max()) + 1
+    model = AncestryModel(
+        n_ancestries=A,
+        mu=jnp.ones(A) / A,
+        gen_since_admix=20.0,
+        allele_freq=jnp.full((A, T), 0.5),
+    )
+    decode = DecodeResult(
+        calls=calls,
+        max_post=max_post,
+        parquet_path=parquet_path,
+    )
+    return AncestryResult(calls=calls, model=model, chrom="1", decode=decode)
+
+
+class TestParquetStreaming:
+
+    def test_whole_hap_parquet_matches_in_memory(self, tmp_path):
+        """extract_whole_haplotypes via parquet matches in-memory max_post."""
+        H, T, A = 20, 50, 2
+        calls = np.zeros((H, T), dtype=np.int8)
+        calls[H // 2:] = 1
+        max_post = np.full((H, T), 0.99, dtype=np.float16)
+        # Make hap 0 uncertain at one site
+        max_post[0, 25] = 0.5
+
+        # In-memory path
+        res_mem = _make_decode_result(calls, max_post=max_post)
+        ext_mem = extract_whole_haplotypes([res_mem], threshold=0.95)
+
+        # Parquet path
+        pq_path = str(tmp_path / "decode.parquet")
+        _write_test_decode_parquet(pq_path, calls, max_post)
+        res_pq = _make_decode_result(calls, parquet_path=pq_path)
+        ext_pq = extract_whole_haplotypes([res_pq], threshold=0.95)
+
+        np.testing.assert_array_equal(ext_mem.hap_indices, ext_pq.hap_indices)
+        np.testing.assert_array_equal(ext_mem.ancestry_labels, ext_pq.ancestry_labels)
+
+    def test_segments_parquet_matches_in_memory(self, tmp_path):
+        """extract_segments via parquet matches in-memory max_post."""
+        H, T, A = 4, 200, 2
+        calls = np.zeros((H, T), dtype=np.int8)
+        calls[:, 100:] = 1
+        max_post = np.full((H, T), 0.995, dtype=np.float16)
+        # Drop confidence in middle to break segments
+        max_post[:, 95:105] = 0.5
+
+        cdata = _make_chromdata(H, T)
+
+        # In-memory path
+        res_mem = _make_decode_result(calls, max_post=max_post)
+        segs_mem = extract_segments(res_mem, cdata, threshold=0.99,
+                                    min_cm=0.0, min_sites=10)
+
+        # Parquet path
+        pq_path = str(tmp_path / "decode.parquet")
+        _write_test_decode_parquet(pq_path, calls, max_post)
+        res_pq = _make_decode_result(calls, parquet_path=pq_path)
+        segs_pq = extract_segments(res_pq, cdata, threshold=0.99,
+                                   min_cm=0.0, min_sites=10)
+
+        assert len(segs_mem) == len(segs_pq)
+        for sm, sp in zip(segs_mem, segs_pq):
+            assert sm.hap_index == sp.hap_index
+            assert sm.ancestry == sp.ancestry
+            assert sm.start_site == sp.start_site
+            assert sm.end_site == sp.end_site
