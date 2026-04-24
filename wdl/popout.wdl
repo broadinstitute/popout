@@ -38,7 +38,7 @@ task popout_task {
     # Recursive seeding (--seed-method recursive)
     String  seed_method              = "gmm"
     Int     freeze_anchors_iters     = 0
-    Float   recursive_merge_hellinger = 0.08
+    Float   recursive_merge_hellinger = 0.012
     Int     recursive_max_leaves     = 20
     Boolean stop_after_seeding       = false
     Boolean checkpoint_after_em      = true
@@ -209,7 +209,7 @@ workflow popout {
     # Recursive seeding
     String  seed_method              = "gmm"
     Int     freeze_anchors_iters     = 0
-    Float   recursive_merge_hellinger = 0.08
+    Float   recursive_merge_hellinger = 0.012
     Int     recursive_max_leaves     = 20
     Boolean stop_after_seeding       = false
     Boolean checkpoint_after_em      = true

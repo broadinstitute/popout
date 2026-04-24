@@ -217,21 +217,27 @@ def test_hellinger_merge():
     geno = np.vstack(geno_parts)
     labels = np.concatenate(labels_parts)
 
-    # Leaf info for 4 leaves (leaf 3 is a duplicate of leaf 0)
+    # Leaf info for 4 leaves. Leaves 2 and 3 (paths L110/L111) are siblings
+    # and share pop 0's frequencies (leaf 3 is a duplicate of leaf 0), so
+    # they should merge under the sibling-only restriction.
+    # Reassign leaf 2 to use pop 0's frequencies too (duplicate).
+    geno_parts[2] = (rng.random((200, T)) < pop_freqs[0]).astype(np.uint8)
+    geno = np.vstack(geno_parts)
+
     leaf_info = [
         LeafInfo(label=0, n_haps=200, depth=1, path="L0", bic_score=100),
         LeafInfo(label=1, n_haps=200, depth=1, path="L10", bic_score=80),
-        LeafInfo(label=2, n_haps=200, depth=1, path="L110", bic_score=60),
-        LeafInfo(label=3, n_haps=200, depth=1, path="L111", bic_score=60),
+        LeafInfo(label=2, n_haps=200, depth=2, path="L110", bic_score=60),
+        LeafInfo(label=3, n_haps=200, depth=2, path="L111", bic_score=60),
     ]
 
-    # Merge with high threshold (should merge pop 0 and pop 3 since they share frequencies)
+    # Merge with high threshold — siblings L110/L111 share frequencies, should merge
     new_labels, new_info = _merge_close_leaves(
         geno, labels, leaf_info,
-        hellinger_threshold=0.15,  # high enough to merge duplicates
+        hellinger_threshold=0.15,
     )
 
-    # Should have merged at least one pair
+    # Should have merged the sibling pair
     assert len(new_info) < 4, f"Expected merge to reduce leaves, got {len(new_info)}"
     # Labels should be contiguous
     assert new_labels.min() == 0

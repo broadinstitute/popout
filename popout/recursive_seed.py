@@ -204,7 +204,7 @@ def recursive_split_seed(
     stats=None,
     chrom_data: ChromData | None = None,
     gen_since_admix: float = 20.0,
-    merge_hellinger_threshold: float = 0.08,
+    merge_hellinger_threshold: float = 0.012,
     merge_max_tree_distance: int = 1,
     split_restarts: int = 5,
     balance_bic_tolerance: float = 0.10,
@@ -524,30 +524,31 @@ def _are_merge_candidates(
     path_b: str,
     max_tree_distance: int = 1,
 ) -> bool:
-    """Check if two tree paths are candidates for Hellinger merging.
+    """Check if two tree paths are siblings in the recursion tree.
 
-    Leaves can merge if their tree distance to LCA is <= max_tree_distance
-    on each side. max_tree_distance=1 restricts to siblings (same parent);
-    max_tree_distance=2 allows first-cousins.
+    Siblings share the same parent path and differ only in the final
+    ``0``/``1`` character — i.e. they were produced by the same K=2
+    split.  This prevents cross-clade merges that collapse genuinely
+    distinct populations whose Hellinger distance happens to be small.
+
+    After a merge the surviving leaf's path is truncated to the common
+    prefix.  A subsequent merge round can then merge *that* node with
+    its new sibling (if one exists), but only if the sibling relationship
+    still holds at the truncated depth.
     """
-    if len(path_a) < 2 or len(path_b) < 2:
-        return True  # root children are always candidates
-    lca_len = 0
-    for k in range(min(len(path_a), len(path_b))):
-        if path_a[k] == path_b[k]:
-            lca_len = k + 1
-        else:
-            break
-    dist_a = len(path_a) - lca_len
-    dist_b = len(path_b) - lca_len
-    return dist_a <= max_tree_distance and dist_b <= max_tree_distance
+    # Same length, same prefix except final character
+    if len(path_a) != len(path_b):
+        return False
+    if len(path_a) < 2:
+        return False  # root node ("L") has no sibling
+    return path_a[:-1] == path_b[:-1]
 
 
 def _merge_close_leaves(
     geno: np.ndarray,
     leaf_labels: np.ndarray,
     leaf_info: list[LeafInfo],
-    hellinger_threshold: float = 0.08,
+    hellinger_threshold: float = 0.012,
     pseudocount: float = 0.5,
     max_tree_distance: int = 1,
 ) -> tuple[np.ndarray, list[LeafInfo]]:
@@ -556,8 +557,8 @@ def _merge_close_leaves(
     Frequencies are computed once and updated incrementally on each merge
     to avoid re-scanning the full genotype array.
 
-    Default hellinger_threshold=0.08 matches the public recursive_split_seed API.
-    Default max_tree_distance=1 restricts to siblings (same parent).
+    Default hellinger_threshold=0.012 matches the public recursive_split_seed API.
+    Only strict siblings (same parent, differ in final 0/1) are candidates.
     """
     labels = leaf_labels.copy()
     info = list(leaf_info)

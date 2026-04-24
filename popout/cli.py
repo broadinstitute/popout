@@ -317,12 +317,12 @@ def main(argv: list[str] | None = None) -> None:
              "(default: 0.10 = 10%%).",
     )
     parser.add_argument(
-        "--recursive-merge-hellinger", type=float, default=0.08,
+        "--recursive-merge-hellinger", type=float, default=0.012,
         help="Merge sibling leaves whose allele-frequency Hellinger "
-             "distance is below this threshold (default: 0.08). "
-             "Only sibling/near-sibling pairs in the recursion tree are "
-             "candidates. Safe up to ~0.10 (below continental F_ST). "
-             "Set to 0 to disable.",
+             "distance is below this threshold (default: 0.012). "
+             "Only strict sibling pairs (same parent split) are candidates. "
+             "0.012 merges sub-continental duplicates (F_ST < 0.01) while "
+             "preserving AMR/MID-level splits. Set to 0 to disable.",
     )
 
     parser.add_argument(
