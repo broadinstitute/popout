@@ -184,6 +184,15 @@ def write_global_ancestry(
             hap_sums = result.decode.global_sums  # (n_haps, A) float64
             T = result.calls.shape[1]
         elif result.posteriors is not None:
+            post_shape = getattr(result.posteriors, "shape", None)
+            if post_shape is not None and post_shape[0] > 100_000:
+                raise RuntimeError(
+                    f"write_global_ancestry posteriors fallback triggered with "
+                    f"{post_shape[0]} haplotypes — would allocate "
+                    f"{post_shape[0] * post_shape[1] * post_shape[2] * 4 / 1e9:.0f} GB. "
+                    "At biobank scale, decode.global_sums must be populated. "
+                    "Check forward_backward_decode's compute_max_post path."
+                )
             gamma = np.array(result.posteriors)  # (n_haps, T, A)
             T = gamma.shape[1]
             hap_sums = gamma.sum(axis=1)  # (n_haps, A)

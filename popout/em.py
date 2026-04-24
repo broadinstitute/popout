@@ -341,57 +341,6 @@ def update_generations_per_hap_from_stats(
     return T_reg, bucket_assignments, T_global
 
 
-# ---------------------------------------------------------------------------
-# Initialization from hard labels
-# ---------------------------------------------------------------------------
-
-def init_model_from_labels(
-    geno: jnp.ndarray,
-    labels: jnp.ndarray,
-    n_ancestries: int,
-    gen_since_admix: float = 20.0,
-) -> AncestryModel:
-    """Build initial AncestryModel from hard ancestry assignments.
-
-    Parameters
-    ----------
-    geno : (H, T) — allele matrix
-    labels : (H,) — integer ancestry labels
-    n_ancestries : int
-    gen_since_admix : initial guess for T
-
-    Returns
-    -------
-    AncestryModel with initial parameter estimates
-    """
-    H, T = geno.shape
-    A = n_ancestries
-    geno_f = geno.astype(jnp.float32)
-
-    freq = jnp.zeros((A, T))
-    mu_counts = jnp.zeros(A)
-    for a in range(A):
-        mask = (labels == a)
-        count = mask.sum()
-        mu_counts = mu_counts.at[a].set(count)
-        if count > 0:
-            freq = freq.at[a].set(
-                (geno_f * mask[:, None]).sum(axis=0) / count
-            )
-        else:
-            freq = freq.at[a].set(geno_f.mean(axis=0))
-
-    freq = jnp.clip(freq, 1e-4, 1.0 - 1e-4)
-    mu = mu_counts / mu_counts.sum()
-
-    return AncestryModel(
-        n_ancestries=A,
-        mu=mu,
-        gen_since_admix=gen_since_admix,
-        allele_freq=freq,
-    )
-
-
 def init_model_soft(
     geno,
     responsibilities: jnp.ndarray,
@@ -1297,7 +1246,15 @@ def run_em_genome(
             # Subsequent chromosomes: use fitted params, 1 iteration to adapt
             log.info("=== Chromosome %s (warm-started, 1 iter) ===", chrom_data.chrom)
 
-            geno = jnp.array(chrom_data.geno)
+            from ._device import fits_on_device
+            if fits_on_device(chrom_data.geno.nbytes):
+                geno = jnp.array(chrom_data.geno)
+                log.info("  geno %.1f GB → device-resident",
+                         chrom_data.geno.nbytes / 1e9)
+            else:
+                geno = chrom_data.geno
+                log.info("  geno %.1f GB > device budget → host-resident",
+                         chrom_data.geno.nbytes / 1e9)
             d_morgan_j = jnp.array(chrom_data.genetic_distances)
 
             # Quick soft init for this chromosome's allele frequencies

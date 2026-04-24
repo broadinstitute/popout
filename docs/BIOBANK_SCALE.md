@@ -3,7 +3,7 @@
 Tracks known places where tensor shapes proportional to H (haplotype
 count, 500k–1M+) must be batched rather than materialized whole.
 
-Last audited: 2026-04-22.
+Last audited: 2026-04-24.
 
 ## Fixed
 
@@ -19,6 +19,11 @@ Last audited: 2026-04-22.
 | `output.py` `write_ancestry_tracts` | `np.array(result.calls)` redundant 10 GB copy | `np.asarray()` — zero-copy when input is already ndarray |
 | `em.py` ancestry proportion logging | `(result.calls == a).mean()` creates 10 GB bool × 20 ancestries | Chunked `np.bincount` in 50k-hap slices |
 | `em.py` `run_em` line 542 | `jnp.array(geno_np)` unconditionally uploads 27 GB to 40 GB A100; OOMs at T≥25k | `fits_on_device` guard; host-resident with batched transfers when geno exceeds device budget |
+| `em.py` `run_em_genome` warm-start | `jnp.array(chrom_data.geno)` on chroms 2+; same unconditional upload | `fits_on_device` guard (mirroring the chrom-1 fix) |
+| `recursive_seed.py` seeding_mask | `geno[bool_mask]` copies 25 GB contiguously | `_MaskedGeno` wrapper — 4 MB index array, zero geno copy |
+| `hmm.py` `forward_backward_decode` | `max_post` allocated as `(H, T) float32` — 108 GB at T=25k | Changed to `float16`; matches the block-emissions decode path |
+| `hmm.py` `forward_backward_bucketed_decode` | Same `float32` `max_post` | Changed to `float16` |
+| `em.py` `init_model_from_labels` | `geno.astype(jnp.float32)` on full geno — 108 GB | Deleted (uncalled dead code) |
 
 ## Known remaining
 
@@ -57,3 +62,56 @@ bytes for serialization should use zero-copy buffer wrapping (e.g.
 int8/int16/int32 arrays internally promote to int64 working buffers of
 the same element count as the input. At 10 GB of int8, that's 80 GB of
 scratch. Always chunk these reductions when the input exceeds ~1 GB.
+
+## Memory traps to watch for
+
+The following idioms look innocuous but silently allocate tensors
+proportional to H or H*T at biobank scale. Each has bitten us at least once.
+
+### 1. `jnp.array(big_numpy_array)`
+Unconditional device upload. Always gate with `fits_on_device(arr.nbytes)`.
+Fixed sites: `em.py:544`, `em.py:1300`, `recursive_seed.py:301`,
+`recursive_seed.py:786`.
+
+### 2. `arr[bool_mask]`
+Boolean-mask indexing always copies the selected rows contiguously. At
+(H, T) uint8 with H~1M, T~25k, that's 25 GB. Use integer indices and a
+wrapper like `_MaskedGeno` instead.
+
+### 3. `np.bincount(int8_array.ravel())`
+Internally upcasts to int64, producing a scratch buffer 8x the input size.
+At 10 GB int8 input, that's 80 GB. Chunk the bincount: call it in batches
+of ~50k haplotypes and sum results.
+
+### 4. `np.array(lazy_jax_expression)`
+Forces materialization of any pending JAX graph. If that graph depends on
+an (H, T, A) intermediate, materialization peaks at `H*T*A*4` bytes.
+Always call `jax.device_get` immediately after producing a result you
+intend to return from a function, to sever lazy dependencies.
+
+### 5. `(H, T)` output arrays at T >= 25k
+Even at fp16, `(1M, 25k)` is 54 GB. Never preallocate full-H output
+tensors when an incremental write path exists. Stream to disk via
+`ParquetWriter.write_batch` inside the decode loop.
+
+### 6. `ndarray.tobytes()` for pa.py_buffer
+Always copies. pyarrow accepts the buffer protocol directly: use
+`pa.py_buffer(ndarray)` for zero-copy.
+
+### 7. `row_group_size=H` in `pq.write_table`
+Forces the whole column to one row group; pyarrow holds all buffers alive
+until the group is finalized. Use a `ParquetWriter` loop with ~50k haps
+per row group.
+
+### 8. Wrappers with `__array__` fallback
+A `_MaskedGeno`-style wrapper that overrides `__getitem__` but inherits
+numpy's `__array__` protocol gets silently materialized by any
+`np.asarray(wrapper)` or `jnp.asarray(wrapper)` call. Make sure the
+wrapper's `__array__` is intentional and the code path that triggers it
+is gated by a size check.
+
+### 9. Python loops over blocks/ancestries with JAX ops
+A Python `for` loop that does `x.at[idx].add(...)` on a JAX array creates
+one XLA trace entry per iteration. They merge into a single graph whose
+compiled-kernel argument size exceeds device memory. Replace with
+`jax.vmap` or `jax.lax.scan`.

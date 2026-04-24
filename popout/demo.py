@@ -104,7 +104,11 @@ def run_demo(
         gen_since_admix=float(true_params["gen_since_admix"]),
         allele_freq=jnp.array(true_params["pop_freq"]),
     )
-    geno_j = jnp.array(chrom_data.geno)
+    from ._device import fits_on_device
+    if fits_on_device(chrom_data.geno.nbytes):
+        geno_j = jnp.array(chrom_data.geno)
+    else:
+        geno_j = chrom_data.geno
     d_morgan_j = jnp.array(chrom_data.genetic_distances.astype(np.float64))
 
     t0 = time.perf_counter()

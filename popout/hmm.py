@@ -1276,7 +1276,7 @@ def forward_backward_decode(
     emit_pad = pc["emit_pad"]
 
     calls = _np.zeros((H, T), dtype=_np.int8)
-    max_post = _np.zeros((H, T), dtype=_np.float32) if compute_max_post else None
+    max_post = _np.zeros((H, T), dtype=_np.float16) if compute_max_post else None
     global_sums = _np.zeros((H, A), dtype=_np.float64) if compute_max_post else None
 
     for start in range(0, H, batch_size):
@@ -1323,7 +1323,7 @@ def forward_backward_bucketed_decode(
     B = len(model.bucket_centers)
 
     calls = _np.zeros((H, T), dtype=_np.int8)
-    max_post = _np.zeros((H, T), dtype=_np.float32) if compute_max_post else None
+    max_post = _np.zeros((H, T), dtype=_np.float16) if compute_max_post else None
     global_sums = _np.zeros((H, A), dtype=_np.float64) if compute_max_post else None
 
     bucket_np = _np.array(model.bucket_assignments)
