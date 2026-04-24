@@ -89,6 +89,12 @@ def consolidate(
     Returns
     -------
     Possibly modified list of AncestryResult with reduced K.
+
+    .. warning::
+       When merges occur, the input ``results`` entries' ``.calls`` arrays
+       are **mutated in place** to avoid a 27 GB double-allocation at
+       biobank scale.  Callers must not hold references to the input
+       results' calls buffers across this call.
     """
     if not results:
         return results
@@ -300,8 +306,16 @@ def consolidate(
             bucket_assignments=old_model.bucket_assignments,
         )
 
-        # Remap calls (int8 indexer → int8 output, avoids 4× bloat)
-        new_calls = remap_i8[res.calls]
+        # Remap calls in place to avoid holding old + new (27 GB each)
+        # simultaneously.  Chunked to bound peak transient to ~1.3 GB.
+        # NOTE: mutates res.calls — callers must not hold references to
+        # the input results' calls arrays across this call.
+        _REMAP_CHUNK = 50_000
+        H_res = res.calls.shape[0]
+        for start in range(0, H_res, _REMAP_CHUNK):
+            end = min(start + _REMAP_CHUNK, H_res)
+            res.calls[start:end] = remap_i8[res.calls[start:end]]
+        new_calls = res.calls
 
         # Remap global_sums if available
         new_decode = None
