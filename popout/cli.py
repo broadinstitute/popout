@@ -689,6 +689,11 @@ def main(argv: list[str] | None = None) -> None:
 
     if write_dense_decode:
         for res, cdata in zip(results, chrom_data_list):
+            # Skip if already streamed during decode (parquet_path is set)
+            if res.decode is not None and res.decode.parquet_path is not None:
+                log.info("Decode parquet already written: %s",
+                         res.decode.parquet_path)
+                continue
             write_decode_parquet(
                 res, cdata,
                 f"{out_prefix}.chr{cdata.chrom}.decode.parquet",

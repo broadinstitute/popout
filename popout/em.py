@@ -432,6 +432,7 @@ def run_em(
     checkpoint_after_em: Optional[str] = None,
     ancestry_names: Optional[list[str]] = None,
     write_dense_decode: bool = False,
+    decode_parquet_path: Optional[str] = None,
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -814,10 +815,28 @@ def run_em(
         H_total = chrom_data.n_haps
         calls = np.empty((H_total, chrom_data.n_sites), dtype=np.int8)
         global_sums = np.zeros((H_total, n_anc), dtype=np.float64)
-        max_post = (
-            np.empty((H_total, chrom_data.n_sites), dtype=np.float16)
-            if write_dense_decode else None
-        )
+
+        # Stream max_post to parquet when a path is provided, avoiding a
+        # full (H, T) fp16 preallocate (54 GB at AoU scale).
+        stream_to_parquet = (write_dense_decode and decode_parquet_path is not None)
+        decode_writer = None
+        if stream_to_parquet:
+            from .output import DecodeParquetWriter
+            decode_writer = DecodeParquetWriter(
+                decode_parquet_path,
+                T=chrom_data.n_sites, K=n_anc,
+                chrom=chrom_data.chrom, pos_bp=chrom_data.pos_bp,
+                include_max_post=True,
+            )
+            max_post = None
+            log.info("  Streaming decode to %s (no full max_post alloc)",
+                     decode_parquet_path)
+        else:
+            max_post = (
+                np.empty((H_total, chrom_data.n_sites), dtype=np.float16)
+                if write_dense_decode else None
+            )
+
         for bs in range(0, H_total, block_batch):
             be = min(bs + block_batch, H_total)
             bd_chunk = BlockData(
@@ -837,18 +856,37 @@ def run_em(
                 jnp.einsum('hba,b->ha', gb_chunk, block_widths_j),
                 dtype=np.float64,
             )
-            if max_post is not None:
-                max_post_block = np.array(jnp.max(gb_chunk, axis=2), dtype=np.float16)
-                max_post[bs:be] = max_post_block[:, site_to_block]
-            del gb_chunk
             # Expand calls to per-site via integer gather (int8, no A dimension)
-            calls[bs:be] = calls_block[:, site_to_block]
+            calls_chunk = calls_block[:, site_to_block]
+            calls[bs:be] = calls_chunk
+
+            if decode_writer is not None:
+                # Stream max_post chunk directly to parquet
+                max_post_block = np.array(
+                    jnp.max(gb_chunk, axis=2), dtype=np.float16,
+                )
+                mp_chunk = max_post_block[:, site_to_block]
+                decode_writer.write_batch(calls_chunk, mp_chunk)
+                del mp_chunk, max_post_block
+            elif max_post is not None:
+                max_post_block = np.array(
+                    jnp.max(gb_chunk, axis=2), dtype=np.float16,
+                )
+                max_post[bs:be] = max_post_block[:, site_to_block]
+
+            del gb_chunk
             log.info("  decode chunk %d–%d / %d", bs, be, H_total)
+
+        if decode_writer is not None:
+            decode_writer.close()
         if max_post is not None:
             assert max_post.dtype == np.float16, (
                 f"max_post must be float16 for memory; got {max_post.dtype}"
             )
-        decode = DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)
+        decode = DecodeResult(
+            calls=calls, max_post=max_post, global_sums=global_sums,
+            parquet_path=decode_parquet_path if stream_to_parquet else None,
+        )
         result = AncestryResult(
             calls=calls, model=model, chrom=chrom_data.chrom,
             decode=decode,
@@ -1227,6 +1265,10 @@ def run_em_genome(
                     return None
 
                 em_ckpt_path = f"{out_prefix}.em_checkpoint" if (checkpoint_after_em and out_prefix) else None
+                _decode_pq = (
+                    f"{out_prefix}.chr{chrom_data.chrom}.decode.parquet"
+                    if (write_dense_decode and out_prefix) else None
+                )
                 result = run_em(
                     chrom_data,
                     n_ancestries=em_n_ancestries,
@@ -1245,6 +1287,7 @@ def run_em_genome(
                     freeze_anchors_iters=freeze_anchors_iters,
                     checkpoint_after_em=em_ckpt_path,
                     write_dense_decode=write_dense_decode,
+                    decode_parquet_path=_decode_pq,
                 )
                 fitted_model = result.model
 

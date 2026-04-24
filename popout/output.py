@@ -19,6 +19,37 @@ from .datatypes import AncestryResult, ChromData
 log = logging.getLogger(__name__)
 
 
+def _load_max_post_from_parquet(path: str, n_haps: int) -> np.ndarray:
+    """Load max_post from a decode parquet file.
+
+    Reads row groups incrementally so peak transient memory is one row
+    group (~2.5 GB at 50k haps × 25k sites × fp16) rather than the full
+    (H, T) array all at once during parquet decompression.
+    """
+    import pyarrow.parquet as pq
+
+    pf = pq.ParquetFile(path)
+    meta = pf.schema_arrow.metadata or {}
+    T = int(meta[b"T"])
+    H = pf.metadata.num_rows
+    assert H == n_haps, f"Parquet has {H} rows but expected {n_haps}"
+
+    max_post = np.empty((H, T), dtype=np.float16)
+    row = 0
+    for rg_idx in range(pf.num_row_groups):
+        rg = pf.read_row_group(rg_idx, columns=["max_post"])
+        mp_col = rg.column("max_post")
+        for chunk in mp_col.chunks:
+            n_rows = len(chunk)
+            mp_buf = chunk.buffers()[2]
+            mp_flat = np.frombuffer(mp_buf, dtype=np.float16, count=n_rows * T)
+            max_post[row:row + n_rows] = mp_flat.reshape(n_rows, T)
+            row += n_rows
+    assert row == H, f"read {row} rows from parquet, expected {H}"
+    log.info("Loaded max_post from %s for tract posteriors", path)
+    return max_post
+
+
 def write_ancestry_tracts(
     results: list[AncestryResult],
     chrom_data_list: list[ChromData],
@@ -92,6 +123,13 @@ def write_ancestry_tracts(
             if write_posteriors:
                 if result.decode is not None and result.decode.max_post is not None:
                     max_post = result.decode.max_post          # (H, T) float16
+                elif (result.decode is not None
+                      and result.decode.parquet_path is not None):
+                    # max_post was streamed to parquet — load it back per
+                    # row group to avoid a full (H, T) allocation.
+                    max_post = _load_max_post_from_parquet(
+                        result.decode.parquet_path, n_haps,
+                    )
                 elif result.posteriors is not None:
                     # Legacy fallback for test fixtures that still populate posteriors.
                     max_post = np.asarray(result.posteriors).max(axis=2)  # (H, T)
@@ -259,6 +297,97 @@ def write_model(
         save_dict["ancestry_names"] = np.array(ancestry_names, dtype=object)
     np.savez_compressed(f"{out_path}.npz", **save_dict)
     log.info("Wrote model to %s (+ .npz)", out_path)
+
+
+class DecodeParquetWriter:
+    """Streaming writer for decode parquet files.
+
+    Opens a ParquetWriter on enter and writes chunks via write_batch.
+    Used by the decode loop in em.py to stream max_post to disk
+    instead of holding a full (H, T) float16 array in memory.
+    """
+
+    def __init__(
+        self,
+        path: str,
+        T: int,
+        K: int,
+        chrom: str,
+        pos_bp: np.ndarray,
+        include_max_post: bool = True,
+    ):
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        self._path = path
+        self._T = T
+        self._include_max_post = include_max_post
+
+        pos_bp_c = np.ascontiguousarray(np.asarray(pos_bp, dtype=np.int64))
+        metadata = {
+            b"T": str(T).encode("ascii"),
+            b"K": str(K).encode("ascii"),
+            b"chrom": str(chrom).encode("ascii"),
+            b"calls_dtype": b"uint8",
+            b"pos_bp": pos_bp_c.tobytes(),
+        }
+        if include_max_post:
+            metadata[b"max_post_dtype"] = b"float16"
+
+        schema_fields = [("calls", pa.large_binary())]
+        if include_max_post:
+            schema_fields.append(("max_post", pa.large_binary()))
+        self._schema = pa.schema(schema_fields, metadata=metadata)
+
+        self._writer = pq.ParquetWriter(
+            path, self._schema,
+            compression="zstd", compression_level=1,
+            use_dictionary=False,
+        )
+
+    def write_batch(
+        self,
+        calls_chunk: np.ndarray,
+        max_post_chunk: np.ndarray | None = None,
+    ) -> None:
+        """Write one chunk of calls (and optionally max_post) as a row group."""
+        import pyarrow as pa
+
+        chunk_H = calls_chunk.shape[0]
+        T = self._T
+
+        # calls column
+        c_arr = np.ascontiguousarray(calls_chunk.view(np.uint8))
+        c_offsets = np.arange(0, chunk_H * T + 1, T, dtype=np.int64)
+        c_col = pa.Array.from_buffers(
+            pa.large_binary(), chunk_H,
+            [None, pa.py_buffer(c_offsets), pa.py_buffer(c_arr)],
+        )
+        batch_cols = {"calls": c_col}
+
+        if self._include_max_post and max_post_chunk is not None:
+            mp_arr = np.ascontiguousarray(max_post_chunk.astype(np.float16))
+            mp_offsets = np.arange(
+                0, chunk_H * T * 2 + 1, T * 2, dtype=np.int64,
+            )
+            mp_col = pa.Array.from_buffers(
+                pa.large_binary(), chunk_H,
+                [None, pa.py_buffer(mp_offsets), pa.py_buffer(mp_arr)],
+            )
+            batch_cols["max_post"] = mp_col
+
+        batch = pa.record_batch(batch_cols, schema=self._schema)
+        self._writer.write_batch(batch)
+
+    def close(self) -> None:
+        self._writer.close()
+        log.info("Wrote streaming decode parquet to %s", self._path)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
 
 
 def write_decode_parquet(
