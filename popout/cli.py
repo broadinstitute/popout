@@ -334,18 +334,40 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--stop-after-seeding", action="store_true",
         help="Exit after recursive seeding and Stage 1 model init, before "
-             "starting EM iterations. Writes a checkpoint for --resume-from-checkpoint.",
+             "starting EM iterations.",
+    )
+
+    # --- Checkpoint / resume ---
+    parser.add_argument(
+        "--work-dir", type=str, default=None,
+        help="Work directory for checkpoints and intermediate files. "
+             "Resume is automatic when a matching work dir exists. "
+             "Default: {out}.work/",
     )
     parser.add_argument(
+        "--no-checkpoint", action="store_true",
+        help="Disable checkpoint/resume. Kills mid-run lose all progress.",
+    )
+    parser.add_argument(
+        "--restart-stage",
+        choices=["seed", "em", "decode", "tracts", "all"],
+        default=None,
+        help="Invalidate this stage and all subsequent stages, "
+             "forcing recomputation even if checkpoint files exist.",
+    )
+
+    # Deprecated checkpoint flags (kept for backward compatibility)
+    parser.add_argument(
         "--resume-from-checkpoint", type=str, default=None,
-        help="Resume from a checkpoint written by --stop-after-seeding. "
-             "Skips recursion and Stage 1; jumps directly to EM iterations.",
+        help="[Deprecated] Resume is now automatic via --work-dir. "
+             "This flag still works but will be removed in a future release.",
     )
     parser.add_argument(
         "--checkpoint-after-em", action="store_true",
-        help="Write a post-EM checkpoint before the final decode pass. "
-             "Allows resuming from the converged model if decode OOMs.",
+        help="[Deprecated] Post-EM checkpoints are now automatic. "
+             "This flag is a no-op.",
     )
+
     parser.add_argument(
         "--exclude-seeding-samples", type=str, default=None,
         help="Path to a single-column TSV (header: sample_id) of samples to "
@@ -595,6 +617,75 @@ def main(argv: list[str] | None = None) -> None:
             )
             sys.exit(1)
 
+    # --- Deprecation warnings for legacy checkpoint flags ---
+    if args.resume_from_checkpoint is not None:
+        log.warning(
+            "--resume-from-checkpoint is deprecated. Resume is now automatic "
+            "when a work directory exists. Use --work-dir to specify location.",
+        )
+    if args.checkpoint_after_em:
+        log.warning(
+            "--checkpoint-after-em is deprecated and has no effect. "
+            "Post-EM checkpoints are now written automatically.",
+        )
+
+    # --- Work directory for checkpoint/resume ---
+    from .checkpoint import WorkDir
+    work_dir = None
+    if not args.no_checkpoint and args.method not in ("cnn", "cnn-crf"):
+        from pathlib import Path as _Path
+        wd_path = _Path(args.work_dir) if args.work_dir else _Path(f"{args.out}.work")
+
+        recursive_kwargs_for_hash = None
+        if args.seed_method == "recursive":
+            recursive_kwargs_for_hash = dict(
+                min_cluster_size=args.recursive_min_cluster_size,
+                max_depth=args.recursive_max_depth,
+                max_leaves=args.recursive_max_leaves,
+                bic_per_sample=args.recursive_bic_per_sample,
+                em_iter_per_split=args.recursive_em_iter,
+                merge_hellinger_threshold=args.recursive_merge_hellinger,
+                split_restarts=args.recursive_split_restarts,
+                balance_bic_tolerance=args.recursive_balance_tolerance,
+                min_leaf_size=args.recursive_min_leaf_size,
+            )
+
+        pgen_path_for_fp = args.pgen if args.pgen else args.vcf
+        if args.pgen:
+            fp_hash = WorkDir.compute_pgen_fingerprint(pgen_path_for_fp)
+        else:
+            fp_hash = WorkDir.compute_vcf_fingerprint(pgen_path_for_fp)
+
+        work_dir = WorkDir(wd_path)
+        work_dir.open_or_create(
+            popout_version=__version__,
+            input_fingerprint={
+                "pgen_sha_prefix": fp_hash,
+                "n_haps": 2 * n_samples,
+                "thin_cm": args.thin_cm,
+                "seeding_exclusion_sha_prefix": WorkDir.hash_exclusion_file(
+                    args.exclude_seeding_samples,
+                ),
+            },
+            args={
+                "gen_since_admix": args.gen_since_admix,
+                "n_ancestries": args.n_ancestries,
+                "seed_method": args.seed_method,
+                "max_ancestries": args.max_ancestries,
+                "ancestry_detection": args.ancestry_detection,
+                "recursive_kwargs_hash": WorkDir.hash_recursive_kwargs(
+                    recursive_kwargs_for_hash,
+                ),
+                "seed": args.seed,
+                "n_em_iter": args.n_em_iter,
+                "block_emissions": args.block_emissions,
+                "block_size": args.block_size,
+                "freeze_anchors_iters": args.freeze_anchors_iters,
+                "probs": args.probs,
+            },
+            restart_stage=args.restart_stage,
+        )
+
     # --- Stream chromosomes and run pipeline ---
     # We need to keep ChromData for output writing, so collect them
     chrom_data_list = []
@@ -661,6 +752,7 @@ def main(argv: list[str] | None = None) -> None:
             checkpoint_after_em=args.checkpoint_after_em,
             write_dense_decode=write_dense_decode,
             seeding_mask=seeding_mask,
+            work_dir=work_dir,
         )
 
     t_compute = time.perf_counter() - t0
@@ -711,12 +803,21 @@ def main(argv: list[str] | None = None) -> None:
         np.savez_compressed(f"{out_prefix}.spectral.npz", **results[0].spectral)
         log.info("Wrote spectral data to %s.spectral.npz", out_prefix)
 
-    write_ancestry_tracts(
-        results, chrom_data_list, n_samples, sample_names,
-        f"{out_prefix}.tracts.tsv.gz",
-        write_posteriors=args.probs,
-        stats=stats,
-    )
+    tracts_path = f"{out_prefix}.tracts.tsv.gz"
+    if work_dir is not None and work_dir.stage_done("tracts"):
+        log.info("stage tracts: already done, skipping")
+    else:
+        import time as _time
+        t0_tracts = _time.perf_counter()
+        write_ancestry_tracts(
+            results, chrom_data_list, n_samples, sample_names,
+            tracts_path,
+            write_posteriors=args.probs,
+            stats=stats,
+        )
+        if work_dir is not None:
+            work_dir.mark_done("tracts",
+                               wall_s=_time.perf_counter() - t0_tracts)
 
     if write_dense_decode:
         for res, cdata in zip(results, chrom_data_list):

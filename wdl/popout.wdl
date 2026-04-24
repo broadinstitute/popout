@@ -42,10 +42,14 @@ task popout_task {
     Int     recursive_max_leaves     = 20
     Int     recursive_min_leaf_size  = 500
     Boolean stop_after_seeding       = false
-    Boolean checkpoint_after_em      = true
     Boolean post_em_consolidation    = true
-    File?   resume_from_checkpoint
     File?   exclude_seeding_samples    # TSV of sample_ids to exclude from recursive seeding
+
+    # Checkpoint/resume — work dir is captured as output for future resume
+    File?   resume_work_dir                        # tar.gz of a previous .work/ dir
+    String? restart_stage                          # seed, em, decode, tracts, or all
+    Boolean no_checkpoint            = false
+
     String  extra_args               = ""
 
     # Weights & Biases — API key string or gs:// URL to a file containing it
@@ -56,7 +60,7 @@ task popout_task {
     String gpu_type      = "nvidia-tesla-a100"
     String zones         = "us-central1-c us-central1-a"
     Int    disk_size_gb  = 500
-    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest"
+    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:worktree-checkpoint"
   }
 
   command <<<
@@ -100,6 +104,13 @@ task popout_task {
     # fallback is equally fast for the matmul shapes popout uses.
     export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_triton_gemm=false"
 
+    # ---- Restore work directory from a previous run (for resume) ----
+    RESUME_TAR="~{default="" resume_work_dir}"
+    if [ -n "$RESUME_TAR" ]; then
+      echo "Restoring work directory from $RESUME_TAR"
+      tar xzf "$RESUME_TAR"
+    fi
+
     # ---- Build popout command ----
     CMD="popout --pgen pgen_dir/ --out ~{output_prefix}"
     ~{if defined(genetic_map) then 'CMD="$CMD --map ~{genetic_map}"' else ''}
@@ -125,10 +136,10 @@ task popout_task {
       CMD="$CMD --freeze-anchors-iters ~{freeze_anchors_iters}"
     fi
     ~{if stop_after_seeding then 'CMD="$CMD --stop-after-seeding"' else ''}
-    ~{if checkpoint_after_em then 'CMD="$CMD --checkpoint-after-em"' else ''}
     ~{if post_em_consolidation then '' else 'CMD="$CMD --no-post-em-consolidation"'}
-    ~{if defined(resume_from_checkpoint) then 'CMD="$CMD --resume-from-checkpoint ~{resume_from_checkpoint}"' else ''}
     ~{if defined(exclude_seeding_samples) then 'CMD="$CMD --exclude-seeding-samples ~{exclude_seeding_samples}"' else ''}
+    ~{if no_checkpoint then 'CMD="$CMD --no-checkpoint"' else ''}
+    ~{if defined(restart_stage) then 'CMD="$CMD --restart-stage ~{restart_stage}"' else ''}
 
     if [ -n "$WANDB_RAW" ]; then CMD="$CMD --monitor wandb"; fi
 
@@ -139,8 +150,14 @@ task popout_task {
     echo "=== Running: $CMD ==="
     eval "$CMD"
 
+    # ---- Capture work directory for future resume ----
+    if [ -d "~{output_prefix}.work" ]; then
+      tar czf "~{output_prefix}.work.tar.gz" "~{output_prefix}.work/"
+      echo "Work directory archived to ~{output_prefix}.work.tar.gz"
+    fi
+
     echo "=== Outputs ==="
-    ls -lh ~{output_prefix}.*
+    ls -lh ~{output_prefix}.* || true
   >>>
 
   output {
@@ -164,7 +181,10 @@ task popout_task {
     File? recursive_leaf_meta  = "~{output_prefix}.recursive_pre_merge.leaf_meta.tsv"
     File? recursive_leaf_freqs = "~{output_prefix}.recursive_pre_merge.leaf_freqs.npz"
 
-    # Checkpoint (produced when seed_method = recursive or stop_after_seeding)
+    # Work directory archive for resume (contains manifest, seed, em, decode)
+    File? work_dir_tar = "~{output_prefix}.work.tar.gz"
+
+    # Legacy checkpoints (still produced alongside work dir for compatibility)
     File? checkpoint      = "~{output_prefix}.checkpoint.npz"
     File? checkpoint_meta = "~{output_prefix}.checkpoint.meta.json"
 
@@ -173,9 +193,6 @@ task popout_task {
 
     # Post-EM consolidation report (produced when post_em_consolidation = true)
     File? consolidation_report = "~{output_prefix}.post_em_consolidation.tsv"
-
-    # Post-EM checkpoint (produced when checkpoint_after_em = true)
-    File? em_checkpoint   = "~{output_prefix}.em_checkpoint.npz"
   }
 
   runtime {
@@ -220,10 +237,14 @@ workflow popout {
     Int     recursive_max_leaves     = 20
     Int     recursive_min_leaf_size  = 500
     Boolean stop_after_seeding       = false
-    Boolean checkpoint_after_em      = true
     Boolean post_em_consolidation    = true
-    File?   resume_from_checkpoint
     File?   exclude_seeding_samples
+
+    # Checkpoint/resume
+    File?   resume_work_dir
+    String? restart_stage
+    Boolean no_checkpoint            = false
+
     String  extra_args               = ""
 
     # Weights & Biases
@@ -234,7 +255,7 @@ workflow popout {
     String gpu_type      = "nvidia-tesla-a100"
     String zones         = "us-central1-c us-central1-a"
     Int    disk_size_gb  = 500
-    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest"
+    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:worktree-checkpoint"
   }
 
   call popout_task {
@@ -262,10 +283,11 @@ workflow popout {
       recursive_max_leaves      = recursive_max_leaves,
       recursive_min_leaf_size   = recursive_min_leaf_size,
       stop_after_seeding        = stop_after_seeding,
-      checkpoint_after_em       = checkpoint_after_em,
       post_em_consolidation     = post_em_consolidation,
-      resume_from_checkpoint    = resume_from_checkpoint,
       exclude_seeding_samples   = exclude_seeding_samples,
+      resume_work_dir           = resume_work_dir,
+      restart_stage             = restart_stage,
+      no_checkpoint             = no_checkpoint,
       extra_args                = extra_args,
       wandb_key       = wandb_key,
       machine_type    = machine_type,
@@ -293,13 +315,13 @@ workflow popout {
     File? recursive_leaf_meta  = popout_task.recursive_leaf_meta
     File? recursive_leaf_freqs = popout_task.recursive_leaf_freqs
 
+    File? work_dir_tar    = popout_task.work_dir_tar
+
     File? checkpoint      = popout_task.checkpoint
     File? checkpoint_meta = popout_task.checkpoint_meta
 
     Array[File] decode_parquet = popout_task.decode_parquet
 
     File? consolidation_report = popout_task.consolidation_report
-
-    File? em_checkpoint   = popout_task.em_checkpoint
   }
 }
