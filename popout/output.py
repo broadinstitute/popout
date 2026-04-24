@@ -20,11 +20,10 @@ log = logging.getLogger(__name__)
 
 
 def _load_max_post_from_parquet(path: str, n_haps: int) -> np.ndarray:
-    """Load max_post from a decode parquet file.
+    """Load max_post from a decode parquet file into a single array.
 
-    Reads row groups incrementally so peak transient memory is one row
-    group (~2.5 GB at 50k haps × 25k sites × fp16) rather than the full
-    (H, T) array all at once during parquet decompression.
+    Only safe at small scale. At biobank scale (H*T*2 > 10 GB), use
+    ``_iter_max_post_groups`` to stream per row group instead.
     """
     import pyarrow.parquet as pq
 
@@ -33,6 +32,14 @@ def _load_max_post_from_parquet(path: str, n_haps: int) -> np.ndarray:
     T = int(meta[b"T"])
     H = pf.metadata.num_rows
     assert H == n_haps, f"Parquet has {H} rows but expected {n_haps}"
+
+    alloc_bytes = H * T * 2
+    if alloc_bytes > 10 * 1024**3:
+        raise RuntimeError(
+            f"_load_max_post_from_parquet would allocate {alloc_bytes / 1e9:.0f} GB "
+            f"({H} haps × {T} sites × fp16). Use the streaming row-group "
+            "path in write_ancestry_tracts instead."
+        )
 
     max_post = np.empty((H, T), dtype=np.float16)
     row = 0
@@ -48,6 +55,33 @@ def _load_max_post_from_parquet(path: str, n_haps: int) -> np.ndarray:
     assert row == H, f"read {row} rows from parquet, expected {H}"
     log.info("Loaded max_post from %s for tract posteriors", path)
     return max_post
+
+
+def _iter_max_post_groups(path: str):
+    """Yield ``(start_row, end_row, mp_chunk)`` per parquet row group.
+
+    Peak transient: one row group's worth of max_post (~2.5 GB at 50k
+    haps × 25k sites × fp16).  The previous group is freed before the
+    next is read.
+    """
+    import pyarrow.parquet as pq
+
+    pf = pq.ParquetFile(path)
+    T = int(pf.schema_arrow.metadata[b"T"])
+    row = 0
+    for rg_idx in range(pf.num_row_groups):
+        rg = pf.read_row_group(rg_idx, columns=["max_post"])
+        mp_col = rg.column("max_post")
+        parts = []
+        for chunk in mp_col.chunks:
+            n = len(chunk)
+            buf = chunk.buffers()[2]
+            arr = np.frombuffer(buf, dtype=np.float16, count=n * T)
+            parts.append(arr.reshape(n, T).copy())
+        mp_block = np.concatenate(parts) if len(parts) > 1 else parts[0]
+        n_block = mp_block.shape[0]
+        yield row, row + n_block, mp_block
+        row += n_block
 
 
 def write_ancestry_tracts(
@@ -114,22 +148,19 @@ def write_ancestry_tracts(
             if n_sites == 0:
                 continue
 
-            # Load max_post for mean_posterior column.
+            # Resolve max_post for mean_posterior column.
             # Within a tract where hap_calls[s..e] == anc, by construction
             # hap_calls[t] = argmax_a posteriors[h,t,a], so
             # posteriors[h,t,anc] = max_a posteriors[h,t,a] = max_post[h,t].
             # Therefore posteriors[hi,s:e+1,anc].mean() == max_post[hi,s:e+1].mean().
             max_post = None
+            parquet_path = None
             if write_posteriors:
                 if result.decode is not None and result.decode.max_post is not None:
                     max_post = result.decode.max_post          # (H, T) float16
                 elif (result.decode is not None
                       and result.decode.parquet_path is not None):
-                    # max_post was streamed to parquet — load it back per
-                    # row group to avoid a full (H, T) allocation.
-                    max_post = _load_max_post_from_parquet(
-                        result.decode.parquet_path, n_haps,
-                    )
+                    parquet_path = result.decode.parquet_path
                 elif result.posteriors is not None:
                     # Legacy fallback for test fixtures that still populate posteriors.
                     max_post = np.asarray(result.posteriors).max(axis=2)  # (H, T)
@@ -140,15 +171,15 @@ def write_ancestry_tracts(
                         result.chrom,
                     )
 
-            # Vectorized switch detection per haplotype:
-            # find where ancestry changes between consecutive sites
-            for hi in range(n_haps):
+            # Per-haplotype tract writer (shared by both paths)
+            def _write_hap_tracts(hi, mp_row):
+                """Write tracts for one haplotype. mp_row is (T,) or None."""
+                nonlocal n_tracts
                 si = hi // 2
                 hap = hi % 2
                 sample = sample_names[si]
-                hap_calls = calls[hi]  # (n_sites,)
+                hap_calls = calls[hi]
 
-                # Find switch points via numpy
                 switches = np.where(hap_calls[1:] != hap_calls[:-1])[0] + 1
                 starts = np.concatenate([[0], switches])
                 ends = np.concatenate([switches - 1, [n_sites - 1]])
@@ -159,23 +190,32 @@ def write_ancestry_tracts(
                     n_sites_tract = e - s + 1
                     line = f"{chrom}\t{pos_bp[s]}\t{pos_bp[e]}\t{sample}\t{hap}\t{anc}\t{n_sites_tract}"
                     if write_posteriors:
-                        if max_post is not None:
-                            mean_post = float(max_post[hi, s:e + 1].mean())
+                        if mp_row is not None:
+                            mean_post = float(mp_row[s:e + 1].mean())
                             line += f"\t{mean_post:.4f}"
                         else:
-                            line += "\t."  # column present but missing
+                            line += "\t."
                     f.write(line + "\n")
                     n_tracts += 1
-                    # Accumulate for stats
                     tract_lengths_by_anc.setdefault(anc, []).append(n_sites_tract)
 
-            # Posterior confidence: mean of max posterior per site
-            # max_post was resolved above (from decode.max_post or posteriors fallback)
-            if max_post is None and result.decode is not None and result.decode.max_post is not None:
-                max_post = result.decode.max_post
-            if max_post is not None:
-                confidence_sum += float(max_post.sum(dtype=np.float32))
-                confidence_count += max_post.size
+            if parquet_path is not None:
+                # Stream max_post per row group (~2.5 GB each) instead of
+                # loading the full (H, T) fp16 array (54 GB at AoU scale).
+                log.info("Streaming max_post from %s for tract posteriors",
+                         parquet_path)
+                for rg_start, rg_end, mp_chunk in _iter_max_post_groups(parquet_path):
+                    for hi in range(rg_start, rg_end):
+                        _write_hap_tracts(hi, mp_chunk[hi - rg_start])
+                    confidence_sum += float(mp_chunk.sum(dtype=np.float32))
+                    confidence_count += mp_chunk.size
+            else:
+                for hi in range(n_haps):
+                    mp_row = max_post[hi] if max_post is not None else None
+                    _write_hap_tracts(hi, mp_row)
+                if max_post is not None:
+                    confidence_sum += float(max_post.sum(dtype=np.float32))
+                    confidence_count += max_post.size
 
     log.info("Wrote %d ancestry tracts to %s", n_tracts, out_path)
 
