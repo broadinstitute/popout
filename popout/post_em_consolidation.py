@@ -12,6 +12,7 @@ without rerunning EM.  The converged posteriors serve as evidence.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -311,11 +312,23 @@ def consolidate(
                 new_gs = np.zeros((old_gs.shape[0], new_A), dtype=old_gs.dtype)
                 for old_a in range(A):
                     new_gs[:, remap[old_a]] += old_gs[:, old_a]
+            # On-disk parquet has pre-consolidation ancestry labels.
+            # Null out the path so cli.py re-writes with remapped calls.
+            new_parquet_path = res.decode.parquet_path
+            if new_parquet_path is not None:
+                try:
+                    os.remove(new_parquet_path)
+                    log.info("Removed stale pre-consolidation decode "
+                             "parquet: %s", new_parquet_path)
+                except OSError as e:
+                    log.warning("Could not remove stale parquet %s: %s",
+                                new_parquet_path, e)
+                new_parquet_path = None
             new_decode = DecodeResult(
                 calls=new_calls,
                 max_post=res.decode.max_post,
                 global_sums=new_gs,
-                parquet_path=res.decode.parquet_path,
+                parquet_path=new_parquet_path,
             )
 
         new_results.append(AncestryResult(
