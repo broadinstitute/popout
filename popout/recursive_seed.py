@@ -147,6 +147,48 @@ def _diag_2gmm_bic_from_labels(X: jnp.ndarray, labels: jnp.ndarray) -> tuple[flo
 
 
 # ---------------------------------------------------------------------------
+# Zero-copy masked genotype wrapper
+# ---------------------------------------------------------------------------
+
+class _MaskedGeno:
+    """Present a subset of geno rows without copying the full matrix.
+
+    ``geno[bool_mask]`` on a biobank-scale (H, T) uint8 array allocates a
+    contiguous copy of every selected row.  At H=1M, T=25k that is ~25 GB
+    of redundant RAM.  This wrapper stores only the kept-row indices
+    (~4 MB int32) and forwards ``__getitem__`` through them, so downstream
+    code that does ``geno[node.indices]`` or ``geno[mask]`` transparently
+    gets real numpy arrays without the upfront copy.
+    """
+
+    __slots__ = ("_geno", "_kept", "shape", "dtype", "size")
+
+    def __init__(self, geno: np.ndarray, kept: np.ndarray):
+        self._geno = geno                              # (H_total, T)
+        self._kept = kept.astype(np.intp, copy=False)  # (H_kept,)
+        H_kept = int(kept.shape[0])
+        T = geno.shape[1]
+        self.shape = (H_kept, T)
+        self.dtype = geno.dtype
+        self.size = H_kept * T
+
+    @property
+    def nbytes(self) -> int:
+        return self.size * self.dtype.itemsize
+
+    def __getitem__(self, key):
+        if isinstance(key, tuple):
+            row_key, col_key = key[0], key[1:]
+            rows = self._geno[self._kept[row_key]]
+            return rows[(slice(None),) + col_key] if col_key else rows
+        return self._geno[self._kept[key]]
+
+    def __array__(self, dtype=None):
+        arr = self._geno[self._kept]
+        return np.array(arr, dtype=dtype) if dtype is not None else arr
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -206,8 +248,9 @@ def recursive_split_seed(
 
     if seeding_mask is not None:
         H_total = H
-        geno = geno[seeding_mask]
-        H, T = geno.shape
+        kept_indices = np.where(seeding_mask)[0].astype(np.intp)
+        geno = _MaskedGeno(geno, kept_indices)
+        H = int(kept_indices.size)
         n_excluded = (H_total - H) // 2
         log.info("Seeding on %d / %d haplotypes after excluding %d samples",
                  H, H_total, n_excluded)
