@@ -782,7 +782,9 @@ def _run_k2_em_split(
             sub_geno_j = geno_j  # root node — no copy needed
         else:
             sub_geno_j = geno_j[jnp.asarray(indices)]
-    elif fits_on_device(sub_geno.nbytes):
+    elif fits_on_device(sub_geno.nbytes * 2):
+        # 2× headroom: geno + forward_backward working state (emissions,
+        # forward/backward arrays, intermediates) is roughly equal to geno.
         sub_geno_j = jnp.asarray(sub_geno)
     else:
         sub_geno_j = sub_geno  # keep on host; downstream batches upload

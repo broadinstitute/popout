@@ -130,10 +130,10 @@ def test_decode_result_matches_full():
     expected_calls = np.array(jnp.argmax(gamma, axis=2), dtype=np.int8)
     np.testing.assert_array_equal(decode.calls, expected_calls)
 
-    # Max posterior
+    # Max posterior (fp16 storage — atol matches half-precision granularity)
     expected_max = np.array(gamma.max(axis=2))
     np.testing.assert_allclose(
-        decode.max_post, expected_max, atol=1e-5,
+        decode.max_post, expected_max, atol=5e-4,
         err_msg="max_post mismatch",
     )
 

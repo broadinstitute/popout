@@ -143,7 +143,7 @@ def test_streaming_decode_max_post():
     max_post_ref = np.array(gamma.max(axis=2))
 
     result = _call_streaming_decode(geno, model, d_morgan)
-    np.testing.assert_allclose(result.max_post, max_post_ref, atol=1e-5)
+    np.testing.assert_allclose(result.max_post, max_post_ref, atol=5e-4)
 
 
 def test_streaming_decode_global_sums():

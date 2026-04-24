@@ -567,6 +567,18 @@ def run_em(
             all_switches_per_hap: list[np.ndarray] = []
             _pf_counts = jnp.zeros((bd.n_blocks, bd.max_patterns, n_anc), dtype=jnp.float32)
 
+            # Pre-compute block geometry for vectorized M-step:
+            # Pad site dimension to exact multiple of block_size so we can
+            # reshape (chunk, T_padded) → (chunk, n_blocks, block_size)
+            # and replace Python loops with a single einsum + broadcast.
+            T_padded = bd.n_blocks * bd.block_size
+            pad_right = T_padded - T_sites
+
+            # Pattern-freq scatter helper (vmapped over blocks)
+            _max_p, _n_anc = bd.max_patterns, n_anc
+            def _scatter_block(pat_col, gb_col):
+                return jnp.zeros((_max_p, _n_anc)).at[pat_col].add(gb_col)
+
             for bs in range(0, H_total, block_batch):
                 be = min(bs + block_batch, H_total)
                 bd_chunk = BlockData(
@@ -582,26 +594,27 @@ def run_em(
                 gb_chunk = forward_backward_blocks(model, bd_chunk)
                 geno_chunk = geno[bs:be].astype(jnp.float32)
 
-                # --- M-step accumulators from block gamma (no per-site expansion) ---
+                # --- M-step accumulators (vectorized, no Python loops) ---
 
-                # weighted_counts[a, t]: for sites t in block b,
-                # gamma[h,t,a] = gamma_block[h,b,a], so:
-                # weighted_counts[a, s:e] += gamma_block[:,b,:].T @ geno[:,s:e]
-                for b_idx in range(bd.n_blocks):
-                    s, e = int(b_starts[b_idx]), int(b_ends[b_idx])
-                    # (A, chunk) @ (chunk, w) → (A, w)
-                    weighted_counts = weighted_counts.at[:, s:e].add(
-                        gb_chunk[:, b_idx, :].T @ geno_chunk[:, s:e]
-                    )
+                # weighted_counts: pad geno to (chunk, n_blocks, block_size),
+                # then einsum with block gamma (chunk, n_blocks, A).
+                if pad_right > 0:
+                    geno_blocked = jnp.pad(
+                        geno_chunk, ((0, 0), (0, pad_right)),
+                    ).reshape(-1, bd.n_blocks, bd.block_size)
+                else:
+                    geno_blocked = geno_chunk.reshape(-1, bd.n_blocks, bd.block_size)
+                # (A, n_blocks, block_size) = einsum('hba,hbs->abs', gamma, geno)
+                wc_blocked = jnp.einsum('hba,hbs->abs', gb_chunk, geno_blocked)
+                weighted_counts = weighted_counts + wc_blocked.reshape(n_anc, T_padded)[:, :T_sites]
 
-                # total_weights[a, t]: for sites in block b, each site gets
-                # the same per-ancestry sum
-                for b_idx in range(bd.n_blocks):
-                    s, e = int(b_starts[b_idx]), int(b_ends[b_idx])
-                    per_anc = gb_chunk[:, b_idx, :].sum(axis=0)  # (A,)
-                    total_weights = total_weights.at[:, s:e].add(
-                        jnp.broadcast_to(per_anc[:, None], (n_anc, e - s))
-                    )
+                # total_weights: per-ancestry sum per block, broadcast to sites
+                per_anc_all = gb_chunk.sum(axis=0)  # (n_blocks, A)
+                tw_blocked = jnp.broadcast_to(
+                    per_anc_all.T[:, :, None],  # (A, n_blocks, 1)
+                    (n_anc, bd.n_blocks, bd.block_size),
+                )
+                total_weights = total_weights + tw_blocked.reshape(n_anc, T_padded)[:, :T_sites]
 
                 # mu_sum[a] = sum_h sum_b gamma_block[h,b,a] * width[b]
                 mu_sum = mu_sum + jnp.einsum('hba,b->a', gb_chunk, block_widths_j)
@@ -622,17 +635,15 @@ def run_em(
                 else:
                     all_switches_per_hap.append(np.zeros(be - bs, dtype=np.int32))
 
-                # Accumulate pattern-freq scatter-add counts
+                # Pattern-freq scatter: vmap over blocks instead of Python loop
                 pat_idx_chunk = jnp.array(bd_chunk.pattern_indices)
-                for b_idx in range(bd.n_blocks):
-                    _pf_counts = _pf_counts.at[b_idx].add(
-                        jnp.zeros((bd.max_patterns, n_anc)).at[pat_idx_chunk[:, b_idx]].add(
-                            gb_chunk[:, b_idx, :]
-                        )
-                    )
+                _pf_counts = _pf_counts + jax.vmap(_scatter_block)(
+                    pat_idx_chunk.T,                    # (n_blocks, chunk)
+                    jnp.moveaxis(gb_chunk, 1, 0),       # (n_blocks, chunk, A)
+                )
 
                 weighted_counts.block_until_ready()
-                del gb_chunk, geno_chunk, calls_block, pat_idx_chunk
+                del gb_chunk, geno_chunk, geno_blocked, calls_block, pat_idx_chunk
 
             switches_per_hap = np.concatenate(all_switches_per_hap)
             em_stats = EMStats(
@@ -702,15 +713,16 @@ def run_em(
         new_pf = None
         if bd is not None and use_block_emissions:
             if _pf_counts is not None:
-                # Normalize pre-accumulated scatter-add counts
+                # Normalize pre-accumulated scatter-add counts (vectorized)
                 pseudocount_pf = 0.01
-                new_pf = jnp.full_like(_pf_counts, pseudocount_pf)
-                for b_idx in range(bd.n_blocks):
-                    n_p = int(bd.pattern_counts[b_idx])
-                    total = _pf_counts[b_idx, :n_p, :].sum(axis=0, keepdims=True)
-                    new_pf = new_pf.at[b_idx, :n_p, :].set(
-                        (_pf_counts[b_idx, :n_p, :] + pseudocount_pf) / (total + pseudocount_pf * n_p)
-                    )
+                pattern_counts_j = jnp.array(bd.pattern_counts)
+                p_range = jnp.arange(bd.max_patterns)
+                valid_mask = p_range[None, :] < pattern_counts_j[:, None]  # (n_blocks, max_p)
+                masked_counts = _pf_counts * valid_mask[:, :, None]
+                totals = masked_counts.sum(axis=1, keepdims=True)  # (n_blocks, 1, A)
+                n_p_j = pattern_counts_j[:, None, None].astype(jnp.float32)
+                normalized = (masked_counts + pseudocount_pf) / (totals + pseudocount_pf * n_p_j)
+                new_pf = jnp.where(valid_mask[:, :, None], normalized, pseudocount_pf)
             else:
                 new_pf = update_pattern_freq(bd, gamma_block)
 
