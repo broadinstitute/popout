@@ -254,6 +254,16 @@ def consolidate(
     # Map merged sources through to their target's new index
     remap = np.array([old_to_new[merge_map[a]] for a in range(A)], dtype=np.int32)
 
+    assert A <= 127, (
+        f"Cannot encode A={A} ancestries in int8. "
+        "Widen calls dtype throughout the pipeline first."
+    )
+    assert new_A >= 1, f"Consolidation removed all ancestries: new_A={new_A}"
+    # Cast to int8 before indexing into (H, T) int8 calls — fancy-indexing
+    # returns the indexer's dtype, so int32 remap would produce 108 GB int32
+    # output at biobank scale.
+    remap_i8 = remap.astype(np.int8)
+
     log.info("Post-EM consolidation: K=%d → K=%d", A, new_A)
 
     # --- Update all results ---
@@ -289,8 +299,8 @@ def consolidate(
             bucket_assignments=old_model.bucket_assignments,
         )
 
-        # Remap calls
-        new_calls = remap[res.calls]
+        # Remap calls (int8 indexer → int8 output, avoids 4× bloat)
+        new_calls = remap_i8[res.calls]
 
         # Remap global_sums if available
         new_decode = None
