@@ -26,6 +26,8 @@ Last audited: 2026-04-24.
 | `em.py` `init_model_from_labels` | `geno.astype(jnp.float32)` on full geno — 108 GB | Deleted (uncalled dead code) |
 | `post_em_consolidation.py` `consolidate` | `(calls == a)` and `(calls == a) & (mp > 0.8)` create 25 GB bool masks per ancestry in a loop | Chunked `np.bincount` in 50k-hap slices; parquet branch already chunked |
 | `recursive_seed.py` `_run_k2_em_split` + main loop | `geno[node.indices]` on `_MaskedGeno` triggers advanced-index copy (30+ GB) | `_sub_geno()` helper composes index arrays through `_MaskedGeno` — zero geno copy |
+| `post_em_consolidation.py` `consolidate` line 293 | `remap[res.calls]` — int32 remap fancy-indexes int8 calls, producing int32 (H,T) = 108 GB; even with int8 remap, allocates a second 27 GB array while old is still alive (54 GB peak) | Cast `remap` to int8 + chunked in-place remap (`res.calls[s:e] = remap_i8[res.calls[s:e]]`); peak transient ~1.3 GB |
+| `panel.py` `extract_whole_haplotypes` / `extract_segments` | `np.array(result.calls)` copies 27 GB; no parquet-streaming branch for max_post; `np.ones((H,T), bool)` fallback = 27 GB | `np.asarray` zero-copy; added `_iter_max_post_groups` streaming; removed all-True fallback |
 
 ## Known remaining
 
@@ -123,6 +125,22 @@ compiled-kernel argument size exceeds device memory. Replace with
 mask per iteration. At H=1M, T=25k, that's 25 GB × A iterations. Use
 `np.bincount` on the flattened or filtered array in haplotype chunks
 instead.
+
+### 11. Fancy-indexing dtype promotion and double-hold
+`remap[calls]` where `remap` is int32 and `calls` is int8 returns int32
+— 4× the expected size. Cast the lookup table to the result dtype before
+indexing. Even with matching dtypes, `result = remap[arr]` allocates a
+full copy while `arr` is still alive in the enclosing object — peak is
+2× the array size. Remap in place with row-chunk iteration:
+`arr[s:e] = remap[arr[s:e]]`, which limits peak transient to one chunk.
+Document the mutation in the function contract.
+
+### 12. On-disk artifacts stale after in-memory mutations
+Consolidation, renaming, and merging update data structures in memory
+but can leave stale files on disk pointed at by `parquet_path`-style
+fields. Every mutation that invalidates on-disk state must either
+rewrite the file or null out the path so downstream code re-writes it.
+Skipping the rewrite silently corrupts the output.
 
 ## Pattern recurrence policy
 

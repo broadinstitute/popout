@@ -103,30 +103,47 @@ def extract_whole_haplotypes(
     prev_calls: Optional[np.ndarray] = None
     has_switch = np.zeros(n_haps, dtype=bool)
 
+    _CHUNK = 50_000
     for result in results:
-        # Use pre-computed decode fields when available
-        if result.decode is not None and result.decode.max_post is not None:
-            max_post = result.decode.max_post      # (H, T)
-            hard_calls = np.array(result.calls)    # (H, T)
-        elif result.posteriors is not None:
-            gamma = np.array(result.posteriors)    # (H, T, A)
-            max_post = gamma.max(axis=2)           # (H, T)
-            hard_calls = gamma.argmax(axis=2)      # (H, T)
-        else:
-            hard_calls = np.array(result.calls)
-            max_post = None
+        hard_calls = np.asarray(result.calls)  # zero-copy
 
-        # Per-haplotype minimum of max-posterior across sites
-        if max_post is not None:
-            chrom_min = max_post.min(axis=1)     # (H,)
+        # Compute per-hap min and sum of max-posterior
+        if result.decode is not None and result.decode.max_post is not None:
+            max_post = result.decode.max_post
+            chrom_min = max_post.min(axis=1)
             genome_min = np.minimum(genome_min, chrom_min)
-            genome_mean_sum += max_post.sum(axis=1)
+            genome_mean_sum += max_post.sum(axis=1, dtype=np.float64)
+        elif (result.decode is not None
+              and result.decode.parquet_path is not None):
+            from .output import _iter_max_post_groups
+            for rg_start, rg_end, mp_chunk in _iter_max_post_groups(
+                result.decode.parquet_path,
+            ):
+                chunk_min = mp_chunk.min(axis=1)
+                genome_min[rg_start:rg_end] = np.minimum(
+                    genome_min[rg_start:rg_end], chunk_min,
+                )
+                genome_mean_sum[rg_start:rg_end] += mp_chunk.sum(
+                    axis=1, dtype=np.float64,
+                )
+        elif result.posteriors is not None:
+            gamma = np.asarray(result.posteriors)
+            max_post = gamma.max(axis=2)
+            hard_calls = gamma.argmax(axis=2)
+            chrom_min = max_post.min(axis=1)
+            genome_min = np.minimum(genome_min, chrom_min)
+            genome_mean_sum += max_post.sum(axis=1, dtype=np.float64)
+        # else: no posterior info — genome_min stays at 1.0
 
         total_sites += hard_calls.shape[1]
 
-        # Accumulate ancestry counts for mode
-        for a in range(A):
-            ancestry_site_counts[:, a] += (hard_calls == a).sum(axis=1)
+        # Accumulate ancestry counts for mode (chunked to avoid H×T int64)
+        H_res = hard_calls.shape[0]
+        for start in range(0, H_res, _CHUNK):
+            end = min(start + _CHUNK, H_res)
+            chunk = hard_calls[start:end]
+            for a in range(A):
+                ancestry_site_counts[start:end, a] += (chunk == a).sum(axis=1)
 
         # Check for ancestry switches within this chromosome
         if hard_calls.shape[1] > 1:
@@ -182,27 +199,13 @@ def extract_segments(
     min_cm : minimum segment genetic length in centiMorgans
     min_sites : minimum number of sites in a segment
     """
-    # Use pre-computed decode fields when available
-    if result.decode is not None and result.decode.max_post is not None:
-        max_post = result.decode.max_post
-        hard_calls = np.array(result.calls)
-        gamma = np.array(result.posteriors) if result.posteriors is not None else None
-    elif result.posteriors is not None:
-        gamma = np.array(result.posteriors)  # (H, T, A)
-        max_post = gamma.max(axis=2)
-        hard_calls = gamma.argmax(axis=2)
-    else:
-        hard_calls = np.array(result.calls)
-        max_post = None
-        gamma = None
+    hard_calls = np.asarray(result.calls)  # zero-copy
+    gamma = np.asarray(result.posteriors) if result.posteriors is not None else None
 
     H, T = hard_calls.shape
-    A = result.model.n_ancestries
 
     if T == 0:
         return []
-
-    confident = max_post > threshold if max_post is not None else np.ones((H, T), dtype=bool)
 
     pos_bp = cdata.pos_bp
     pos_cm = cdata.pos_cm
@@ -210,25 +213,78 @@ def extract_segments(
 
     segments: list[Segment] = []
 
-    for hi in range(H):
-        hap_confident = confident[hi]     # (T,)
-        hap_calls = hard_calls[hi]        # (T,)
+    # Determine max_post source
+    if result.decode is not None and result.decode.max_post is not None:
+        max_post = result.decode.max_post
+        _extract_segments_range(
+            0, H, hard_calls, max_post, gamma, threshold,
+            min_cm, min_sites, pos_bp, pos_cm, chrom, segments,
+        )
+    elif (result.decode is not None
+          and result.decode.parquet_path is not None):
+        from .output import _iter_max_post_groups
+        for rg_start, rg_end, mp_chunk in _iter_max_post_groups(
+            result.decode.parquet_path,
+        ):
+            _extract_segments_range(
+                rg_start, rg_end, hard_calls, mp_chunk, None, threshold,
+                min_cm, min_sites, pos_bp, pos_cm, chrom, segments,
+            )
+    elif gamma is not None:
+        max_post = gamma.max(axis=2)
+        hard_calls = gamma.argmax(axis=2)
+        _extract_segments_range(
+            0, H, hard_calls, max_post, gamma, threshold,
+            min_cm, min_sites, pos_bp, pos_cm, chrom, segments,
+        )
+    else:
+        _extract_segments_range(
+            0, H, hard_calls, None, None, threshold,
+            min_cm, min_sites, pos_bp, pos_cm, chrom, segments,
+        )
 
-        # Combined mask: confident AND same ancestry as previous site
-        # We detect boundaries where either confidence drops or ancestry changes
-        # Build a label array: -1 where not confident, ancestry where confident
-        labels = np.where(hap_confident, hap_calls, -1)  # (T,)
+    return segments
 
-        # Find run boundaries: where label changes
+
+def _extract_segments_range(
+    hi_start: int,
+    hi_end: int,
+    hard_calls: np.ndarray,
+    max_post: np.ndarray | None,
+    gamma: np.ndarray | None,
+    threshold: float,
+    min_cm: float,
+    min_sites: int,
+    pos_bp: np.ndarray,
+    pos_cm: np.ndarray,
+    chrom: str,
+    segments: list[Segment],
+) -> None:
+    """Extract segments for haplotypes [hi_start, hi_end).
+
+    *max_post*, when provided, covers rows ``[0, hi_end - hi_start)``
+    (it may be a row-group chunk), so we index with ``hi - hi_start``.
+    """
+    T = hard_calls.shape[1]
+
+    for hi in range(hi_start, hi_end):
+        hap_calls = hard_calls[hi]
+
+        if max_post is not None:
+            hap_confident = max_post[hi - hi_start] > threshold
+            labels = np.where(hap_confident, hap_calls, np.int8(-1))
+        else:
+            labels = hap_calls
+
         changes = np.where(labels[1:] != labels[:-1])[0] + 1
         starts = np.concatenate([[0], changes])
         ends = np.concatenate([changes, [T]])
 
         for k in range(len(starts)):
-            s, e = int(starts[k]), int(ends[k])  # e is exclusive
+            s, e = int(starts[k]), int(ends[k])
             anc = int(labels[s])
             if anc < 0:
-                continue  # not confident
+                continue
 
             n_seg_sites = e - s
             if n_seg_sites < min_sites:
@@ -241,14 +297,14 @@ def extract_segments(
             if gamma is not None:
                 mean_post = float(gamma[hi, s:e, anc].mean())
             elif max_post is not None:
-                mean_post = float(max_post[hi, s:e].mean())
+                mean_post = float(max_post[hi - hi_start, s:e].mean())
             else:
                 mean_post = 1.0
             segments.append(Segment(
                 hap_index=hi,
                 chrom=chrom,
                 start_site=s,
-                end_site=e - 1,  # inclusive
+                end_site=e - 1,
                 start_bp=int(pos_bp[s]),
                 end_bp=int(pos_bp[e - 1]),
                 start_cm=float(pos_cm[s]),
@@ -257,8 +313,6 @@ def extract_segments(
                 mean_posterior=mean_post,
                 n_sites=n_seg_sites,
             ))
-
-    return segments
 
 
 # ---------------------------------------------------------------------------

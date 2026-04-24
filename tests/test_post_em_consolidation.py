@@ -254,3 +254,73 @@ def test_mu_renormalized():
     new_mu = np.array(out[0].model.mu)
     assert new_mu.sum() == pytest.approx(1.0, abs=1e-5)
     assert all(new_mu > 0)
+
+
+def test_consolidate_new_calls_is_int8():
+    """Remap must not widen calls dtype from int8 to int32."""
+    mu = np.array([0.49, 0.49, 0.001, 0.019], dtype=np.float32)
+    result = _make_result(A=4, mu=mu, H=2000)
+    calls = np.zeros((2000, 200), dtype=np.int8)
+    calls[:960] = 0
+    calls[960:1920] = 1
+    calls[1920:1922] = 2
+    calls[1922:] = 3
+    result.calls = calls
+    result.decode = DecodeResult(
+        calls=calls,
+        max_post=np.full((2000, 200), 0.9, dtype=np.float16),
+        global_sums=result.decode.global_sums,
+    )
+
+    out = consolidate([result])
+    assert out[0].calls.dtype == np.int8
+
+
+def test_consolidate_nulls_parquet_path_on_merge(tmp_path):
+    """After consolidation with merges, parquet_path must be None so
+    cli.py re-writes with new ancestry labels."""
+    pq_path = tmp_path / "stale.parquet"
+    pq_path.write_bytes(b"fake")
+
+    mu = np.array([0.49, 0.49, 0.001, 0.019], dtype=np.float32)
+    result = _make_result(A=4, mu=mu, H=2000)
+    calls = np.zeros((2000, 200), dtype=np.int8)
+    calls[:960] = 0
+    calls[960:1920] = 1
+    calls[1920:1922] = 2
+    calls[1922:] = 3
+    result.calls = calls
+    result.decode = DecodeResult(
+        calls=calls,
+        max_post=np.full((2000, 200), 0.9, dtype=np.float16),
+        global_sums=result.decode.global_sums,
+        parquet_path=str(pq_path),
+    )
+
+    out = consolidate([result])
+    assert out[0].decode.parquet_path is None
+    assert not pq_path.exists()
+
+
+def test_consolidate_preserves_parquet_path_without_merges():
+    """If consolidation finds no merges, parquet_path passes through."""
+    result = _make_result(A=4, H=2000, T=200)
+    calls = np.zeros((2000, 200), dtype=np.int8)
+    for a in range(4):
+        calls[a * 500:(a + 1) * 500] = a
+    result.calls = calls
+    result.decode = DecodeResult(
+        calls=calls,
+        max_post=np.full((2000, 200), 0.95, dtype=np.float16),
+        global_sums=result.decode.global_sums,
+        parquet_path="/some/path.parquet",
+    )
+    result.model = AncestryModel(
+        n_ancestries=4,
+        mu=jnp.array([0.25, 0.25, 0.25, 0.25]),
+        gen_since_admix=20.0,
+        allele_freq=result.model.allele_freq,
+    )
+
+    out = consolidate([result])
+    assert out[0].decode.parquet_path == "/some/path.parquet"

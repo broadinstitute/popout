@@ -12,6 +12,7 @@ without rerunning EM.  The converged posteriors serve as evidence.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 from typing import Optional
 
@@ -88,6 +89,12 @@ def consolidate(
     Returns
     -------
     Possibly modified list of AncestryResult with reduced K.
+
+    .. warning::
+       When merges occur, the input ``results`` entries' ``.calls`` arrays
+       are **mutated in place** to avoid a 27 GB double-allocation at
+       biobank scale.  Callers must not hold references to the input
+       results' calls buffers across this call.
     """
     if not results:
         return results
@@ -254,6 +261,16 @@ def consolidate(
     # Map merged sources through to their target's new index
     remap = np.array([old_to_new[merge_map[a]] for a in range(A)], dtype=np.int32)
 
+    assert A <= 127, (
+        f"Cannot encode A={A} ancestries in int8. "
+        "Widen calls dtype throughout the pipeline first."
+    )
+    assert new_A >= 1, f"Consolidation removed all ancestries: new_A={new_A}"
+    # Cast to int8 before indexing into (H, T) int8 calls — fancy-indexing
+    # returns the indexer's dtype, so int32 remap would produce 108 GB int32
+    # output at biobank scale.
+    remap_i8 = remap.astype(np.int8)
+
     log.info("Post-EM consolidation: K=%d → K=%d", A, new_A)
 
     # --- Update all results ---
@@ -289,8 +306,16 @@ def consolidate(
             bucket_assignments=old_model.bucket_assignments,
         )
 
-        # Remap calls
-        new_calls = remap[res.calls]
+        # Remap calls in place to avoid holding old + new (27 GB each)
+        # simultaneously.  Chunked to bound peak transient to ~1.3 GB.
+        # NOTE: mutates res.calls — callers must not hold references to
+        # the input results' calls arrays across this call.
+        _REMAP_CHUNK = 50_000
+        H_res = res.calls.shape[0]
+        for start in range(0, H_res, _REMAP_CHUNK):
+            end = min(start + _REMAP_CHUNK, H_res)
+            res.calls[start:end] = remap_i8[res.calls[start:end]]
+        new_calls = res.calls
 
         # Remap global_sums if available
         new_decode = None
@@ -301,11 +326,23 @@ def consolidate(
                 new_gs = np.zeros((old_gs.shape[0], new_A), dtype=old_gs.dtype)
                 for old_a in range(A):
                     new_gs[:, remap[old_a]] += old_gs[:, old_a]
+            # On-disk parquet has pre-consolidation ancestry labels.
+            # Null out the path so cli.py re-writes with remapped calls.
+            new_parquet_path = res.decode.parquet_path
+            if new_parquet_path is not None:
+                try:
+                    os.remove(new_parquet_path)
+                    log.info("Removed stale pre-consolidation decode "
+                             "parquet: %s", new_parquet_path)
+                except OSError as e:
+                    log.warning("Could not remove stale parquet %s: %s",
+                                new_parquet_path, e)
+                new_parquet_path = None
             new_decode = DecodeResult(
                 calls=new_calls,
                 max_post=res.decode.max_post,
                 global_sums=new_gs,
-                parquet_path=res.decode.parquet_path,
+                parquet_path=new_parquet_path,
             )
 
         new_results.append(AncestryResult(
