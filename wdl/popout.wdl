@@ -40,8 +40,10 @@ task popout_task {
     Int     freeze_anchors_iters     = 0
     Float   recursive_merge_hellinger = 0.012
     Int     recursive_max_leaves     = 20
+    Int     recursive_min_leaf_size  = 500
     Boolean stop_after_seeding       = false
     Boolean checkpoint_after_em      = true
+    Boolean post_em_consolidation    = true
     File?   resume_from_checkpoint
     File?   exclude_seeding_samples    # TSV of sample_ids to exclude from recursive seeding
     String  extra_args               = ""
@@ -118,11 +120,13 @@ task popout_task {
     CMD="$CMD --seed-method ~{seed_method}"
     CMD="$CMD --recursive-merge-hellinger ~{recursive_merge_hellinger}"
     CMD="$CMD --recursive-max-leaves ~{recursive_max_leaves}"
+    CMD="$CMD --recursive-min-leaf-size ~{recursive_min_leaf_size}"
     if [ "~{freeze_anchors_iters}" -gt 0 ]; then
       CMD="$CMD --freeze-anchors-iters ~{freeze_anchors_iters}"
     fi
     ~{if stop_after_seeding then 'CMD="$CMD --stop-after-seeding"' else ''}
     ~{if checkpoint_after_em then 'CMD="$CMD --checkpoint-after-em"' else ''}
+    ~{if post_em_consolidation then '' else 'CMD="$CMD --no-post-em-consolidation"'}
     ~{if defined(resume_from_checkpoint) then 'CMD="$CMD --resume-from-checkpoint ~{resume_from_checkpoint}"' else ''}
     ~{if defined(exclude_seeding_samples) then 'CMD="$CMD --exclude-seeding-samples ~{exclude_seeding_samples}"' else ''}
 
@@ -166,6 +170,9 @@ task popout_task {
 
     # Dense decode (produced when write_probs or write_dense_decode = true)
     Array[File] decode_parquet = glob("~{output_prefix}.chr*.decode.parquet")
+
+    # Post-EM consolidation report (produced when post_em_consolidation = true)
+    File? consolidation_report = "~{output_prefix}.post_em_consolidation.tsv"
 
     # Post-EM checkpoint (produced when checkpoint_after_em = true)
     File? em_checkpoint   = "~{output_prefix}.em_checkpoint.npz"
@@ -211,8 +218,10 @@ workflow popout {
     Int     freeze_anchors_iters     = 0
     Float   recursive_merge_hellinger = 0.012
     Int     recursive_max_leaves     = 20
+    Int     recursive_min_leaf_size  = 500
     Boolean stop_after_seeding       = false
     Boolean checkpoint_after_em      = true
+    Boolean post_em_consolidation    = true
     File?   resume_from_checkpoint
     File?   exclude_seeding_samples
     String  extra_args               = ""
@@ -251,8 +260,10 @@ workflow popout {
       freeze_anchors_iters      = freeze_anchors_iters,
       recursive_merge_hellinger = recursive_merge_hellinger,
       recursive_max_leaves      = recursive_max_leaves,
+      recursive_min_leaf_size   = recursive_min_leaf_size,
       stop_after_seeding        = stop_after_seeding,
       checkpoint_after_em       = checkpoint_after_em,
+      post_em_consolidation     = post_em_consolidation,
       resume_from_checkpoint    = resume_from_checkpoint,
       exclude_seeding_samples   = exclude_seeding_samples,
       extra_args                = extra_args,
@@ -286,6 +297,8 @@ workflow popout {
     File? checkpoint_meta = popout_task.checkpoint_meta
 
     Array[File] decode_parquet = popout_task.decode_parquet
+
+    File? consolidation_report = popout_task.consolidation_report
 
     File? em_checkpoint   = popout_task.em_checkpoint
   }

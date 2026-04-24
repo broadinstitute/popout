@@ -358,6 +358,18 @@ def main(argv: list[str] | None = None) -> None:
         help="Write posterior probabilities to output files",
     )
     parser.add_argument(
+        "--post-em-consolidation", action="store_true", default=True,
+        dest="post_em_consolidation",
+        help="Merge unsupported ancestries after EM (default: on). "
+             "Flags ancestries with <1000 high-posterior sites, mu<0.005, "
+             "or sibling F_ST<0.008.",
+    )
+    parser.add_argument(
+        "--no-post-em-consolidation", action="store_false",
+        dest="post_em_consolidation",
+        help="Disable post-EM ancestry consolidation.",
+    )
+    parser.add_argument(
         "--ancestry-names", type=str, default=None,
         help="Ancestry names for output headers, either a comma-separated list "
              "(e.g. 'afr,eas,eur,sas,amr') or a path to a single-column TSV. "
@@ -660,6 +672,18 @@ def main(argv: list[str] | None = None) -> None:
             stats.emit("runtime/t_compute", round(t_compute, 2))
             stats.finalize()
         return
+
+    # --- Post-EM consolidation ---
+    if args.post_em_consolidation:
+        from .post_em_consolidation import consolidate
+        leaf_paths = None
+        if results[0].spectral and "leaf_paths" in results[0].spectral:
+            leaf_paths = results[0].spectral["leaf_paths"]
+        results = consolidate(
+            results,
+            out_prefix=args.out,
+            leaf_paths=leaf_paths,
+        )
 
     # --- Write outputs ---
     from .output import write_global_ancestry, write_model, write_ancestry_tracts, write_decode_parquet

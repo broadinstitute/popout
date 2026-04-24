@@ -1291,6 +1291,14 @@ def run_em_genome(
                 )
                 fitted_model = result.model
 
+                # Attach leaf paths for post-EM consolidation
+                if leaf_info_for_ckpt is not None:
+                    if result.spectral is None:
+                        result.spectral = {}
+                    result.spectral["leaf_paths"] = [
+                        li.path for li in leaf_info_for_ckpt
+                    ]
+
                 # Save checkpoint for future resume even on normal runs
                 if out_prefix is not None and leaf_labels_for_ckpt is not None:
                     _save_checkpoint(
