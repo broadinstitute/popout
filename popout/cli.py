@@ -279,6 +279,12 @@ def main(argv: list[str] | None = None) -> None:
              "(default: 1000)",
     )
     parser.add_argument(
+        "--recursive-min-leaf-size", type=int, default=500,
+        help="After recursion, absorb leaves with fewer than this many "
+             "haplotypes into their nearest sibling (default: 500). "
+             "Set to 0 to disable.",
+    )
+    parser.add_argument(
         "--recursive-max-depth", type=int, default=6,
         help="Maximum recursion depth for K=2 splitting (default: 6)",
     )
@@ -615,6 +621,7 @@ def main(argv: list[str] | None = None) -> None:
                 merge_hellinger_threshold=args.recursive_merge_hellinger,
                 split_restarts=args.recursive_split_restarts,
                 balance_bic_tolerance=args.recursive_balance_tolerance,
+                min_leaf_size=args.recursive_min_leaf_size,
             )
 
         write_dense_decode = args.probs or args.write_dense_decode

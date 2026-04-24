@@ -51,6 +51,7 @@ def test_large_k():
     leaf_labels, leaf_info = recursive_split_seed(
         chrom_data.geno,
         min_cluster_size=200,
+        min_leaf_size=0,
         rng_seed=7,
         chrom_data=chrom_data,
     )
@@ -351,6 +352,79 @@ def test_merge_disabled():
     )
     # No-merge should have >= as many leaves as merged
     assert len(li_no_merge) >= len(li_merge)
+
+
+def test_absorb_small_leaves():
+    """Micro-leaves below min_leaf_size are absorbed into siblings."""
+    from popout.recursive_seed import _absorb_small_leaves
+
+    # Simulate 4 leaves: two large siblings, one small sibling pair
+    labels = np.array(
+        [0]*2000 + [1]*2000 + [2]*100 + [3]*1900,
+        dtype=np.int32,
+    )
+    leaf_info = [
+        LeafInfo(label=0, n_haps=2000, depth=1, path="L0", bic_score=50),
+        LeafInfo(label=1, n_haps=2000, depth=2, path="L10", bic_score=40),
+        LeafInfo(label=2, n_haps=100, depth=2, path="L110", bic_score=30),
+        LeafInfo(label=3, n_haps=1900, depth=2, path="L111", bic_score=30),
+    ]
+
+    new_labels, new_info = _absorb_small_leaves(labels, leaf_info, min_leaf_size=500)
+
+    # Leaf 2 (100 haps, path L110) should be absorbed into leaf 3 (sibling L111)
+    assert len(new_info) == 3
+    # Leaf 3 should now have 2000 haps (1900 + 100)
+    absorbed_target = [li for li in new_info if li.path == "L111"]
+    assert len(absorbed_target) == 1
+    assert absorbed_target[0].n_haps == 2000
+    # All labels should be contiguous
+    assert new_labels.min() == 0
+    assert new_labels.max() == len(new_info) - 1
+    assert sum(li.n_haps for li in new_info) == 6000
+
+
+def test_absorb_walks_up_tree():
+    """Absorption walks up the tree when direct sibling is also undersized."""
+    from popout.recursive_seed import _absorb_small_leaves
+
+    labels = np.array(
+        [0]*3000 + [1]*50 + [2]*50 + [3]*2900,
+        dtype=np.int32,
+    )
+    leaf_info = [
+        LeafInfo(label=0, n_haps=3000, depth=1, path="L0", bic_score=50),
+        LeafInfo(label=1, n_haps=50, depth=3, path="L100", bic_score=20),
+        LeafInfo(label=2, n_haps=50, depth=3, path="L101", bic_score=20),
+        LeafInfo(label=3, n_haps=2900, depth=2, path="L11", bic_score=40),
+    ]
+
+    new_labels, new_info = _absorb_small_leaves(labels, leaf_info, min_leaf_size=500)
+
+    # Both L100 and L101 are undersized. L100's sibling L101 is also undersized,
+    # so it should walk up to L1* and find L11 (2900 haps) as target.
+    assert len(new_info) == 2
+    assert sum(li.n_haps for li in new_info) == 6000
+
+
+def test_absorb_disabled():
+    """min_leaf_size=0 disables absorption."""
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=2500, n_sites=2000, n_ancestries=3,
+        gen_since_admix=20, pure_fraction=0.3, rng_seed=42,
+    )
+    ll_no_absorb, li_no_absorb = recursive_split_seed(
+        chrom_data.geno, min_cluster_size=500,
+        rng_seed=42, chrom_data=chrom_data,
+        min_leaf_size=0,
+    )
+    ll_absorb, li_absorb = recursive_split_seed(
+        chrom_data.geno, min_cluster_size=500,
+        rng_seed=42, chrom_data=chrom_data,
+        min_leaf_size=500,
+    )
+    # Without absorption, should have >= as many leaves
+    assert len(li_no_absorb) >= len(li_absorb)
 
 
 # ---------------------------------------------------------------------------

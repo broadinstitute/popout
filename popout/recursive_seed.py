@@ -213,6 +213,7 @@ def recursive_split_seed(
     dump_pre_merge_path: Optional[str] = None,
     device_memory_fraction: float = 0.5,
     seeding_mask: np.ndarray | None = None,
+    min_leaf_size: int = 500,
 ) -> tuple[np.ndarray, list[LeafInfo]]:
     """Recursively split haplotypes via K=2 EM.
 
@@ -480,6 +481,19 @@ def recursive_split_seed(
                  np.mean(balances), len(balances))
     _log_leaf_summary(leaf_info, H)
 
+    # Absorb micro-leaves (< min_leaf_size haps) into nearest sibling
+    if min_leaf_size > 0:
+        small = [li for li in leaf_info if li.n_haps < min_leaf_size]
+        if small:
+            log.info("Absorbing %d micro-leaves (< %d haps):", len(small), min_leaf_size)
+            n_before = len(leaf_info)
+            leaf_labels, leaf_info = _absorb_small_leaves(
+                leaf_labels, leaf_info, min_leaf_size,
+            )
+            if len(leaf_info) < n_before:
+                log.info("Absorption: %d → %d leaves", n_before, len(leaf_info))
+                _log_leaf_summary(leaf_info, H)
+
     # Pre-merge dump (always write if path is set — cheap insurance)
     if dump_pre_merge_path is not None:
         try:
@@ -513,6 +527,110 @@ def recursive_split_seed(
         stats.emit("recursive_seed/bic_scores", bic_scores)
 
     return leaf_labels, leaf_info
+
+
+# ---------------------------------------------------------------------------
+# Absorb micro-leaves into nearest sibling
+# ---------------------------------------------------------------------------
+
+def _absorb_small_leaves(
+    leaf_labels: np.ndarray,
+    leaf_info: list[LeafInfo],
+    min_leaf_size: int,
+) -> tuple[np.ndarray, list[LeafInfo]]:
+    """Absorb leaves with fewer than *min_leaf_size* haplotypes.
+
+    For each undersized leaf, find its sibling (same parent path, differs
+    in last character).  If the sibling is also undersized, walk up the
+    tree by trimming the path and try again.  The target is the first
+    adequately-sized leaf that shares a parent at some depth.
+
+    Returns updated (leaf_labels, leaf_info) with contiguous labels.
+    """
+    labels = leaf_labels.copy()
+    info = list(leaf_info)
+
+    # Build path → index lookup
+    path_to_idx = {li.path: i for i, li in enumerate(info)}
+
+    absorbed = set()
+    for i, li in enumerate(info):
+        if li.n_haps >= min_leaf_size:
+            continue
+        if i in absorbed:
+            continue
+
+        # Walk up the tree looking for a viable sibling target
+        path = li.path
+        target_idx = None
+        while len(path) >= 2:
+            # Sibling path: flip the last character
+            sib_char = "1" if path[-1] == "0" else "0"
+            sib_path = path[:-1] + sib_char
+            if sib_path in path_to_idx:
+                sib_idx = path_to_idx[sib_path]
+                if sib_idx not in absorbed and info[sib_idx].n_haps >= min_leaf_size:
+                    target_idx = sib_idx
+                    break
+            # Also check if a leaf exists whose path starts with sib_path
+            # (the sibling subtree may have been split further)
+            for j, lj in enumerate(info):
+                if j in absorbed or j == i:
+                    continue
+                if lj.path.startswith(sib_path) and lj.n_haps >= min_leaf_size:
+                    target_idx = j
+                    break
+            if target_idx is not None:
+                break
+            # Walk up: trim last character
+            path = path[:-1]
+
+        if target_idx is None:
+            # No viable target found — keep the micro-leaf
+            log.warning("  No absorption target for leaf %d (path=%s, %d haps)",
+                        li.label, li.path, li.n_haps)
+            continue
+
+        target = info[target_idx]
+        log.info("  Absorbing leaf %d (path=%s, %d haps) into leaf %d "
+                 "(path=%s, %d haps)",
+                 li.label, li.path, li.n_haps,
+                 target.label, target.path, target.n_haps)
+
+        labels[labels == li.label] = target.label
+        info[target_idx] = LeafInfo(
+            label=target.label,
+            n_haps=target.n_haps + li.n_haps,
+            depth=target.depth,
+            path=target.path,
+            bic_score=target.bic_score,
+        )
+        absorbed.add(i)
+
+    if not absorbed:
+        return leaf_labels, leaf_info
+
+    # Rebuild info list without absorbed leaves
+    surviving = [li for i, li in enumerate(info) if i not in absorbed]
+
+    # Remap labels to contiguous 0..n_new-1
+    old_labels = sorted({li.label for li in surviving})
+    lut = np.empty(max(old_labels) + 1, dtype=np.int32)
+    for new, old in enumerate(old_labels):
+        lut[old] = new
+    new_labels = lut[labels]
+    new_info = [
+        LeafInfo(
+            label=new_label,
+            n_haps=li.n_haps,
+            depth=li.depth,
+            path=li.path,
+            bic_score=li.bic_score,
+        )
+        for new_label, li in enumerate(surviving)
+    ]
+
+    return new_labels, new_info
 
 
 # ---------------------------------------------------------------------------
