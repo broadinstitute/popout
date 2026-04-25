@@ -878,6 +878,8 @@ def decode_chromosome(
                              and decode_parquet_path is not None)
         decode_writer = None
         if stream_to_parquet:
+            from pathlib import Path as _Path
+            _Path(decode_parquet_path).parent.mkdir(parents=True, exist_ok=True)
             from .output import DecodeParquetWriter
             decode_writer = DecodeParquetWriter(
                 decode_parquet_path,
