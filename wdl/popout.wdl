@@ -60,7 +60,7 @@ task popout_task {
     String gpu_type      = "nvidia-tesla-a100"
     String zones         = "us-central1-c us-central1-a"
     Int    disk_size_gb  = 500
-    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:worktree-checkpoint"
+    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest"
   }
 
   command <<<
@@ -255,7 +255,7 @@ workflow popout {
     String gpu_type      = "nvidia-tesla-a100"
     String zones         = "us-central1-c us-central1-a"
     Int    disk_size_gb  = 500
-    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:worktree-checkpoint"
+    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:latest"
   }
 
   call popout_task {
