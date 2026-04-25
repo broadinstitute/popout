@@ -3,7 +3,7 @@
 Tracks known places where tensor shapes proportional to H (haplotype
 count, 500k–1M+) must be batched rather than materialized whole.
 
-Last audited: 2026-04-24.
+Last audited: 2026-04-25.
 
 ## Fixed
 
@@ -28,6 +28,7 @@ Last audited: 2026-04-24.
 | `recursive_seed.py` `_run_k2_em_split` + main loop | `geno[node.indices]` on `_MaskedGeno` triggers advanced-index copy (30+ GB) | `_sub_geno()` helper composes index arrays through `_MaskedGeno` — zero geno copy |
 | `post_em_consolidation.py` `consolidate` line 293 | `remap[res.calls]` — int32 remap fancy-indexes int8 calls, producing int32 (H,T) = 108 GB; even with int8 remap, allocates a second 27 GB array while old is still alive (54 GB peak) | Cast `remap` to int8 + chunked in-place remap (`res.calls[s:e] = remap_i8[res.calls[s:e]]`); peak transient ~1.3 GB |
 | `panel.py` `extract_whole_haplotypes` / `extract_segments` | `np.array(result.calls)` copies 27 GB; no parquet-streaming branch for max_post; `np.ones((H,T), bool)` fallback = 27 GB | `np.asarray` zero-copy; added `_iter_max_post_groups` streaming; removed all-True fallback |
+| `em.py` `decode_chromosome` | `calls = np.empty((H, T), int8)` allocates 41.6 GB pinned VM at T=38k; chunked writes fault ~1.7 GB/chunk and exhaust the 100 GB AoU VM by chunk 9 | `np.memmap` into sibling of `decode_parquet_path` when streaming; kernel manages residency; downstream consumers unchanged (memmap is an ndarray subclass) |
 
 ## Known remaining
 
@@ -141,6 +142,17 @@ but can leave stale files on disk pointed at by `parquet_path`-style
 fields. Every mutation that invalidates on-disk state must either
 rewrite the file or null out the path so downstream code re-writes it.
 Skipping the rewrite silently corrupts the output.
+
+### 13. Preallocated `(H_total, T)` arrays even when output is streamed
+Streaming the *writes* of a per-(H, T) output to disk does not
+automatically relieve the in-memory companion. `calls = np.empty((H, T),
+int8)` is 27 GB at T=25k and 42 GB at T=38k. Even though `np.empty`
+doesn't touch pages, every `calls[bs:be] = ...` write faults in the
+chunk's pages and they stay resident for the rest of the run. When the
+array is logically write-once-then-read (like decode `calls`), back it
+with `np.memmap` instead. Sequential writes flush dirty pages under
+pressure; downstream consumers that already iterate in 50k-hap chunks
+see good locality with no API change.
 
 ## Pattern recurrence policy
 

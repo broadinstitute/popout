@@ -871,7 +871,6 @@ def decode_chromosome(
         )
 
         H_total = chrom_data.n_haps
-        calls = np.empty((H_total, chrom_data.n_sites), dtype=np.int8)
         global_sums = np.zeros((H_total, n_anc), dtype=np.float64)
 
         stream_to_parquet = (write_dense_decode
@@ -880,6 +879,16 @@ def decode_chromosome(
         if stream_to_parquet:
             from pathlib import Path as _Path
             _Path(decode_parquet_path).parent.mkdir(parents=True, exist_ok=True)
+            calls_mmap_path = str(
+                _Path(decode_parquet_path).with_suffix(".calls.dat")
+            )
+            calls = np.memmap(
+                calls_mmap_path, dtype=np.int8, mode='w+',
+                shape=(H_total, chrom_data.n_sites),
+            )
+            log.info("  calls backed by memmap: %s (%.1f GB virtual)",
+                     calls_mmap_path,
+                     H_total * chrom_data.n_sites / 1e9)
             from .output import DecodeParquetWriter
             decode_writer = DecodeParquetWriter(
                 decode_parquet_path,
@@ -891,6 +900,7 @@ def decode_chromosome(
             log.info("  Streaming decode to %s (no full max_post alloc)",
                      decode_parquet_path)
         else:
+            calls = np.empty((H_total, chrom_data.n_sites), dtype=np.int8)
             max_post = (
                 np.empty((H_total, chrom_data.n_sites), dtype=np.float16)
                 if write_dense_decode else None
