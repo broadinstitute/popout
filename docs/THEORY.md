@@ -316,10 +316,11 @@ A single T produces a compromise that misestimates tract lengths for most
 individuals.
 
 When enabled, the M-step estimates a per-haplotype T_h from each haplotype's
-own hard-call switch rate:
+own **density-invariant expected switch count** — the sum of P(z_t ≠ z_{t+1} |
+data, h) at every interval, derived from xi posteriors (see §5 below):
 
 ```
-T_h = switches_h / (genetic_distance · (1 − Σ μ²))
+T_h = E[switches_h] / (genetic_distance · (1 − Σ μ²))
 ```
 
 T_h is regularized by blending with the global estimate: `T_final = (1−λ)·T_h
@@ -332,6 +333,18 @@ matrices are precomputed (one per bucket), and haplotypes are partitioned
 by bucket for independent forward-backward passes.  The memory overhead is
 B × (T−1) × A × A × 4 bytes — negligible.  Emissions are shared across
 buckets, computed once.
+
+Per-hap-T is supported under both single-site Bernoulli emissions and
+`--block-emissions`. Under block emissions the same xi-diagonal trick is
+applied at block boundaries; the M-step input is density-invariant.
+
+**Caveat: seed-chromosome freezing.** The per-haplotype T estimate is
+computed once on the seed chromosome and frozen for the rest of the
+genome. Quality is therefore bounded by the seed chromosome's switch-count
+statistics; using a small chromosome (e.g., chr22) as the seed gives noisy
+per-hap T that propagates genome-wide. For best results, pick a large
+chromosome (chr1 or chr2) as the seed. The per-haplotype T histogram
+(`popout viz per_hap_t`) shows the seed-chromosome estimate.
 
 ### Forward algorithm
 
@@ -414,8 +427,12 @@ This is regularized by blending with the previous estimate (70% new, 30%
 old) and clamped to [1, 1000] generations.  Using hard calls rather than
 soft overlaps for switch counting is more robust when posteriors are diffuse.
 
-When `--per-hap-T` is enabled, the same formula is applied per-haplotype
-instead of globally (see §4 Transitions above).
+When `--per-hap-T` is enabled, the per-haplotype variant uses xi-based
+**soft** switch counts (expected number of transitions per haplotype)
+rather than hard-call switches; see §4 Transitions above. This is what
+makes the estimator density-invariant: doubling the SNP density at fixed
+genetic length leaves the expected switch count per haplotype roughly
+unchanged.
 
 ---
 

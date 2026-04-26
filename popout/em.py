@@ -1897,6 +1897,15 @@ def run_em_genome(
                 )
                 fitted_model = result.model
 
+                if per_hap_T and chrom_data.n_sites < 5000:
+                    log.warning(
+                        "Per-hap-T was estimated on a small seed chromosome "
+                        "(%d sites). Bucket assignments are frozen across "
+                        "the genome; quality is bounded by switch-count "
+                        "statistics on this chromosome.",
+                        chrom_data.n_sites,
+                    )
+
                 # Save seed checkpoint (if we ran seeding fresh)
                 if wd is not None and not seed_loaded:
                     if leaf_labels_for_ckpt is not None and leaf_info_for_ckpt is not None:

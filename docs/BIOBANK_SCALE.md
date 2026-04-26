@@ -3,7 +3,7 @@
 Tracks known places where tensor shapes proportional to H (haplotype
 count, 500k–1M+) must be batched rather than materialized whole.
 
-Last audited: 2026-04-25.
+Last audited: 2026-04-26.
 
 ## Fixed
 
@@ -29,6 +29,8 @@ Last audited: 2026-04-25.
 | `post_em_consolidation.py` `consolidate` line 293 | `remap[res.calls]` — int32 remap fancy-indexes int8 calls, producing int32 (H,T) = 108 GB; even with int8 remap, allocates a second 27 GB array while old is still alive (54 GB peak) | Cast `remap` to int8 + chunked in-place remap (`res.calls[s:e] = remap_i8[res.calls[s:e]]`); peak transient ~1.3 GB |
 | `panel.py` `extract_whole_haplotypes` / `extract_segments` | `np.array(result.calls)` copies 27 GB; no parquet-streaming branch for max_post; `np.ones((H,T), bool)` fallback = 27 GB | `np.asarray` zero-copy; added `_iter_max_post_groups` streaming; removed all-True fallback |
 | `em.py` `decode_chromosome` | `calls = np.empty((H, T), int8)` allocates 41.6 GB pinned VM at T=38k; chunked writes fault ~1.7 GB/chunk and exhaust the 100 GB AoU VM by chunk 9 | `np.memmap` into sibling of `decode_parquet_path` when streaming; kernel manages residency; downstream consumers unchanged (memmap is an ndarray subclass) |
+| `em.py` `decode_chromosome` block-emissions branch | When `bucket_assignments` is set on the model, the chunk loop ran once with the global model, ignoring per-hap-T entirely; no streaming, no merge | Bucket dispatch wrapper around the chunk loop; per-bucket `AncestryModel` carries `bucket_centers[b]` as `gen_since_admix`; per-bucket parquet writers + `_merge_bucket_parquets` heap merge produce hap-ordered output; calls memmap supports fancy-index writes per bucket |
+| `em.py` `decode_chromosome` non-block branch + `hmm.py` `forward_backward_decode` / `forward_backward_bucketed_decode` | Both FB primitives `np.zeros((H, T), int8)` for calls + `(H, T) float16` for max_post — 81 GB pinned RSS at AoU scale; reachable via `--per-hap-T` without `--block-emissions`; OOMs the 100 GB VM | `calls_out` / `max_post_writer` keyword-only params on both FB primitives; `decode_chromosome` opens memmap for calls + `DecodeParquetWriter` (single, when not bucketed; per-bucket + merge when bucket_assignments is set) and passes them through. `forward_backward_bucketed_decode` delegates per-bucket work to `forward_backward_decode(..., hap_idx_map=hap_idx)` for fancy-index writes into a single global buffer |
 
 ## Known remaining
 
