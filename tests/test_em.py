@@ -42,6 +42,7 @@ def test_run_em_per_hap_T_with_block_emissions_uses_buckets(monkeypatch):
     buckets so dispatch is exercised even on small synthetic data.
     """
     import popout.em as em_mod
+    import popout.hmm as hmm_mod
     import jax.numpy as jnp_local
     from popout.simulate import simulate_admixed
 
@@ -53,13 +54,16 @@ def test_run_em_per_hap_T_with_block_emissions_uses_buckets(monkeypatch):
 
     captured_T_per_iter: list[list[float]] = []
     iter_buf: list[float] = []
-    real_fb_blocks = em_mod.forward_backward_blocks
+    real_fb_blocks = hmm_mod.forward_backward_blocks
 
     def spy(model, bd, *, compute_soft_switches=False):
         iter_buf.append(float(model.gen_since_admix))
         return real_fb_blocks(model, bd, compute_soft_switches=compute_soft_switches)
 
-    monkeypatch.setattr(em_mod, "forward_backward_blocks", spy)
+    # Patch on hmm.py — the new forward_backward_blocks_em (extracted in
+    # the housekeeping refactor) calls forward_backward_blocks via the
+    # hmm module reference, not via popout.em.
+    monkeypatch.setattr(hmm_mod, "forward_backward_blocks", spy)
 
     real_update = em_mod.update_generations_per_hap_from_stats
 

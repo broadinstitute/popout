@@ -1146,6 +1146,192 @@ def forward_backward_em(
     )
 
 
+def forward_backward_blocks_em(
+    geno,
+    model: AncestryModel,
+    bd,
+    batch_size: int | None = None,
+) -> tuple[EMStats, jnp.ndarray]:
+    """Block-emissions E-step + accumulated pattern-freq counts.
+
+    When model.bucket_assignments is set, iterates over T-buckets and
+    runs the per-batch kernel under each bucket's gen_since_admix.
+    Otherwise runs once over the full cohort with the parent model.
+
+    Returns
+    -------
+    em_stats : EMStats
+        Same contract as forward_backward_em. soft_switches_per_hap is
+        density-invariant (xi-derived from
+        forward_backward_blocks(..., compute_soft_switches=True)),
+        not hard-call switches.
+    pattern_freq_counts : (n_blocks, max_patterns, A) float32
+        Accumulated scatter-add counts; caller normalizes via the same
+        formula as today.
+    """
+    from .blocks import BlockData
+
+    H_total, T_sites = geno.shape
+    n_anc = model.n_ancestries
+
+    if batch_size is None:
+        from .em import _auto_batch_size_blocks
+        batch_size = _auto_batch_size_blocks(bd.n_blocks, n_anc, H_total)
+
+    b_starts = _np.array(bd.block_starts, dtype=_np.int64)
+    b_ends = _np.array(bd.block_ends, dtype=_np.int64)
+    block_widths_np = b_ends - b_starts
+    block_widths_j = jnp.array(block_widths_np, dtype=jnp.float32)
+
+    weighted_counts = jnp.zeros((n_anc, T_sites), dtype=jnp.float32)
+    total_weights = jnp.zeros((n_anc, T_sites), dtype=jnp.float32)
+    mu_sum = jnp.zeros(n_anc, dtype=jnp.float32)
+    switch_sum = jnp.zeros(n_anc, dtype=jnp.float32)
+    soft_switches_per_hap = _np.zeros(H_total, dtype=_np.float32)
+    hard_switches_per_hap = _np.zeros(H_total, dtype=_np.int32)
+    _pf_counts = jnp.zeros((bd.n_blocks, bd.max_patterns, n_anc), dtype=jnp.float32)
+
+    T_padded = bd.n_blocks * bd.block_size
+    pad_right = T_padded - T_sites
+
+    _max_p, _n_anc = bd.max_patterns, n_anc
+    def _scatter_block(pat_col, gb_col):
+        return jnp.zeros((_max_p, _n_anc)).at[pat_col].add(gb_col)
+
+    # Bucket dispatch: when bucket_assignments is set, run one
+    # forward-backward per bucket against a per-bucket model carrying
+    # that bucket's center as gen_since_admix. Otherwise run once over
+    # the full cohort with the parent model.
+    if model.bucket_assignments is not None:
+        bucket_centers_np = _np.array(model.bucket_centers)
+        bucket_np = _np.array(model.bucket_assignments)
+        B = len(bucket_centers_np)
+        assert bucket_np.shape == (H_total,), (
+            f"bucket_assignments shape {bucket_np.shape} != H={H_total}"
+        )
+        ba_min, ba_max = int(bucket_np.min()), int(bucket_np.max())
+        assert 0 <= ba_min and ba_max < B, (
+            f"bucket_assignments range [{ba_min}, {ba_max}] outside [0, {B})"
+        )
+        bucket_iter = list(range(B))
+    else:
+        bucket_centers_np = None
+        bucket_np = None
+        bucket_iter = [None]
+
+    for b in bucket_iter:
+        if b is None:
+            b_model = model
+            bucket_hap_idx = None  # signal: contiguous full range
+            n_b = H_total
+        else:
+            mask = bucket_np == b
+            n_b = int(mask.sum())
+            if n_b == 0:
+                continue
+            bucket_hap_idx = _np.where(mask)[0]
+            b_model = AncestryModel(
+                n_ancestries=model.n_ancestries,
+                mu=model.mu,
+                gen_since_admix=float(bucket_centers_np[b]),
+                allele_freq=model.allele_freq,
+                pattern_freq=model.pattern_freq,
+                block_data=model.block_data,
+            )
+
+        for bs in range(0, n_b, batch_size):
+            be = min(bs + batch_size, n_b)
+            if bucket_hap_idx is None:
+                batch_idx = _np.arange(bs, be)
+                pat_idx_np = bd.pattern_indices[bs:be]
+                geno_np = geno[bs:be]
+            else:
+                batch_idx = bucket_hap_idx[bs:be]
+                pat_idx_np = bd.pattern_indices[batch_idx]
+                geno_np = geno[batch_idx]
+
+            bd_chunk = BlockData(
+                pattern_indices=pat_idx_np,
+                block_starts=bd.block_starts,
+                block_ends=bd.block_ends,
+                block_distances=bd.block_distances,
+                pattern_counts=bd.pattern_counts,
+                max_patterns=bd.max_patterns,
+                block_size=bd.block_size,
+            )
+            # E-step: block-level forward-backward → (chunk, n_blocks, A)
+            # plus density-invariant soft switches (H,) for per-hap-T.
+            gb_chunk, sw_chunk = forward_backward_blocks(
+                b_model, bd_chunk, compute_soft_switches=True,
+            )
+            geno_chunk = jnp.asarray(geno_np, dtype=jnp.float32)
+
+            # --- M-step accumulators (vectorized, no Python loops) ---
+
+            # weighted_counts: pad geno to (chunk, n_blocks, block_size),
+            # then einsum with block gamma (chunk, n_blocks, A).
+            if pad_right > 0:
+                geno_blocked = jnp.pad(
+                    geno_chunk, ((0, 0), (0, pad_right)),
+                ).reshape(-1, bd.n_blocks, bd.block_size)
+            else:
+                geno_blocked = geno_chunk.reshape(-1, bd.n_blocks, bd.block_size)
+            wc_blocked = jnp.einsum('hba,hbs->abs', gb_chunk, geno_blocked)
+            weighted_counts = weighted_counts + wc_blocked.reshape(n_anc, T_padded)[:, :T_sites]
+
+            # total_weights: per-ancestry sum per block, broadcast to sites
+            per_anc_all = gb_chunk.sum(axis=0)  # (n_blocks, A)
+            tw_blocked = jnp.broadcast_to(
+                per_anc_all.T[:, :, None],
+                (n_anc, bd.n_blocks, bd.block_size),
+            )
+            total_weights = total_weights + tw_blocked.reshape(n_anc, T_padded)[:, :T_sites]
+
+            # mu_sum[a] = sum_h sum_b gamma_block[h,b,a] * width[b]
+            mu_sum = mu_sum + jnp.einsum('hba,b->a', gb_chunk, block_widths_j)
+
+            # Soft switches: density-invariant per-haplotype counts
+            # consumed by update_generations_per_hap_from_stats.
+            soft_switches_per_hap[batch_idx] = _np.asarray(sw_chunk)
+
+            # Hard switches: only at block boundaries (within-block
+            # gamma is constant). Used for switch_sum ancestry
+            # attribution and the legacy switches_per_hap field.
+            calls_block = jnp.argmax(gb_chunk, axis=2)
+            if bd.n_blocks > 1:
+                sw_block = (calls_block[:, 1:] != calls_block[:, :-1])
+                hard_switches_per_hap[batch_idx] = _np.array(
+                    sw_block.sum(axis=1), dtype=_np.int32
+                )
+                pre_calls = calls_block[:, :-1]
+                one_hot = jax.nn.one_hot(pre_calls, n_anc, dtype=jnp.float32)
+                switch_sum = switch_sum + (
+                    one_hot * sw_block[..., None].astype(jnp.float32)
+                ).sum(axis=(0, 1))
+
+            # Pattern-freq scatter: vmap over blocks instead of Python loop
+            pat_idx_chunk = jnp.array(bd_chunk.pattern_indices)
+            _pf_counts = _pf_counts + jax.vmap(_scatter_block)(
+                pat_idx_chunk.T,                    # (n_blocks, chunk)
+                jnp.moveaxis(gb_chunk, 1, 0),       # (n_blocks, chunk, A)
+            )
+
+            weighted_counts.block_until_ready()
+            del gb_chunk, geno_chunk, geno_blocked, calls_block, pat_idx_chunk, sw_chunk
+
+    em_stats = EMStats(
+        weighted_counts=weighted_counts,
+        total_weights=total_weights,
+        mu_sum=mu_sum,
+        switch_sum=switch_sum,
+        switches_per_hap=hard_switches_per_hap,
+        soft_switches_per_hap=soft_switches_per_hap,
+        n_haps=H_total,
+        n_sites=T_sites,
+    )
+    return em_stats, _pf_counts
+
+
 def forward_backward_bucketed_em(
     geno,
     model: AncestryModel,

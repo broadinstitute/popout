@@ -384,6 +384,61 @@ def test_block_soft_switches_density_invariant():
     assert 1.7 < ratio < 2.3, f"expected ratio ≈ 2, got {ratio:.3f}"
 
 
+def test_forward_backward_blocks_em_matches_unbucketed_for_B_eq_1():
+    """All-one-bucket assignment whose center matches gen_since_admix
+    must produce the same EMStats as the no-bucket path. Confirms the
+    Task 3 extraction preserves bucket-dispatch equivalence."""
+    from popout.hmm import forward_backward_blocks_em
+    from popout.datatypes import AncestryModel
+
+    rng = np.random.default_rng(7)
+    H, T, A = 32, 64, 3
+    block_size = 8
+    geno = rng.integers(0, 2, size=(H, T), dtype=np.uint8)
+    bd = pack_blocks(geno, block_size=block_size)
+    allele_freq = jnp.array(rng.uniform(0.1, 0.9, (A, T)).astype(np.float32))
+    pf = init_pattern_freq(allele_freq, bd, geno)
+
+    no_bucket_model = AncestryModel(
+        n_ancestries=A, mu=jnp.full(A, 1.0 / A), gen_since_admix=20.0,
+        allele_freq=allele_freq, pattern_freq=pf, block_data=bd,
+    )
+    bucketed_model = AncestryModel(
+        n_ancestries=A, mu=jnp.full(A, 1.0 / A), gen_since_admix=20.0,
+        allele_freq=allele_freq, pattern_freq=pf, block_data=bd,
+        bucket_centers=jnp.array([20.0], dtype=jnp.float32),
+        bucket_assignments=jnp.zeros(H, dtype=jnp.int32),
+    )
+
+    em_a, pf_a = forward_backward_blocks_em(geno, no_bucket_model, bd, batch_size=H)
+    em_b, pf_b = forward_backward_blocks_em(geno, bucketed_model, bd, batch_size=H)
+
+    np.testing.assert_allclose(
+        np.asarray(em_a.weighted_counts), np.asarray(em_b.weighted_counts),
+        rtol=1e-5, atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(em_a.total_weights), np.asarray(em_b.total_weights),
+        rtol=1e-5, atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(em_a.mu_sum), np.asarray(em_b.mu_sum),
+        rtol=1e-5, atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(em_a.soft_switches_per_hap),
+        np.asarray(em_b.soft_switches_per_hap),
+        rtol=1e-5, atol=1e-6,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(em_a.switches_per_hap),
+        np.asarray(em_b.switches_per_hap),
+    )
+    np.testing.assert_allclose(
+        np.asarray(pf_a), np.asarray(pf_b), rtol=1e-5, atol=1e-6,
+    )
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
