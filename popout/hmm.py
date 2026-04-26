@@ -768,7 +768,9 @@ def _streaming_decode_checkpointed(
 def forward_backward_blocks(
     model: AncestryModel,
     block_data,
-) -> jnp.ndarray:
+    *,
+    compute_soft_switches: bool = False,
+) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
     """Forward-backward operating on block-level emissions.
 
     The scan iterates over blocks instead of sites. Emissions come from
@@ -778,10 +780,14 @@ def forward_backward_blocks(
     ----------
     model : AncestryModel with pattern_freq set
     block_data : BlockData
+    compute_soft_switches : if True, also return per-haplotype expected
+        transition counts (soft switches) from block-boundary xi.
 
     Returns
     -------
     gamma_block : (H, n_blocks, A) — block-level posteriors
+        — or (gamma_block, soft_switches) when compute_soft_switches=True,
+        where soft_switches is (H,) float32.
     """
     log_emit = model.log_emission_block(block_data)  # (H, n_blocks, A)
     d_block = jnp.array(block_data.block_distances)   # (n_blocks-1,)
@@ -818,7 +824,13 @@ def forward_backward_blocks(
     )
     log_betas = jnp.transpose(log_betas, (1, 0, 2))  # (H, n_blocks, A)
 
-    return posteriors(log_alphas, log_betas)
+    gamma_block = posteriors(log_alphas, log_betas)
+    if compute_soft_switches:
+        soft_sw = _compute_soft_switches_block(
+            log_alphas, log_betas, log_emit, log_trans,
+        )
+        return gamma_block, soft_sw
+    return gamma_block
 
 
 def forward_backward_blocks_batched(
@@ -914,6 +926,52 @@ def _compute_soft_switches(
     xi_diag = jnp.exp(log_xi_diag - log_P[:, None, None])  # (H, T-1, A)
     stay = xi_diag.sum(axis=2)                               # (H, T-1)
     return jnp.clip(1.0 - stay, 0.0, 1.0).sum(axis=1)       # (H,)
+
+
+def _compute_soft_switches_block(
+    log_alpha_block: jnp.ndarray,   # (H, n_blocks, A)
+    log_beta_block: jnp.ndarray,    # (H, n_blocks, A)
+    log_emit_block: jnp.ndarray,    # (H, n_blocks, A)
+    log_trans_block: jnp.ndarray,   # (n_blocks-1, A, A)
+) -> jnp.ndarray:
+    """Expected ancestry transitions per haplotype at block boundaries.
+
+    Block analog of :func:`_compute_soft_switches`. Same xi-diagonal trick:
+    soft_sw[h] = sum over block boundaries t of P(z_t != z_{t+1} | data, h).
+
+    Density-invariant: block widths enter through ``log_trans_block``,
+    so longer block intervals contribute proportionally more transition
+    mass per boundary than shorter ones.
+
+    Parameters
+    ----------
+    log_alpha_block : (H, n_blocks, A)
+    log_beta_block : (H, n_blocks, A)
+    log_emit_block : (H, n_blocks, A) — block-level emissions
+    log_trans_block : (n_blocks-1, A, A) — block-interval transitions
+
+    Returns
+    -------
+    soft_switches : (H,) float32 — expected transition count per haplotype
+    """
+    H, n_blocks, A = log_alpha_block.shape
+    if n_blocks <= 1:
+        return jnp.zeros(H)
+
+    log_P = jax.nn.logsumexp(
+        log_alpha_block[:, 0, :] + log_beta_block[:, 0, :], axis=1,
+    )  # (H,)
+    log_trans_diag = jnp.diagonal(log_trans_block, axis1=1, axis2=2)  # (n_blocks-1, A)
+
+    log_xi_diag = (
+        log_alpha_block[:, :-1, :]
+        + log_trans_diag[None, :, :]
+        + log_emit_block[:, 1:, :]
+        + log_beta_block[:, 1:, :]
+    )  # (H, n_blocks-1, A)
+    xi_diag = jnp.exp(log_xi_diag - log_P[:, None, None])
+    stay = xi_diag.sum(axis=2)                                 # (H, n_blocks-1)
+    return jnp.clip(1.0 - stay, 0.0, 1.0).sum(axis=1)         # (H,)
 
 
 def forward_backward(

@@ -290,6 +290,100 @@ def test_block_decode_without_expansion():
     np.testing.assert_allclose(new_global_sums, ref_global_sums, rtol=1e-4, atol=1e-6)
 
 
+def test_block_soft_switches_match_hard_switches_in_sharp_limit():
+    """When pattern_freq is sharply peaked per ancestry, gamma concentrates
+    on a single ancestry per block, so xi-based soft switches at block
+    boundaries closely approximate the hard-call argmax switch count."""
+    from popout.hmm import forward_backward_blocks
+    from popout.datatypes import AncestryModel
+
+    rng = np.random.default_rng(0)
+    H, T, A = 100, 64, 3
+    block_size = 8
+    geno = rng.integers(0, 2, size=(H, T), dtype=np.uint8)
+    bd = pack_blocks(geno, block_size=block_size)
+
+    n_blocks = bd.n_blocks
+    max_p = bd.max_patterns
+    pf = np.full((n_blocks, max_p, A), 1e-6, dtype=np.float32)
+    for b in range(n_blocks):
+        n_p = int(bd.pattern_counts[b])
+        for p in range(n_p):
+            a_assign = (b * 7 + p * 3) % A
+            pf[b, p, a_assign] = 1.0
+    for b in range(n_blocks):
+        n_p = int(bd.pattern_counts[b])
+        for a in range(A):
+            s = pf[b, :n_p, a].sum()
+            if s > 0:
+                pf[b, :n_p, a] /= s
+    pf_j = jnp.array(pf)
+    allele_freq = jnp.array(rng.uniform(0.1, 0.9, (A, T)).astype(np.float32))
+    model = AncestryModel(
+        n_ancestries=A, mu=jnp.full(A, 1.0 / A), gen_since_admix=20.0,
+        allele_freq=allele_freq, pattern_freq=pf_j, block_data=bd,
+    )
+
+    gamma_block, soft_sw = forward_backward_blocks(
+        model, bd, compute_soft_switches=True,
+    )
+    calls_block = np.array(jnp.argmax(gamma_block, axis=2))
+    hard_sw = (calls_block[:, 1:] != calls_block[:, :-1]).sum(axis=1).astype(np.float32)
+    soft_sw_np = np.array(soft_sw)
+
+    np.testing.assert_allclose(soft_sw_np, hard_sw, atol=0.5, rtol=0.05)
+
+
+def test_block_soft_switches_density_invariant():
+    """Soft switches scale ~linearly with block_distance in the
+    low-distance regime (1 - exp(-T*d) ≈ T*d for small T*d). Doubling
+    every block_distance roughly doubles soft-switch count."""
+    from popout.hmm import forward_backward_blocks
+    from popout.datatypes import AncestryModel
+    from popout.blocks import BlockData
+
+    rng = np.random.default_rng(1)
+    H, T, A = 200, 64, 3
+    block_size = 8
+    geno = rng.integers(0, 2, size=(H, T), dtype=np.uint8)
+    bd = pack_blocks(geno, block_size=block_size)
+    allele_freq = jnp.array(rng.uniform(0.1, 0.9, (A, T)).astype(np.float32))
+    pf = init_pattern_freq(allele_freq, bd, geno)
+
+    small_d = np.full(bd.n_blocks - 1, 1e-5, dtype=np.float32)
+    bd1 = BlockData(
+        pattern_indices=bd.pattern_indices,
+        block_starts=bd.block_starts,
+        block_ends=bd.block_ends,
+        block_distances=small_d,
+        pattern_counts=bd.pattern_counts,
+        max_patterns=bd.max_patterns,
+        block_size=bd.block_size,
+    )
+    bd2 = BlockData(
+        pattern_indices=bd.pattern_indices,
+        block_starts=bd.block_starts,
+        block_ends=bd.block_ends,
+        block_distances=2.0 * small_d,
+        pattern_counts=bd.pattern_counts,
+        max_patterns=bd.max_patterns,
+        block_size=bd.block_size,
+    )
+
+    model = AncestryModel(
+        n_ancestries=A, mu=jnp.full(A, 1.0 / A), gen_since_admix=20.0,
+        allele_freq=allele_freq, pattern_freq=pf, block_data=bd,
+    )
+    _, sw1 = forward_backward_blocks(model, bd1, compute_soft_switches=True)
+    _, sw2 = forward_backward_blocks(model, bd2, compute_soft_switches=True)
+
+    sw1_total = float(np.array(sw1).sum())
+    sw2_total = float(np.array(sw2).sum())
+    assert sw2_total > sw1_total
+    ratio = sw2_total / max(sw1_total, 1e-12)
+    assert 1.7 < ratio < 2.3, f"expected ratio ≈ 2, got {ratio:.3f}"
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
