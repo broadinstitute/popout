@@ -144,6 +144,70 @@ def test_hard_calls_match():
     np.testing.assert_array_equal(calls_full, calls_ckpt)
 
 
+def _bucketed_em_setup(H=24, T=80, A=3, B=3, seed=11):
+    """Build a small AncestryModel with bucket_centers + bucket_assignments
+    set, ready to feed forward_backward_bucketed_em / _decode."""
+    from popout.datatypes import AncestryModel
+
+    rng = np.random.default_rng(seed)
+    geno = jnp.array(rng.integers(0, 2, size=(H, T), dtype=np.uint8))
+    freq = rng.uniform(0.1, 0.9, size=(A, T)).astype(np.float32)
+    mu = rng.dirichlet(np.ones(A)).astype(np.float32)
+    d_morgan = jnp.array(
+        np.diff(np.sort(rng.uniform(0, 1, size=T))).astype(np.float64)
+    )
+    centers = jnp.array(np.geomspace(2, 50, B).astype(np.float32))
+    assignments = jnp.array(np.arange(H) % B, dtype=jnp.int32)
+    model = AncestryModel(
+        n_ancestries=A,
+        mu=jnp.array(mu),
+        gen_since_admix=10.0,
+        allele_freq=jnp.array(freq),
+        bucket_centers=centers,
+        bucket_assignments=assignments,
+    )
+    return geno, model, d_morgan
+
+
+def test_bucketed_em_asserts_valid_assignments():
+    """Out-of-range bucket_assignments must trigger AssertionError in
+    forward_backward_bucketed_em."""
+    import pytest
+    from popout.datatypes import AncestryModel
+    from popout.hmm import forward_backward_bucketed_em
+
+    geno, model, d_morgan = _bucketed_em_setup()
+    H = geno.shape[0]
+    bad = jnp.array(np.full(H, 99, dtype=np.int32))
+    bad_model = AncestryModel(
+        n_ancestries=model.n_ancestries, mu=model.mu,
+        gen_since_admix=model.gen_since_admix, allele_freq=model.allele_freq,
+        bucket_centers=model.bucket_centers,
+        bucket_assignments=bad,
+    )
+    with pytest.raises(AssertionError, match="outside"):
+        forward_backward_bucketed_em(geno, bad_model, d_morgan, batch_size=12)
+
+
+def test_bucketed_em_asserts_shape_match():
+    """bucket_assignments shape mismatch must trigger AssertionError."""
+    import pytest
+    from popout.datatypes import AncestryModel
+    from popout.hmm import forward_backward_bucketed_decode
+
+    geno, model, d_morgan = _bucketed_em_setup()
+    H = geno.shape[0]
+    short = jnp.array(np.zeros(H - 1, dtype=np.int32))
+    bad_model = AncestryModel(
+        n_ancestries=model.n_ancestries, mu=model.mu,
+        gen_since_admix=model.gen_since_admix, allele_freq=model.allele_freq,
+        bucket_centers=model.bucket_centers,
+        bucket_assignments=short,
+    )
+    with pytest.raises(AssertionError, match="does not match"):
+        forward_backward_bucketed_decode(geno, bad_model, d_morgan, batch_size=12)
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

@@ -1246,12 +1246,19 @@ def forward_backward_bucketed_em(
     A = model.n_ancestries
     B = len(model.bucket_centers)
 
+    bucket_np = _np.asarray(model.bucket_assignments)
+    assert bucket_np.shape == (H,), (
+        f"bucket_assignments shape {bucket_np.shape} does not match geno H={H}"
+    )
+    ba_min, ba_max = int(bucket_np.min()), int(bucket_np.max())
+    assert 0 <= ba_min and ba_max < B, (
+        f"bucket_assignments range [{ba_min}, {ba_max}] outside [0, {B})"
+    )
+
     weighted_counts = jnp.zeros((A, T))
     total_weights = jnp.zeros((A, T))
     mu_sum = jnp.zeros((A,))
     soft_switches_per_hap = _np.zeros(H, dtype=_np.float32)
-
-    bucket_np = _np.array(model.bucket_assignments)
 
     for b in range(B):
         mask = bucket_np == b
@@ -1420,6 +1427,15 @@ def forward_backward_bucketed_decode(
     A = model.n_ancestries
     B = len(model.bucket_centers)
 
+    bucket_np = _np.asarray(model.bucket_assignments)
+    assert bucket_np.shape == (H,), (
+        f"bucket_assignments shape {bucket_np.shape} does not match geno H={H}"
+    )
+    ba_min, ba_max = int(bucket_np.min()), int(bucket_np.max())
+    assert 0 <= ba_min and ba_max < B, (
+        f"bucket_assignments range [{ba_min}, {ba_max}] outside [0, {B})"
+    )
+
     calls = calls_out if calls_out is not None else _np.empty((H, T), dtype=_np.int8)
     if max_post_writer is None and compute_max_post:
         max_post = _np.empty((H, T), dtype=_np.float16)
@@ -1430,8 +1446,6 @@ def forward_backward_bucketed_decode(
         max_post = None
         _user_writer = max_post_writer
     global_sums = _np.zeros((H, A), dtype=_np.float64) if compute_max_post else None
-
-    bucket_np = _np.array(model.bucket_assignments)
 
     for b in range(B):
         mask = bucket_np == b
@@ -1529,9 +1543,16 @@ def forward_backward_bucketed_ancestry_sums(
     A = model.n_ancestries
     B = len(model.bucket_centers)
 
-    global_sums = _np.zeros((H, A), dtype=_np.float64)
+    bucket_np = _np.asarray(model.bucket_assignments)
+    assert bucket_np.shape == (H,), (
+        f"bucket_assignments shape {bucket_np.shape} does not match geno H={H}"
+    )
+    ba_min, ba_max = int(bucket_np.min()), int(bucket_np.max())
+    assert 0 <= ba_min and ba_max < B, (
+        f"bucket_assignments range [{ba_min}, {ba_max}] outside [0, {B})"
+    )
 
-    bucket_np = _np.array(model.bucket_assignments)
+    global_sums = _np.zeros((H, A), dtype=_np.float64)
 
     for b in range(B):
         mask = bucket_np == b
