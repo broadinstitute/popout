@@ -20,7 +20,6 @@ from popout.em import (
     update_allele_freq,
     update_mu,
     update_generations,
-    update_generations_per_hap,
     update_allele_freq_from_stats,
     update_mu_from_stats,
     update_generations_from_stats,

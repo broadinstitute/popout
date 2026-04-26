@@ -356,18 +356,6 @@ def main(argv: list[str] | None = None) -> None:
              "forcing recomputation even if checkpoint files exist.",
     )
 
-    # Deprecated checkpoint flags (kept for backward compatibility)
-    parser.add_argument(
-        "--resume-from-checkpoint", type=str, default=None,
-        help="[Deprecated] Resume is now automatic via --work-dir. "
-             "This flag still works but will be removed in a future release.",
-    )
-    parser.add_argument(
-        "--checkpoint-after-em", action="store_true",
-        help="[Deprecated] Post-EM checkpoints are now automatic. "
-             "This flag is a no-op.",
-    )
-
     parser.add_argument(
         "--exclude-seeding-samples", type=str, default=None,
         help="Path to a single-column TSV (header: sample_id) of samples to "
@@ -617,18 +605,6 @@ def main(argv: list[str] | None = None) -> None:
             )
             sys.exit(1)
 
-    # --- Deprecation warnings for legacy checkpoint flags ---
-    if args.resume_from_checkpoint is not None:
-        log.warning(
-            "--resume-from-checkpoint is deprecated. Resume is now automatic "
-            "when a work directory exists. Use --work-dir to specify location.",
-        )
-    if args.checkpoint_after_em:
-        log.warning(
-            "--checkpoint-after-em is deprecated and has no effect. "
-            "Post-EM checkpoints are now written automatically.",
-        )
-
     # --- Work directory for checkpoint/resume ---
     from .checkpoint import WorkDir
     from . import __version__
@@ -751,8 +727,6 @@ def main(argv: list[str] | None = None) -> None:
             freeze_anchors_iters=args.freeze_anchors_iters,
             out_prefix=args.out,
             stop_after_seeding=args.stop_after_seeding,
-            resume_from_checkpoint=args.resume_from_checkpoint,
-            checkpoint_after_em=args.checkpoint_after_em,
             write_dense_decode=write_dense_decode,
             seeding_mask=seeding_mask,
             work_dir=work_dir,

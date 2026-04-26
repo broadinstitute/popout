@@ -211,42 +211,6 @@ def assign_buckets(
     return jnp.argmin(jnp.abs(log_T - log_c), axis=1).astype(jnp.int32)
 
 
-def update_generations_per_hap(
-    gamma: jnp.ndarray,
-    d_morgan: jnp.ndarray,
-    current_T_global: float,
-    mu: jnp.ndarray,
-    bucket_centers: jnp.ndarray,
-    min_switches_for_confidence: int = 5,
-) -> tuple[jnp.ndarray, jnp.ndarray, float]:
-    """Estimate per-haplotype T from individual switch rates.
-
-    Returns
-    -------
-    T_per_hap : (H,) — regularized per-haplotype T
-    bucket_assignments : (H,) int32
-    T_global : float — updated global T
-    """
-    calls = jnp.argmax(gamma, axis=2)  # (H, T_sites)
-    switches_per_hap = (calls[:, 1:] != calls[:, :-1]).astype(jnp.float32).sum(axis=1)
-
-    p_diff = 1.0 - (mu ** 2).sum()
-    p_diff = jnp.maximum(p_diff, 0.1)
-    total_d = d_morgan.sum()
-
-    T_raw = switches_per_hap / (total_d * p_diff + 1e-10)
-
-    # Regularize: lambda ~ 1/(1 + switches/min_switches)
-    lam = 1.0 / (1.0 + switches_per_hap / min_switches_for_confidence)
-    T_reg = (1.0 - lam) * T_raw + lam * current_T_global
-    T_reg = jnp.clip(T_reg, 1.0, 1000.0)
-
-    bucket_assignments = assign_buckets(T_reg, bucket_centers)
-    T_global = float(jnp.mean(T_reg))
-
-    return T_reg, bucket_assignments, T_global
-
-
 # ---------------------------------------------------------------------------
 # Streaming M-step: operate on EMStats instead of full gamma
 # ---------------------------------------------------------------------------
@@ -428,7 +392,6 @@ def run_em(
     max_ancestries: int = 20,
     seed_responsibilities: Optional[jnp.ndarray] = None,
     freeze_anchors_iters: int = 0,
-    checkpoint_after_em: Optional[str] = None,
     ancestry_names: Optional[list[str]] = None,
     write_dense_decode: bool = False,
     decode_parquet_path: Optional[str] = None,
@@ -838,16 +801,12 @@ def run_em(
     if n_em_iter == 0 or skip_decode:
         log.info("Skipping final decode%s",
                  " (n_em_iter=0)" if n_em_iter == 0 else " (skip_decode)")
-        calls = np.zeros((chrom_data.n_haps, chrom_data.n_sites), dtype=np.int8)
         result = AncestryResult(
-            calls=calls, model=model, chrom=chrom_data.chrom,
+            calls=np.zeros((0, 0), dtype=np.int8),
+            model=model, chrom=chrom_data.chrom,
             spectral={"pca_proj": pca_proj, "gmm_labels": np.array(labels)} if pca_proj is not None else None,
         )
         return result
-
-    # --- Post-EM checkpoint (before decode, which may OOM) ---
-    if checkpoint_after_em is not None:
-        _save_em_checkpoint(checkpoint_after_em, model, chrom_data)
 
     # --- Final decode via decode_chromosome() ---
     decode = decode_chromosome(
@@ -1267,166 +1226,6 @@ def decode_chromosome(
 # Multi-chromosome wrapper
 # ---------------------------------------------------------------------------
 
-def _save_em_checkpoint(path: str, model: AncestryModel, chrom_data: 'ChromData') -> None:
-    """Save converged model state after EM, before decode."""
-    save_dict = dict(
-        mu=np.array(model.mu),
-        gen_since_admix=np.float64(model.gen_since_admix),
-        allele_freq=np.array(model.allele_freq),
-        n_ancestries=np.int32(model.n_ancestries),
-        n_sites=np.int64(chrom_data.n_sites),
-        n_haps=np.int64(chrom_data.n_haps),
-        chrom=np.array(str(chrom_data.chrom)),
-    )
-    if model.pattern_freq is not None:
-        save_dict["pattern_freq"] = np.array(model.pattern_freq)
-    bd = model.block_data
-    if bd is not None:
-        save_dict["pattern_indices"] = np.array(bd.pattern_indices)
-        save_dict["block_starts"] = np.array(bd.block_starts)
-        save_dict["block_ends"] = np.array(bd.block_ends)
-        save_dict["block_distances"] = np.array(bd.block_distances)
-        save_dict["pattern_counts"] = np.array(bd.pattern_counts)
-        save_dict["max_patterns"] = np.int32(bd.max_patterns)
-        save_dict["block_size"] = np.int32(bd.block_size)
-    if not path.endswith(".npz"):
-        path = f"{path}.em_checkpoint.npz"
-    np.savez_compressed(path, **save_dict)
-    log.info("Post-EM checkpoint written to %s (A=%d)", path, model.n_ancestries)
-
-
-def _load_em_checkpoint(path: str, chrom_data: 'ChromData') -> AncestryModel:
-    """Load converged model from a post-EM checkpoint."""
-    from .blocks import BlockData
-    if not path.endswith(".npz"):
-        path = f"{path}.em_checkpoint.npz"
-    data = np.load(path, allow_pickle=True)
-    n_anc = int(data["n_ancestries"])
-    assert int(data["n_haps"]) == chrom_data.n_haps, (
-        f"Checkpoint H={data['n_haps']} != input H={chrom_data.n_haps}"
-    )
-    assert int(data["n_sites"]) == chrom_data.n_sites, (
-        f"Checkpoint T={data['n_sites']} != input T={chrom_data.n_sites}"
-    )
-    bd = None
-    pf = None
-    if "block_starts" in data:
-        bd = BlockData(
-            pattern_indices=data["pattern_indices"],
-            block_starts=data["block_starts"],
-            block_ends=data["block_ends"],
-            block_distances=data["block_distances"],
-            pattern_counts=data["pattern_counts"],
-            max_patterns=int(data["max_patterns"]),
-            block_size=int(data["block_size"]),
-        )
-    if "pattern_freq" in data:
-        pf = jnp.array(data["pattern_freq"])
-    model = AncestryModel(
-        n_ancestries=n_anc,
-        mu=jnp.array(data["mu"]),
-        gen_since_admix=float(data["gen_since_admix"]),
-        allele_freq=jnp.array(data["allele_freq"]),
-        pattern_freq=pf,
-        block_data=bd,
-    )
-    log.info("Loaded post-EM checkpoint: A=%d, H=%d, T=%d", n_anc, chrom_data.n_haps, chrom_data.n_sites)
-    return model
-
-
-def _save_checkpoint(
-    out_prefix: str,
-    model: AncestryModel,
-    leaf_labels: np.ndarray,
-    leaf_info: list,
-    chrom_data: 'ChromData',
-) -> None:
-    """Save post-seeding state for resume."""
-    import json, datetime
-    bd = model.block_data
-    save_dict = dict(
-        leaf_labels=np.array(leaf_labels, dtype=np.int32),
-        leaf_paths=np.array([li.path for li in leaf_info]),
-        mu=np.array(model.mu),
-        gen_since_admix=np.float64(model.gen_since_admix),
-        allele_freq=np.array(model.allele_freq),
-        n_ancestries=np.int32(model.n_ancestries),
-        chrom=np.array(str(chrom_data.chrom)),
-        n_sites=np.int64(chrom_data.n_sites),
-        n_haps=np.int64(chrom_data.n_haps),
-    )
-    if model.pattern_freq is not None:
-        save_dict["pattern_freq"] = np.array(model.pattern_freq)
-    if bd is not None:
-        save_dict["pattern_indices"] = np.array(bd.pattern_indices)
-        save_dict["block_starts"] = np.array(bd.block_starts)
-        save_dict["block_ends"] = np.array(bd.block_ends)
-        save_dict["block_distances"] = np.array(bd.block_distances)
-        save_dict["pattern_counts"] = np.array(bd.pattern_counts)
-        save_dict["max_patterns"] = np.int32(bd.max_patterns)
-        save_dict["block_size"] = np.int32(bd.block_size)
-    np.savez_compressed(f"{out_prefix}.checkpoint.npz", **save_dict)
-    meta = {
-        "n_ancestries": int(model.n_ancestries),
-        "n_haps": int(chrom_data.n_haps),
-        "n_sites": int(chrom_data.n_sites),
-        "n_leaves": len(leaf_info),
-        "chrom": str(chrom_data.chrom),
-        "date": datetime.datetime.now().isoformat(),
-    }
-    with open(f"{out_prefix}.checkpoint.meta.json", "w") as f:
-        json.dump(meta, f, indent=2)
-    log.info("Checkpoint written to %s.checkpoint.npz (%d leaves, A=%d)",
-             out_prefix, len(leaf_info), model.n_ancestries)
-
-
-def _load_checkpoint(
-    path_prefix: str,
-    chrom_data: 'ChromData',
-) -> tuple[AncestryModel, np.ndarray]:
-    """Load post-seeding checkpoint."""
-    from .blocks import BlockData
-    if path_prefix.endswith(".checkpoint.npz"):
-        path_prefix = path_prefix.removesuffix(".checkpoint.npz")
-    data = np.load(f"{path_prefix}.checkpoint.npz", allow_pickle=True)
-
-    n_anc = int(data["n_ancestries"])
-    assert int(data["n_haps"]) == chrom_data.n_haps, (
-        f"Checkpoint H={data['n_haps']} != input H={chrom_data.n_haps}"
-    )
-    assert int(data["n_sites"]) == chrom_data.n_sites, (
-        f"Checkpoint T={data['n_sites']} != input T={chrom_data.n_sites}"
-    )
-
-    bd = None
-    pf = None
-    if "block_starts" in data:
-        bd = BlockData(
-            pattern_indices=data["pattern_indices"],
-            block_starts=data["block_starts"],
-            block_ends=data["block_ends"],
-            block_distances=data["block_distances"],
-            pattern_counts=data["pattern_counts"],
-            max_patterns=int(data["max_patterns"]),
-            block_size=int(data["block_size"]),
-        )
-    if "pattern_freq" in data:
-        pf = jnp.array(data["pattern_freq"])
-
-    model = AncestryModel(
-        n_ancestries=n_anc,
-        mu=jnp.array(data["mu"]),
-        gen_since_admix=float(data["gen_since_admix"]),
-        allele_freq=jnp.array(data["allele_freq"]),
-        pattern_freq=pf,
-        block_data=bd,
-    )
-    leaf_labels = data["leaf_labels"]
-    log.info("Loaded checkpoint: A=%d, H=%d, T=%d",
-             n_anc, chrom_data.n_haps, chrom_data.n_sites)
-    return model, leaf_labels
-
-
 def _save_seed_workdir(wd, model, leaf_labels, leaf_info, chrom_data):
     """Save seed-stage checkpoint into the work directory."""
     bd = model.block_data
@@ -1674,8 +1473,6 @@ def run_em_genome(
     freeze_anchors_iters: int = 0,
     out_prefix: Optional[str] = None,
     stop_after_seeding: bool = False,
-    resume_from_checkpoint: Optional[str] = None,
-    checkpoint_after_em: bool = False,
     ancestry_names: Optional[list[str]] = None,
     write_dense_decode: bool = False,
     seeding_mask: np.ndarray | None = None,
@@ -1695,8 +1492,7 @@ def run_em_genome(
                  If None, uses the first one.
     work_dir : WorkDir or None
         If provided, enables automatic checkpoint/resume via the work
-        directory.  Replaces the legacy ``resume_from_checkpoint`` and
-        ``checkpoint_after_em`` flags.
+        directory.
 
     Returns
     -------
@@ -1738,20 +1534,6 @@ def run_em_genome(
                 seed_resp = _labels_to_resp(
                     ckpt_labels, chrom_data.n_haps, n_leaves,
                     seeding_mask=seeding_mask,
-                )
-                em_n_ancestries = n_leaves
-                leaf_labels_for_ckpt = ckpt_labels
-                seed_loaded = True
-            elif resume_from_checkpoint is not None:
-                # Legacy --resume-from-checkpoint
-                log.info("Resuming from legacy checkpoint: %s",
-                         resume_from_checkpoint)
-                ckpt_model, ckpt_labels = _load_checkpoint(
-                    resume_from_checkpoint, chrom_data,
-                )
-                n_leaves = ckpt_model.n_ancestries
-                seed_resp = _labels_to_resp(
-                    ckpt_labels, chrom_data.n_haps, n_leaves,
                 )
                 em_n_ancestries = n_leaves
                 leaf_labels_for_ckpt = ckpt_labels
@@ -1846,24 +1628,6 @@ def run_em_genome(
                     )
                     wd.mark_done("seed",
                                  wall_s=_time.perf_counter() - t0_stage)
-                # Also save legacy checkpoint for compatibility
-                if out_prefix is not None:
-                    if leaf_labels_for_ckpt is None:
-                        leaf_labels_for_ckpt = np.array(
-                            jnp.argmax(seed_resp, axis=1) if seed_resp is not None
-                            else jnp.zeros(chrom_data.n_haps, dtype=jnp.int32)
-                        )
-                    if leaf_info_for_ckpt is None:
-                        from .recursive_seed import LeafInfo
-                        leaf_info_for_ckpt = [
-                            LeafInfo(label=i, n_haps=int((leaf_labels_for_ckpt==i).sum()),
-                                     depth=0, path=f"L{i}", bic_score=0.0)
-                            for i in range(result.model.n_ancestries)
-                        ]
-                    _save_checkpoint(
-                        out_prefix, result.model,
-                        leaf_labels_for_ckpt, leaf_info_for_ckpt, chrom_data,
-                    )
                 log.info("=== Stopped after seeding (--stop-after-seeding) ===")
                 return None
 
@@ -1921,13 +1685,6 @@ def run_em_genome(
                     _save_em_workdir(wd, fitted_model, chrom_data)
                     wd.mark_done("em",
                                  wall_s=_time.perf_counter() - t0_em)
-
-                # Also save legacy checkpoints for compatibility
-                if out_prefix is not None and leaf_labels_for_ckpt is not None:
-                    _save_checkpoint(
-                        out_prefix, result.model,
-                        leaf_labels_for_ckpt, leaf_info_for_ckpt, chrom_data,
-                    )
 
             # Attach leaf paths for post-EM consolidation
             if leaf_info_for_ckpt is not None:

@@ -262,7 +262,8 @@ class AncestryResult:
     Attributes
     ----------
     calls : np.ndarray, shape (n_haps, n_sites), dtype int8
-        Hard ancestry calls (argmax of posteriors).
+        Hard ancestry calls (argmax of posteriors). Empty array (shape
+        (0, 0)) when decode was skipped (n_em_iter=0 or skip_decode=True).
     model : AncestryModel
         Final fitted model parameters.
     chrom : str
