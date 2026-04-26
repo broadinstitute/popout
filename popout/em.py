@@ -668,6 +668,72 @@ def run_em(
 # Standalone decode (extracted from run_em for checkpoint-stage separation)
 # ---------------------------------------------------------------------------
 
+def _open_streaming_decode_outputs(
+    decode_parquet_path: str | None,
+    write_dense_decode: bool,
+    H_total: int,
+    T_sites: int,
+) -> tuple[np.ndarray, np.ndarray | None, bool]:
+    """Allocate ``calls`` and ``max_post`` for decode_chromosome.
+
+    When ``write_dense_decode`` and ``decode_parquet_path`` are both set,
+    backs ``calls`` with ``np.memmap`` (sibling of the parquet) and
+    returns ``max_post=None`` (the streaming writer handles posteriors).
+    Otherwise allocates in-memory ``np.empty`` for both.
+
+    Returns ``(calls, max_post, stream_to_parquet)``.
+    """
+    stream_to_parquet = write_dense_decode and decode_parquet_path is not None
+    if stream_to_parquet:
+        from pathlib import Path as _Path
+        _Path(decode_parquet_path).parent.mkdir(parents=True, exist_ok=True)
+        calls_mmap_path = str(
+            _Path(decode_parquet_path).with_suffix(".calls.dat")
+        )
+        calls = np.memmap(
+            calls_mmap_path, dtype=np.int8, mode='w+',
+            shape=(H_total, T_sites),
+        )
+        log.info("  calls backed by memmap: %s (%.1f GB virtual)",
+                 calls_mmap_path, H_total * T_sites / 1e9)
+        log.info("  Streaming decode to %s (no full max_post alloc)",
+                 decode_parquet_path)
+        max_post = None
+    else:
+        calls = np.empty((H_total, T_sites), dtype=np.int8)
+        max_post = (
+            np.empty((H_total, T_sites), dtype=np.float16)
+            if write_dense_decode else None
+        )
+    return calls, max_post, stream_to_parquet
+
+
+def _close_and_merge_bucket_writers(
+    bucket_writer_paths: list,
+    bucket_hap_indices: list,
+    decode_parquet_path: str,
+    chrom_data: ChromData,
+    n_anc: int,
+) -> None:
+    """Close per-bucket parquets are written by the bucket loop; this
+    helper just merges them into a single hap-ordered file and removes
+    the per-bucket files.
+
+    No-op when ``bucket_writer_paths`` is empty.
+    """
+    if not bucket_writer_paths:
+        return
+    from .output import _merge_bucket_parquets
+    _merge_bucket_parquets(
+        bucket_writer_paths, bucket_hap_indices,
+        decode_parquet_path,
+        chrom=chrom_data.chrom, pos_bp=chrom_data.pos_bp,
+        T=chrom_data.n_sites, K=n_anc, include_max_post=True,
+    )
+    for p in bucket_writer_paths:
+        p.unlink()
+
+
 def decode_chromosome(
     chrom_data: ChromData,
     model: AncestryModel,
@@ -725,30 +791,10 @@ def decode_chromosome(
         H_total = chrom_data.n_haps
         global_sums = np.zeros((H_total, n_anc), dtype=np.float64)
 
-        stream_to_parquet = (write_dense_decode
-                             and decode_parquet_path is not None)
-        if stream_to_parquet:
-            from pathlib import Path as _Path
-            _Path(decode_parquet_path).parent.mkdir(parents=True, exist_ok=True)
-            calls_mmap_path = str(
-                _Path(decode_parquet_path).with_suffix(".calls.dat")
-            )
-            calls = np.memmap(
-                calls_mmap_path, dtype=np.int8, mode='w+',
-                shape=(H_total, chrom_data.n_sites),
-            )
-            log.info("  calls backed by memmap: %s (%.1f GB virtual)",
-                     calls_mmap_path,
-                     H_total * chrom_data.n_sites / 1e9)
-            max_post = None
-            log.info("  Streaming decode to %s (no full max_post alloc)",
-                     decode_parquet_path)
-        else:
-            calls = np.empty((H_total, chrom_data.n_sites), dtype=np.int8)
-            max_post = (
-                np.empty((H_total, chrom_data.n_sites), dtype=np.float16)
-                if write_dense_decode else None
-            )
+        calls, max_post, stream_to_parquet = _open_streaming_decode_outputs(
+            decode_parquet_path, write_dense_decode,
+            H_total, chrom_data.n_sites,
+        )
 
         # Bucket dispatch: when bucket_assignments is set, run the decode
         # chunk loop once per bucket against a per-bucket model carrying
@@ -873,20 +919,11 @@ def decode_chromosome(
                 decode_writer = None
 
         # Merge per-bucket parquets into the final hap-ordered file
-        if stream_to_parquet and bucket_writer_paths:
-            from .output import _merge_bucket_parquets
-            _merge_bucket_parquets(
-                bucket_writer_paths,
-                bucket_hap_indices,
-                decode_parquet_path,
-                chrom=chrom_data.chrom,
-                pos_bp=chrom_data.pos_bp,
-                T=chrom_data.n_sites,
-                K=n_anc,
-                include_max_post=True,
+        if stream_to_parquet:
+            _close_and_merge_bucket_writers(
+                bucket_writer_paths, bucket_hap_indices,
+                decode_parquet_path, chrom_data, n_anc,
             )
-            for p in bucket_writer_paths:
-                p.unlink()
 
         if max_post is not None:
             assert max_post.dtype == np.float16, (
@@ -916,19 +953,9 @@ def decode_chromosome(
 
         if stream_to_parquet:
             from pathlib import Path as _Path
-            _Path(decode_parquet_path).parent.mkdir(parents=True, exist_ok=True)
-            calls_mmap_path = str(
-                _Path(decode_parquet_path).with_suffix(".calls.dat")
+            calls, _, _ = _open_streaming_decode_outputs(
+                decode_parquet_path, write_dense_decode, H_total, T_sites,
             )
-            calls = np.memmap(
-                calls_mmap_path, dtype=np.int8, mode='w+',
-                shape=(H_total, T_sites),
-            )
-            log.info("  calls backed by memmap: %s (%.1f GB virtual)",
-                     calls_mmap_path,
-                     H_total * T_sites / 1e9)
-            log.info("  Streaming decode to %s (no full max_post alloc)",
-                     decode_parquet_path)
 
             if model.bucket_assignments is not None:
                 # Per-bucket decode + per-bucket parquet writers + merge
@@ -987,15 +1014,10 @@ def decode_chromosome(
                     global_sums[hap_idx] = bucket_decode.global_sums
                     bucket_writer.close()
 
-                from .output import _merge_bucket_parquets
-                _merge_bucket_parquets(
+                _close_and_merge_bucket_writers(
                     bucket_writer_paths, bucket_hap_indices,
-                    decode_parquet_path,
-                    chrom=chrom_data.chrom, pos_bp=chrom_data.pos_bp,
-                    T=T_sites, K=n_anc, include_max_post=True,
+                    decode_parquet_path, chrom_data, n_anc,
                 )
-                for p in bucket_writer_paths:
-                    p.unlink()
 
                 decode = DecodeResult(
                     calls=calls, max_post=None, global_sums=global_sums,
