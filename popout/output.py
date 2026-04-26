@@ -430,6 +430,118 @@ class DecodeParquetWriter:
         self.close()
 
 
+def _merge_bucket_parquets(
+    bucket_paths: list,
+    bucket_hap_indices: list,
+    out_path,
+    chrom: str,
+    pos_bp: np.ndarray,
+    T: int,
+    K: int,
+    include_max_post: bool = True,
+    out_row_group_size: int = 50_000,
+) -> None:
+    """Merge per-bucket decode parquets into one hap-ordered output parquet.
+
+    Streaming heap-based merge: holds one row group per bucket open at a
+    time, pops rows in hap-id order, and writes ~out_row_group_size rows
+    per output row group via DecodeParquetWriter.
+
+    Used by decode_chromosome's block-emissions branch (and the non-block
+    branch in Task 4) to reassemble bucket-ordered output into hap order
+    without materialising a full (H, T) max_post.
+
+    Parameters
+    ----------
+    bucket_paths : list of str/Path — per-bucket parquet files (input)
+    bucket_hap_indices : list of np.ndarray — bucket_hap_indices[b][i]
+        is the output hap_id corresponding to bucket b's i-th input row
+    out_path : str/Path — final merged parquet
+    chrom, pos_bp, T, K, include_max_post : forwarded to the writer
+    out_row_group_size : output row group size in haps
+    """
+    import heapq
+    import pyarrow.parquet as pq
+
+    pf_list = [pq.ParquetFile(str(p)) for p in bucket_paths]
+
+    def _iter_rows(pf, hap_indices):
+        """Yield (out_hap_id, calls_row, max_post_row_or_None) per input row."""
+        cols = ["calls"] + (["max_post"] if include_max_post else [])
+        cursor = 0
+        for rg_idx in range(pf.num_row_groups):
+            rg = pf.read_row_group(rg_idx, columns=cols)
+            calls_col = rg.column("calls")
+            cparts = []
+            for chunk in calls_col.chunks:
+                n = len(chunk)
+                buf = chunk.buffers()[2]
+                arr = np.frombuffer(buf, dtype=np.int8, count=n * T)
+                cparts.append(arr.reshape(n, T).copy())
+            calls_block = np.concatenate(cparts) if len(cparts) > 1 else cparts[0]
+            mp_block = None
+            if include_max_post:
+                mp_col = rg.column("max_post")
+                mparts = []
+                for chunk in mp_col.chunks:
+                    n = len(chunk)
+                    buf = chunk.buffers()[2]
+                    arr = np.frombuffer(buf, dtype=np.float16, count=n * T)
+                    mparts.append(arr.reshape(n, T).copy())
+                mp_block = (
+                    np.concatenate(mparts) if len(mparts) > 1 else mparts[0]
+                )
+            for i in range(calls_block.shape[0]):
+                mp_row = mp_block[i] if mp_block is not None else None
+                yield int(hap_indices[cursor]), calls_block[i], mp_row
+                cursor += 1
+
+    iters = [_iter_rows(pf, bucket_hap_indices[b]) for b, pf in enumerate(pf_list)]
+
+    heap: list = []
+    for b, it in enumerate(iters):
+        try:
+            out_id, calls, mp = next(it)
+            heapq.heappush(heap, (out_id, b, calls, mp))
+        except StopIteration:
+            pass
+
+    writer = DecodeParquetWriter(
+        str(out_path), T=T, K=K, chrom=chrom, pos_bp=pos_bp,
+        include_max_post=include_max_post,
+    )
+    out_calls_buf: list = []
+    out_mp_buf: list = [] if include_max_post else None
+
+    def _flush():
+        if not out_calls_buf:
+            return
+        calls_arr = np.stack(out_calls_buf, axis=0)
+        mp_arr = (
+            np.stack(out_mp_buf, axis=0) if include_max_post else None
+        )
+        writer.write_batch(calls_arr, mp_arr)
+        out_calls_buf.clear()
+        if include_max_post:
+            out_mp_buf.clear()
+
+    while heap:
+        _, b, calls_row, mp_row = heapq.heappop(heap)
+        out_calls_buf.append(calls_row)
+        if include_max_post:
+            out_mp_buf.append(mp_row)
+        try:
+            nxt_id, nxt_calls, nxt_mp = next(iters[b])
+            heapq.heappush(heap, (nxt_id, b, nxt_calls, nxt_mp))
+        except StopIteration:
+            pass
+        if len(out_calls_buf) >= out_row_group_size:
+            _flush()
+
+    _flush()
+    writer.close()
+
+
 def write_decode_parquet(
     result: AncestryResult,
     chrom_data: ChromData,

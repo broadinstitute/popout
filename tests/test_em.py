@@ -171,6 +171,130 @@ def test_block_em_soft_switches_are_density_invariant_not_hard_cast(monkeypatch)
     )
 
 
+def _make_block_model_for_decode(n_haps, n_sites, n_anc, block_size, rng_seed):
+    """Build a (chrom_data, model) pair with block_data + pattern_freq set,
+    suitable for invoking decode_chromosome's block-emissions branch."""
+    import jax.numpy as jnp_local
+    from popout.simulate import simulate_admixed
+    from popout.blocks import pack_blocks, init_pattern_freq
+    from popout.datatypes import AncestryModel
+
+    chrom_data, _, true = simulate_admixed(
+        n_samples=n_haps // 2, n_sites=n_sites, n_ancestries=n_anc,
+        gen_since_admix=20, chrom_length_cm=80.0, pure_fraction=0.0,
+        rng_seed=rng_seed,
+    )
+    bd = pack_blocks(chrom_data.geno, block_size=block_size, pos_cm=chrom_data.pos_cm)
+    allele_freq = jnp_local.array(true["pop_freq"], dtype=jnp_local.float32)
+    pf = init_pattern_freq(allele_freq, bd, chrom_data.geno)
+    model = AncestryModel(
+        n_ancestries=n_anc,
+        mu=jnp_local.array(true["mu"], dtype=jnp_local.float32),
+        gen_since_admix=20.0,
+        allele_freq=allele_freq,
+        pattern_freq=pf,
+        block_data=bd,
+    )
+    return chrom_data, model
+
+
+def test_decode_chromosome_bucketed_blocks_memmap(tmp_path):
+    """End-to-end: decode_chromosome with block_emissions and explicit
+    bucket_assignments produces a memmapped .calls.dat and a merged
+    decode_parquet, with no in-memory (H, T) max_post."""
+    import jax.numpy as jnp_local
+    from popout.em import decode_chromosome, compute_bucket_centers
+    from popout.datatypes import AncestryModel
+
+    H, T_sites, A = 40, 80, 3
+    chrom_data, model = _make_block_model_for_decode(
+        H, T_sites, A, block_size=8, rng_seed=2,
+    )
+
+    bucket_centers = compute_bucket_centers(4)
+    rng = np.random.default_rng(3)
+    bucket_assignments = jnp_local.array(
+        rng.integers(0, 4, size=H), dtype=jnp_local.int32,
+    )
+    bucketed_model = AncestryModel(
+        n_ancestries=model.n_ancestries,
+        mu=model.mu,
+        gen_since_admix=model.gen_since_admix,
+        allele_freq=model.allele_freq,
+        pattern_freq=model.pattern_freq,
+        block_data=model.block_data,
+        bucket_centers=bucket_centers,
+        bucket_assignments=bucket_assignments,
+    )
+
+    out_path = str(tmp_path / "decode.parquet")
+    decode = decode_chromosome(
+        chrom_data, bucketed_model,
+        write_dense_decode=True,
+        decode_parquet_path=out_path,
+    )
+
+    from pathlib import Path as _P
+    assert _P(out_path).exists(), "merged decode parquet missing"
+    assert _P(out_path + ".calls.dat").exists() or \
+           _P(str(_P(out_path).with_suffix(".calls.dat"))).exists(), \
+           "calls memmap missing"
+    assert decode.max_post is None, (
+        "max_post must not be allocated when streaming to parquet"
+    )
+    assert decode.calls.shape == (H, T_sites)
+    assert decode.parquet_path == out_path
+
+    for b in range(4):
+        assert not _P(str(_P(out_path).with_suffix(f".bucket{b}.parquet"))).exists(), (
+            f"per-bucket parquet for bucket {b} should have been removed after merge"
+        )
+
+
+def test_bucketed_blocks_decode_matches_unbucketed_when_B_eq_1(tmp_path):
+    """All-one-bucket assignment whose center matches model.gen_since_admix
+    must produce bit-identical decode output to the no-bucket path."""
+    import jax.numpy as jnp_local
+    from popout.em import decode_chromosome
+    from popout.datatypes import AncestryModel
+
+    H, T_sites, A = 24, 64, 3
+    chrom_data, model = _make_block_model_for_decode(
+        H, T_sites, A, block_size=8, rng_seed=4,
+    )
+
+    no_bucket_decode = decode_chromosome(
+        chrom_data, model,
+        write_dense_decode=True,
+        decode_parquet_path=str(tmp_path / "no_bucket.parquet"),
+    )
+
+    bucketed_model = AncestryModel(
+        n_ancestries=model.n_ancestries,
+        mu=model.mu,
+        gen_since_admix=model.gen_since_admix,
+        allele_freq=model.allele_freq,
+        pattern_freq=model.pattern_freq,
+        block_data=model.block_data,
+        bucket_centers=jnp_local.array([model.gen_since_admix], dtype=jnp_local.float32),
+        bucket_assignments=jnp_local.zeros(H, dtype=jnp_local.int32),
+    )
+    bucketed_decode = decode_chromosome(
+        chrom_data, bucketed_model,
+        write_dense_decode=True,
+        decode_parquet_path=str(tmp_path / "bucketed.parquet"),
+    )
+
+    np.testing.assert_array_equal(
+        np.asarray(no_bucket_decode.calls),
+        np.asarray(bucketed_decode.calls),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(no_bucket_decode.global_sums),
+        np.asarray(bucketed_decode.global_sums),
+    )
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

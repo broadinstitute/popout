@@ -932,7 +932,6 @@ def decode_chromosome(
 
         stream_to_parquet = (write_dense_decode
                              and decode_parquet_path is not None)
-        decode_writer = None
         if stream_to_parquet:
             from pathlib import Path as _Path
             _Path(decode_parquet_path).parent.mkdir(parents=True, exist_ok=True)
@@ -946,13 +945,6 @@ def decode_chromosome(
             log.info("  calls backed by memmap: %s (%.1f GB virtual)",
                      calls_mmap_path,
                      H_total * chrom_data.n_sites / 1e9)
-            from .output import DecodeParquetWriter
-            decode_writer = DecodeParquetWriter(
-                decode_parquet_path,
-                T=chrom_data.n_sites, K=n_anc,
-                chrom=chrom_data.chrom, pos_bp=chrom_data.pos_bp,
-                include_max_post=True,
-            )
             max_post = None
             log.info("  Streaming decode to %s (no full max_post alloc)",
                      decode_parquet_path)
@@ -963,47 +955,144 @@ def decode_chromosome(
                 if write_dense_decode else None
             )
 
-        for bs in range(0, H_total, block_batch):
-            be = min(bs + block_batch, H_total)
-            bd_chunk = BlockData(
-                pattern_indices=bd.pattern_indices[bs:be],
-                block_starts=bd.block_starts,
-                block_ends=bd.block_ends,
-                block_distances=bd.block_distances,
-                pattern_counts=bd.pattern_counts,
-                max_patterns=bd.max_patterns,
-                block_size=bd.block_size,
+        # Bucket dispatch: when bucket_assignments is set, run the decode
+        # chunk loop once per bucket against a per-bucket model carrying
+        # that bucket's center as gen_since_admix. When streaming, each
+        # bucket writes to a per-bucket parquet; after the bucket loop we
+        # merge them in hap order via _merge_bucket_parquets.
+        from .output import DecodeParquetWriter
+        if model.bucket_assignments is not None:
+            bucket_centers_np = np.array(model.bucket_centers)
+            bucket_np = np.array(model.bucket_assignments)
+            B = len(bucket_centers_np)
+            assert bucket_np.shape == (H_total,), (
+                f"bucket_assignments shape {bucket_np.shape} != H={H_total}"
             )
-            gb_chunk = forward_backward_blocks(model, bd_chunk)
-            gb_chunk.block_until_ready()
-            calls_block = np.array(
-                jnp.argmax(gb_chunk, axis=2), dtype=np.int8,
+            ba_min, ba_max = int(bucket_np.min()), int(bucket_np.max())
+            assert 0 <= ba_min and ba_max < B, (
+                f"bucket_assignments range [{ba_min}, {ba_max}] outside [0, {B})"
             )
-            global_sums[bs:be] = np.array(
-                jnp.einsum('hba,b->ha', gb_chunk, block_widths_j),
-                dtype=np.float64,
-            )
-            calls_chunk = calls_block[:, site_to_block]
-            calls[bs:be] = calls_chunk
+            bucket_iter = list(range(B))
+        else:
+            bucket_centers_np = None
+            bucket_np = None
+            bucket_iter = [None]
+
+        bucket_writer_paths: list = []
+        bucket_hap_indices: list = []
+        decode_writer = None  # used in single-writer path (no buckets, streaming)
+
+        for b in bucket_iter:
+            if b is None:
+                b_model = model
+                bucket_hap_idx = None
+                n_b = H_total
+            else:
+                mask = bucket_np == b
+                n_b = int(mask.sum())
+                if n_b == 0:
+                    continue
+                bucket_hap_idx = np.where(mask)[0]
+                b_model = AncestryModel(
+                    n_ancestries=model.n_ancestries,
+                    mu=model.mu,
+                    gen_since_admix=float(bucket_centers_np[b]),
+                    allele_freq=model.allele_freq,
+                    pattern_freq=model.pattern_freq,
+                    block_data=model.block_data,
+                )
+
+            if stream_to_parquet:
+                if b is None:
+                    decode_writer = DecodeParquetWriter(
+                        decode_parquet_path,
+                        T=chrom_data.n_sites, K=n_anc,
+                        chrom=chrom_data.chrom, pos_bp=chrom_data.pos_bp,
+                        include_max_post=True,
+                    )
+                else:
+                    from pathlib import Path as _Path
+                    bucket_path = _Path(decode_parquet_path).with_suffix(
+                        f".bucket{b}.parquet"
+                    )
+                    decode_writer = DecodeParquetWriter(
+                        str(bucket_path),
+                        T=chrom_data.n_sites, K=n_anc,
+                        chrom=chrom_data.chrom, pos_bp=chrom_data.pos_bp,
+                        include_max_post=True,
+                    )
+                    bucket_writer_paths.append(bucket_path)
+                    bucket_hap_indices.append(bucket_hap_idx)
+            else:
+                decode_writer = None
+
+            for bs in range(0, n_b, block_batch):
+                be = min(bs + block_batch, n_b)
+                if bucket_hap_idx is None:
+                    batch_idx = np.arange(bs, be)
+                    pat_idx_np = bd.pattern_indices[bs:be]
+                else:
+                    batch_idx = bucket_hap_idx[bs:be]
+                    pat_idx_np = bd.pattern_indices[batch_idx]
+
+                bd_chunk = BlockData(
+                    pattern_indices=pat_idx_np,
+                    block_starts=bd.block_starts,
+                    block_ends=bd.block_ends,
+                    block_distances=bd.block_distances,
+                    pattern_counts=bd.pattern_counts,
+                    max_patterns=bd.max_patterns,
+                    block_size=bd.block_size,
+                )
+                gb_chunk = forward_backward_blocks(b_model, bd_chunk)
+                gb_chunk.block_until_ready()
+                calls_block = np.array(
+                    jnp.argmax(gb_chunk, axis=2), dtype=np.int8,
+                )
+                global_sums[batch_idx] = np.array(
+                    jnp.einsum('hba,b->ha', gb_chunk, block_widths_j),
+                    dtype=np.float64,
+                )
+                calls_chunk = calls_block[:, site_to_block]
+                calls[batch_idx] = calls_chunk
+
+                if decode_writer is not None:
+                    max_post_block = np.array(
+                        jnp.max(gb_chunk, axis=2), dtype=np.float16,
+                    )
+                    mp_chunk = max_post_block[:, site_to_block]
+                    decode_writer.write_batch(calls_chunk, mp_chunk)
+                    del mp_chunk, max_post_block
+                elif max_post is not None:
+                    max_post_block = np.array(
+                        jnp.max(gb_chunk, axis=2), dtype=np.float16,
+                    )
+                    max_post[batch_idx] = max_post_block[:, site_to_block]
+
+                del gb_chunk
+                log.info("  decode bucket %s chunk %d–%d / %d",
+                         "all" if b is None else str(b), bs, be, n_b)
 
             if decode_writer is not None:
-                max_post_block = np.array(
-                    jnp.max(gb_chunk, axis=2), dtype=np.float16,
-                )
-                mp_chunk = max_post_block[:, site_to_block]
-                decode_writer.write_batch(calls_chunk, mp_chunk)
-                del mp_chunk, max_post_block
-            elif max_post is not None:
-                max_post_block = np.array(
-                    jnp.max(gb_chunk, axis=2), dtype=np.float16,
-                )
-                max_post[bs:be] = max_post_block[:, site_to_block]
+                decode_writer.close()
+                decode_writer = None
 
-            del gb_chunk
-            log.info("  decode chunk %d–%d / %d", bs, be, H_total)
+        # Merge per-bucket parquets into the final hap-ordered file
+        if stream_to_parquet and bucket_writer_paths:
+            from .output import _merge_bucket_parquets
+            _merge_bucket_parquets(
+                bucket_writer_paths,
+                bucket_hap_indices,
+                decode_parquet_path,
+                chrom=chrom_data.chrom,
+                pos_bp=chrom_data.pos_bp,
+                T=chrom_data.n_sites,
+                K=n_anc,
+                include_max_post=True,
+            )
+            for p in bucket_writer_paths:
+                p.unlink()
 
-        if decode_writer is not None:
-            decode_writer.close()
         if max_post is not None:
             assert max_post.dtype == np.float16, (
                 f"max_post must be float16 for memory; got {max_post.dtype}"

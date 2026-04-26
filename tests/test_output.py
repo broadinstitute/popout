@@ -6,7 +6,14 @@ from pathlib import Path
 import numpy as np
 
 from popout.datatypes import AncestryModel, AncestryResult, ChromData, DecodeResult
-from popout.output import write_model, write_ancestry_tracts, write_decode_parquet, read_decode_parquet
+from popout.output import (
+    write_model,
+    write_ancestry_tracts,
+    write_decode_parquet,
+    read_decode_parquet,
+    DecodeParquetWriter,
+    _merge_bucket_parquets,
+)
 
 
 def _make_minimal_result(n_ancestries=3, n_haps=10, n_sites=100):
@@ -383,4 +390,51 @@ def test_read_decode_parquet_multichunk_max_post(tmp_path):
         np.testing.assert_array_equal(
             data["max_post"][s:e], expected,
             err_msg=f"max_post chunk {i} corrupted — likely chunks[0] bug",
+        )
+
+
+def test_bucket_parquet_merge_preserves_order(tmp_path):
+    """Merging 3 per-bucket parquets whose haps are interleaved (NOT in
+    bucket-contiguous order) produces a single output parquet whose rows
+    are in monotone hap-id order."""
+    T = 12
+    K = 3
+    pos_bp = np.arange(T, dtype=np.int64) * 1000
+
+    bucket_hap_indices = [
+        np.array([0, 3, 6, 9], dtype=np.int64),
+        np.array([1, 4, 7, 10], dtype=np.int64),
+        np.array([2, 5, 8, 11], dtype=np.int64),
+    ]
+
+    bucket_paths = []
+    for b, hap_ids in enumerate(bucket_hap_indices):
+        path = tmp_path / f"bucket{b}.parquet"
+        bucket_paths.append(path)
+        writer = DecodeParquetWriter(
+            str(path), T=T, K=K, chrom="sim", pos_bp=pos_bp,
+            include_max_post=True,
+        )
+        n = len(hap_ids)
+        calls = np.full((n, T), -1, dtype=np.int8)
+        max_post = np.zeros((n, T), dtype=np.float16)
+        for i, hid in enumerate(hap_ids):
+            calls[i, :] = (hid % K)
+            max_post[i, :] = np.float16(hid * 0.01)
+        writer.write_batch(calls, max_post)
+        writer.close()
+
+    out_path = tmp_path / "merged.parquet"
+    _merge_bucket_parquets(
+        bucket_paths, bucket_hap_indices, out_path,
+        chrom="sim", pos_bp=pos_bp, T=T, K=K, include_max_post=True,
+        out_row_group_size=5,
+    )
+    data = read_decode_parquet(str(out_path))
+    assert data["calls"].shape == (12, T)
+    for h in range(12):
+        got = int(data["calls"][h, 0])
+        assert got == h % K, f"row {h} calls should be {h % K}, got {got}"
+        np.testing.assert_allclose(
+            float(data["max_post"][h, 0]), float(np.float16(h * 0.01)), atol=1e-6
         )
