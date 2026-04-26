@@ -1308,6 +1308,10 @@ def forward_backward_decode(
     d_morgan: jnp.ndarray,
     batch_size: int = 50_000,
     compute_max_post: bool = True,
+    *,
+    calls_out: _np.ndarray | None = None,
+    max_post_writer=None,
+    hap_idx_map: _np.ndarray | None = None,
 ) -> DecodeResult:
     """Batched forward-backward for final decode pass.
 
@@ -1322,6 +1326,18 @@ def forward_backward_decode(
     d_morgan : (T-1,)
     batch_size : max haplotypes per batch
     compute_max_post : whether to compute max_post (H, T) and global_sums (H, A)
+    calls_out : optional external buffer (memmap or ndarray) for calls
+        writes. When provided, function does not allocate a new (H, T)
+        int8 array. Targets are slice(start, end) by default, or
+        hap_idx_map[start:end] when ``hap_idx_map`` is set.
+    max_post_writer : optional callable ``f(target_idx, max_post_chunk)``
+        invoked per batch with the per-batch max_post chunk; when set,
+        function does not allocate a (H, T) float16 array.
+    hap_idx_map : optional (H,) int array. When set, writes to calls_out
+        and calls to max_post_writer use ``hap_idx_map[start:end]`` as the
+        target index instead of ``slice(start, end)``. Used by the
+        bucketed wrapper to fan per-bucket FB calls into a single global
+        output via fancy-index writes.
 
     Returns
     -------
@@ -1333,8 +1349,14 @@ def forward_backward_decode(
     pc = _precompute_streaming_tensors(model, d_morgan, T)
     emit_pad = pc["emit_pad"]
 
-    calls = _np.zeros((H, T), dtype=_np.int8)
-    max_post = _np.zeros((H, T), dtype=_np.float16) if compute_max_post else None
+    if calls_out is not None:
+        calls = calls_out
+    else:
+        calls = _np.empty((H, T), dtype=_np.int8)
+    if max_post_writer is None:
+        max_post = _np.empty((H, T), dtype=_np.float16) if compute_max_post else None
+    else:
+        max_post = None
     global_sums = _np.zeros((H, A), dtype=_np.float64) if compute_max_post else None
 
     for start in range(0, H, batch_size):
@@ -1352,10 +1374,17 @@ def forward_backward_decode(
             emit_pad=emit_pad,
             compute_max_post=compute_max_post,
         )
-        calls[start:end] = result.calls
+        if hap_idx_map is None:
+            target = slice(start, end)
+        else:
+            target = hap_idx_map[start:end]
+        calls[target] = result.calls
         if compute_max_post:
-            max_post[start:end] = result.max_post
             global_sums[start:end] = result.global_sums
+            if max_post_writer is not None:
+                max_post_writer(target, result.max_post)
+            else:
+                max_post[target] = result.max_post
 
     return DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)
 
@@ -1366,22 +1395,40 @@ def forward_backward_bucketed_decode(
     d_morgan: jnp.ndarray,
     batch_size: int = 50_000,
     compute_max_post: bool = True,
+    *,
+    calls_out: _np.ndarray | None = None,
+    max_post_writer=None,
 ) -> DecodeResult:
     """Bucketed forward-backward for final decode with per-haplotype T.
 
     Falls back to forward_backward_decode when no bucket assignments exist.
+
+    When ``calls_out`` and/or ``max_post_writer`` are provided, the global
+    output buffers are externally managed (e.g. memmap-backed calls + a
+    callback that streams max_post to a parquet writer); see
+    :func:`forward_backward_decode` for semantics. Per-bucket calls
+    delegate to ``forward_backward_decode`` with ``hap_idx_map`` set so
+    fancy-index writes land in the correct global rows.
     """
     if model.bucket_assignments is None:
         return forward_backward_decode(
             geno, model, d_morgan, batch_size, compute_max_post,
+            calls_out=calls_out, max_post_writer=max_post_writer,
         )
 
     H, T = geno.shape
     A = model.n_ancestries
     B = len(model.bucket_centers)
 
-    calls = _np.zeros((H, T), dtype=_np.int8)
-    max_post = _np.zeros((H, T), dtype=_np.float16) if compute_max_post else None
+    calls = calls_out if calls_out is not None else _np.empty((H, T), dtype=_np.int8)
+    if max_post_writer is None and compute_max_post:
+        max_post = _np.empty((H, T), dtype=_np.float16)
+
+        def _user_writer(target, mp_chunk, _arr=max_post):
+            _arr[target] = mp_chunk
+    else:
+        max_post = None
+        _user_writer = max_post_writer
     global_sums = _np.zeros((H, A), dtype=_np.float64) if compute_max_post else None
 
     bucket_np = _np.array(model.bucket_assignments)
@@ -1393,36 +1440,20 @@ def forward_backward_bucketed_decode(
             continue
 
         hap_idx = _np.where(mask)[0]
-
         b_model = AncestryModel(
             n_ancestries=A,
             mu=model.mu,
             gen_since_admix=float(model.bucket_centers[b]),
             allele_freq=model.allele_freq,
         )
-        b_pc = _precompute_streaming_tensors(b_model, d_morgan, T)
-        b_emit_pad = b_pc["emit_pad"]
-
-        for s in range(0, n_b, batch_size):
-            e = min(s + batch_size, n_b)
-            batch_hap_idx = hap_idx[s:e]
-            batch_geno = jnp.asarray(geno[batch_hap_idx])
-            if b_emit_pad > 0:
-                batch_geno = jnp.concatenate(
-                    [batch_geno, jnp.zeros((e - s, b_emit_pad), dtype=batch_geno.dtype)],
-                    axis=1,
-                )
-            result = _streaming_decode_checkpointed(
-                batch_geno, b_pc["log_f0"], b_pc["log_odds"], b_pc["seg_trans"],
-                b_pc["site_idx"], b_pc["log_prior"],
-                C=b_pc["C"], S=b_pc["S"], n_fwd_steps=b_pc["n_fwd_steps"],
-                emit_pad=b_emit_pad,
-                compute_max_post=compute_max_post,
-            )
-            calls[batch_hap_idx] = result.calls
-            if compute_max_post:
-                max_post[batch_hap_idx] = result.max_post
-                global_sums[batch_hap_idx] = result.global_sums
+        bucket_decode = forward_backward_decode(
+            geno[hap_idx], b_model, d_morgan, batch_size, compute_max_post,
+            calls_out=calls,
+            max_post_writer=_user_writer,
+            hap_idx_map=hap_idx,
+        )
+        if compute_max_post:
+            global_sums[hap_idx] = bucket_decode.global_sums
 
     return DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)
 

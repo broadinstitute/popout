@@ -328,3 +328,118 @@ def test_run_k2_em_split_respects_budget(monkeypatch):
     )
     assert labels.shape == (H,)
     assert set(np.unique(labels)).issubset({0, 1})
+
+
+# -- Task 4: external buffers (calls_out / max_post_writer) --
+
+def test_forward_backward_decode_writes_to_memmap_when_provided(tmp_path):
+    """forward_backward_decode with calls_out + max_post_writer writes to
+    the external buffer/callback and skips its own (H, T) max_post alloc.
+    Output equals the in-memory baseline."""
+    geno, model, d_morgan = _tiny_setup(H=32, T=200, A=3, seed=3)
+    H, T = geno.shape
+    baseline = forward_backward_decode(geno, model, d_morgan, batch_size=16)
+
+    calls_mm = np.memmap(
+        str(tmp_path / "calls.dat"), dtype=np.int8, mode="w+", shape=(H, T),
+    )
+    captured: list = []
+
+    def mp_writer(target, mp_chunk):
+        captured.append((target, np.asarray(mp_chunk).copy()))
+
+    streamed = forward_backward_decode(
+        geno, model, d_morgan, batch_size=16,
+        calls_out=calls_mm, max_post_writer=mp_writer,
+    )
+    assert streamed.max_post is None
+    np.testing.assert_array_equal(np.asarray(calls_mm), np.asarray(baseline.calls))
+    assembled = np.empty_like(baseline.max_post)
+    for target, mp in captured:
+        assembled[target] = mp
+    np.testing.assert_array_equal(assembled, np.asarray(baseline.max_post))
+    np.testing.assert_array_equal(
+        np.asarray(streamed.global_sums), np.asarray(baseline.global_sums),
+    )
+
+
+def test_forward_backward_bucketed_decode_writes_to_memmap_when_provided(tmp_path):
+    """Bucketed wrapper with external buffers fans per-bucket FB calls into
+    a single global memmap + a single max_post_writer callback. Captured
+    output (after fancy-index merge) equals the no-bucket baseline when
+    each bucket center coincides with the same gen_since_admix."""
+    from popout.hmm import forward_backward_bucketed_decode
+
+    geno, model, d_morgan = _tiny_setup(H=24, T=160, A=3, seed=4)
+    H, T = geno.shape
+    baseline = forward_backward_decode(geno, model, d_morgan, batch_size=12)
+
+    bucket_centers = jnp.array([model.gen_since_admix], dtype=jnp.float32)
+    bucket_assignments = jnp.zeros(H, dtype=jnp.int32)
+    bucketed_model = AncestryModel(
+        n_ancestries=model.n_ancestries, mu=model.mu,
+        gen_since_admix=model.gen_since_admix, allele_freq=model.allele_freq,
+        bucket_centers=bucket_centers, bucket_assignments=bucket_assignments,
+    )
+
+    calls_mm = np.memmap(
+        str(tmp_path / "calls.dat"), dtype=np.int8, mode="w+", shape=(H, T),
+    )
+    captured_mp = np.empty((H, T), dtype=np.float16)
+
+    def mp_writer(target, mp_chunk):
+        captured_mp[target] = mp_chunk
+
+    streamed = forward_backward_bucketed_decode(
+        geno, bucketed_model, d_morgan, batch_size=12,
+        calls_out=calls_mm, max_post_writer=mp_writer,
+    )
+    assert streamed.max_post is None
+    np.testing.assert_array_equal(np.asarray(calls_mm), np.asarray(baseline.calls))
+    np.testing.assert_array_equal(captured_mp, np.asarray(baseline.max_post))
+    np.testing.assert_array_equal(
+        np.asarray(streamed.global_sums), np.asarray(baseline.global_sums),
+    )
+
+
+def test_decode_chromosome_streams_bucketed_to_parquet_no_blocks(tmp_path):
+    """End-to-end: decode_chromosome on the non-block bucketed path with
+    write_dense_decode + decode_parquet_path produces a memmap'd .calls.dat
+    and a hap-ordered merged decode parquet, with no in-memory max_post."""
+    from popout.simulate import simulate_admixed
+    from popout.em import decode_chromosome
+    from popout.datatypes import AncestryModel
+
+    chrom_data, _, true = simulate_admixed(
+        n_samples=12, n_sites=120, n_ancestries=3,
+        gen_since_admix=20, chrom_length_cm=80.0, pure_fraction=0.0,
+        rng_seed=5,
+    )
+    H = chrom_data.n_haps
+    model = AncestryModel(
+        n_ancestries=3,
+        mu=jnp.array(true["mu"], dtype=jnp.float32),
+        gen_since_admix=20.0,
+        allele_freq=jnp.array(true["pop_freq"], dtype=jnp.float32),
+        bucket_centers=jnp.array([15.0, 20.0, 30.0], dtype=jnp.float32),
+        bucket_assignments=jnp.array(np.arange(H) % 3, dtype=jnp.int32),
+    )
+
+    out = str(tmp_path / "decode.parquet")
+    decode = decode_chromosome(
+        chrom_data, model,
+        write_dense_decode=True,
+        decode_parquet_path=out,
+    )
+
+    from pathlib import Path as _P
+    assert _P(out).exists(), "merged decode parquet missing"
+    calls_dat = str(_P(out).with_suffix(".calls.dat"))
+    assert _P(calls_dat).exists(), "calls memmap missing"
+    assert decode.max_post is None
+    assert decode.calls.shape == (H, chrom_data.n_sites)
+    assert decode.parquet_path == out
+    for b in range(3):
+        assert not _P(str(_P(out).with_suffix(f".bucket{b}.parquet"))).exists(), (
+            f"per-bucket parquet for bucket {b} should have been removed"
+        )

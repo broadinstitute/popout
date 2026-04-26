@@ -1104,6 +1104,7 @@ def decode_chromosome(
     else:
         # Standard or bucketed decode
         from ._device import fits_on_device
+        from .output import DecodeParquetWriter
         geno_np = chrom_data.geno
         if fits_on_device(geno_np.nbytes):
             geno = jnp.array(geno_np)
@@ -1113,14 +1114,134 @@ def decode_chromosome(
             chrom_data.genetic_distances.astype(np.float64),
         )
 
-        if model.bucket_assignments is not None:
-            decode = forward_backward_bucketed_decode(
-                geno, model, d_morgan_j, batch_size,
+        H_total = chrom_data.n_haps
+        T_sites = chrom_data.n_sites
+        stream_to_parquet = (write_dense_decode
+                             and decode_parquet_path is not None)
+
+        if stream_to_parquet:
+            from pathlib import Path as _Path
+            _Path(decode_parquet_path).parent.mkdir(parents=True, exist_ok=True)
+            calls_mmap_path = str(
+                _Path(decode_parquet_path).with_suffix(".calls.dat")
             )
+            calls = np.memmap(
+                calls_mmap_path, dtype=np.int8, mode='w+',
+                shape=(H_total, T_sites),
+            )
+            log.info("  calls backed by memmap: %s (%.1f GB virtual)",
+                     calls_mmap_path,
+                     H_total * T_sites / 1e9)
+            log.info("  Streaming decode to %s (no full max_post alloc)",
+                     decode_parquet_path)
+
+            if model.bucket_assignments is not None:
+                # Per-bucket decode + per-bucket parquet writers + merge
+                bucket_centers_np = np.array(model.bucket_centers)
+                bucket_np = np.array(model.bucket_assignments)
+                B = len(bucket_centers_np)
+                assert bucket_np.shape == (H_total,), (
+                    f"bucket_assignments shape {bucket_np.shape} != H={H_total}"
+                )
+                ba_min, ba_max = int(bucket_np.min()), int(bucket_np.max())
+                assert 0 <= ba_min and ba_max < B, (
+                    f"bucket_assignments range [{ba_min}, {ba_max}] outside [0, {B})"
+                )
+
+                bucket_writer_paths: list = []
+                bucket_hap_indices: list = []
+                global_sums = np.zeros((H_total, n_anc), dtype=np.float64)
+
+                from .hmm import forward_backward_decode as _fb_decode
+                for b in range(B):
+                    mask = bucket_np == b
+                    n_b = int(mask.sum())
+                    if n_b == 0:
+                        continue
+                    hap_idx = np.where(mask)[0]
+                    bucket_path = _Path(decode_parquet_path).with_suffix(
+                        f".bucket{b}.parquet"
+                    )
+                    bucket_writer = DecodeParquetWriter(
+                        str(bucket_path),
+                        T=T_sites, K=n_anc,
+                        chrom=chrom_data.chrom, pos_bp=chrom_data.pos_bp,
+                        include_max_post=True,
+                    )
+                    bucket_writer_paths.append(bucket_path)
+                    bucket_hap_indices.append(hap_idx)
+
+                    def _mp_writer(target_idx, mp_chunk,
+                                   _bw=bucket_writer, _calls=calls):
+                        _bw.write_batch(
+                            np.asarray(_calls[target_idx]), mp_chunk,
+                        )
+
+                    b_model = AncestryModel(
+                        n_ancestries=n_anc, mu=model.mu,
+                        gen_since_admix=float(bucket_centers_np[b]),
+                        allele_freq=model.allele_freq,
+                    )
+                    bucket_decode = _fb_decode(
+                        geno[hap_idx], b_model, d_morgan_j, batch_size,
+                        compute_max_post=True,
+                        calls_out=calls,
+                        max_post_writer=_mp_writer,
+                        hap_idx_map=hap_idx,
+                    )
+                    global_sums[hap_idx] = bucket_decode.global_sums
+                    bucket_writer.close()
+
+                from .output import _merge_bucket_parquets
+                _merge_bucket_parquets(
+                    bucket_writer_paths, bucket_hap_indices,
+                    decode_parquet_path,
+                    chrom=chrom_data.chrom, pos_bp=chrom_data.pos_bp,
+                    T=T_sites, K=n_anc, include_max_post=True,
+                )
+                for p in bucket_writer_paths:
+                    p.unlink()
+
+                decode = DecodeResult(
+                    calls=calls, max_post=None, global_sums=global_sums,
+                    parquet_path=decode_parquet_path,
+                )
+            else:
+                # Single decode_writer, no buckets
+                decode_writer = DecodeParquetWriter(
+                    decode_parquet_path,
+                    T=T_sites, K=n_anc,
+                    chrom=chrom_data.chrom, pos_bp=chrom_data.pos_bp,
+                    include_max_post=True,
+                )
+
+                def _mp_writer(target_idx, mp_chunk,
+                               _dw=decode_writer, _calls=calls):
+                    _dw.write_batch(
+                        np.asarray(_calls[target_idx]), mp_chunk,
+                    )
+
+                decode = forward_backward_decode(
+                    geno, model, d_morgan_j, batch_size,
+                    compute_max_post=True,
+                    calls_out=calls,
+                    max_post_writer=_mp_writer,
+                )
+                decode_writer.close()
+                decode = DecodeResult(
+                    calls=decode.calls, max_post=None,
+                    global_sums=decode.global_sums,
+                    parquet_path=decode_parquet_path,
+                )
         else:
-            decode = forward_backward_decode(
-                geno, model, d_morgan_j, batch_size,
-            )
+            if model.bucket_assignments is not None:
+                decode = forward_backward_bucketed_decode(
+                    geno, model, d_morgan_j, batch_size,
+                )
+            else:
+                decode = forward_backward_decode(
+                    geno, model, d_morgan_j, batch_size,
+                )
 
     # Summary stats — chunked bincount
     H = decode.calls.shape[0]
