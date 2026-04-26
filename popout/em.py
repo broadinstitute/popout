@@ -18,7 +18,6 @@ import numpy as np
 from .datatypes import AncestryModel, ChromData, AncestryResult, EMStats, DecodeResult
 from .hmm import (
     forward_backward_batched,
-    forward_backward_bucketed,
     forward_backward_blocks,
     forward_backward_blocks_batched,
     forward_backward_em,
