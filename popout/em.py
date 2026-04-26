@@ -1226,207 +1226,6 @@ def decode_chromosome(
 # Multi-chromosome wrapper
 # ---------------------------------------------------------------------------
 
-def _save_seed_workdir(wd, model, leaf_labels, leaf_info, chrom_data):
-    """Save seed-stage checkpoint into the work directory."""
-    bd = model.block_data
-    save_dict = dict(
-        leaf_labels=np.array(leaf_labels, dtype=np.int32),
-        leaf_paths=np.array([li.path for li in leaf_info]),
-        mu=np.array(model.mu),
-        gen_since_admix=np.float64(model.gen_since_admix),
-        allele_freq=np.array(model.allele_freq),
-        n_ancestries=np.int32(model.n_ancestries),
-        chrom=np.array(str(chrom_data.chrom)),
-        n_sites=np.int64(chrom_data.n_sites),
-        n_haps=np.int64(chrom_data.n_haps),
-    )
-    if model.pattern_freq is not None:
-        save_dict["pattern_freq"] = np.array(model.pattern_freq)
-    if bd is not None:
-        save_dict["pattern_indices"] = np.array(bd.pattern_indices)
-        save_dict["block_starts"] = np.array(bd.block_starts)
-        save_dict["block_ends"] = np.array(bd.block_ends)
-        save_dict["block_distances"] = np.array(bd.block_distances)
-        save_dict["pattern_counts"] = np.array(bd.pattern_counts)
-        save_dict["max_patterns"] = np.int32(bd.max_patterns)
-        save_dict["block_size"] = np.int32(bd.block_size)
-    wd.atomic_write_npz(wd.stage_path("seed"), save_dict)
-    log.info("Seed checkpoint written to %s (A=%d)",
-             wd.stage_path("seed"), model.n_ancestries)
-
-
-def _load_seed_workdir(wd, chrom_data):
-    """Load seed-stage checkpoint from work directory.
-
-    Returns (model, leaf_labels, leaf_info).
-    """
-    from .blocks import BlockData
-    from .recursive_seed import LeafInfo
-
-    data = np.load(str(wd.stage_path("seed")), allow_pickle=True)
-    n_anc = int(data["n_ancestries"])
-    assert int(data["n_haps"]) == chrom_data.n_haps, (
-        f"Seed checkpoint H={data['n_haps']} != input H={chrom_data.n_haps}"
-    )
-    assert int(data["n_sites"]) == chrom_data.n_sites, (
-        f"Seed checkpoint T={data['n_sites']} != input T={chrom_data.n_sites}"
-    )
-    bd = None
-    pf = None
-    if "block_starts" in data:
-        bd = BlockData(
-            pattern_indices=data["pattern_indices"],
-            block_starts=data["block_starts"],
-            block_ends=data["block_ends"],
-            block_distances=data["block_distances"],
-            pattern_counts=data["pattern_counts"],
-            max_patterns=int(data["max_patterns"]),
-            block_size=int(data["block_size"]),
-        )
-    if "pattern_freq" in data:
-        pf = jnp.array(data["pattern_freq"])
-    model = AncestryModel(
-        n_ancestries=n_anc,
-        mu=jnp.array(data["mu"]),
-        gen_since_admix=float(data["gen_since_admix"]),
-        allele_freq=jnp.array(data["allele_freq"]),
-        pattern_freq=pf,
-        block_data=bd,
-    )
-    leaf_labels = data["leaf_labels"]
-    leaf_paths = data["leaf_paths"] if "leaf_paths" in data else None
-    # Reconstruct leaf_info from saved paths
-    if leaf_paths is not None:
-        leaf_info = [
-            LeafInfo(label=i, n_haps=int((leaf_labels == i).sum()),
-                     depth=0, path=str(p), bic_score=0.0)
-            for i, p in enumerate(leaf_paths)
-        ]
-    else:
-        leaf_info = [
-            LeafInfo(label=i, n_haps=int((leaf_labels == i).sum()),
-                     depth=0, path=f"L{i}", bic_score=0.0)
-            for i in range(n_anc)
-        ]
-    log.info("Loaded seed checkpoint: A=%d, H=%d, T=%d",
-             n_anc, chrom_data.n_haps, chrom_data.n_sites)
-    return model, leaf_labels, leaf_info
-
-
-def _save_em_workdir(wd, model, chrom_data):
-    """Save EM-stage checkpoint (converged model) into work directory."""
-    bd = model.block_data
-    save_dict = dict(
-        mu=np.array(model.mu),
-        gen_since_admix=np.float64(model.gen_since_admix),
-        allele_freq=np.array(model.allele_freq),
-        n_ancestries=np.int32(model.n_ancestries),
-        n_sites=np.int64(chrom_data.n_sites),
-        n_haps=np.int64(chrom_data.n_haps),
-        chrom=np.array(str(chrom_data.chrom)),
-    )
-    if model.pattern_freq is not None:
-        save_dict["pattern_freq"] = np.array(model.pattern_freq)
-    if bd is not None:
-        save_dict["pattern_indices"] = np.array(bd.pattern_indices)
-        save_dict["block_starts"] = np.array(bd.block_starts)
-        save_dict["block_ends"] = np.array(bd.block_ends)
-        save_dict["block_distances"] = np.array(bd.block_distances)
-        save_dict["pattern_counts"] = np.array(bd.pattern_counts)
-        save_dict["max_patterns"] = np.int32(bd.max_patterns)
-        save_dict["block_size"] = np.int32(bd.block_size)
-    if model.gen_per_hap is not None:
-        save_dict["gen_per_hap"] = np.array(model.gen_per_hap)
-    if model.bucket_centers is not None:
-        save_dict["bucket_centers"] = np.array(model.bucket_centers)
-    if model.bucket_assignments is not None:
-        save_dict["bucket_assignments"] = np.array(model.bucket_assignments)
-    wd.atomic_write_npz(wd.stage_path("em"), save_dict)
-    log.info("EM checkpoint written to %s (A=%d)",
-             wd.stage_path("em"), model.n_ancestries)
-
-
-def _load_em_workdir(wd, chrom_data):
-    """Load EM-stage checkpoint (converged model) from work directory."""
-    from .blocks import BlockData
-
-    data = np.load(str(wd.stage_path("em")), allow_pickle=True)
-    n_anc = int(data["n_ancestries"])
-    assert int(data["n_haps"]) == chrom_data.n_haps, (
-        f"EM checkpoint H={data['n_haps']} != input H={chrom_data.n_haps}"
-    )
-    assert int(data["n_sites"]) == chrom_data.n_sites, (
-        f"EM checkpoint T={data['n_sites']} != input T={chrom_data.n_sites}"
-    )
-    bd = None
-    pf = None
-    if "block_starts" in data:
-        bd = BlockData(
-            pattern_indices=data["pattern_indices"],
-            block_starts=data["block_starts"],
-            block_ends=data["block_ends"],
-            block_distances=data["block_distances"],
-            pattern_counts=data["pattern_counts"],
-            max_patterns=int(data["max_patterns"]),
-            block_size=int(data["block_size"]),
-        )
-    if "pattern_freq" in data:
-        pf = jnp.array(data["pattern_freq"])
-    gen_per_hap = jnp.array(data["gen_per_hap"]) if "gen_per_hap" in data else None
-    bucket_centers = jnp.array(data["bucket_centers"]) if "bucket_centers" in data else None
-    bucket_assignments = jnp.array(data["bucket_assignments"]) if "bucket_assignments" in data else None
-    model = AncestryModel(
-        n_ancestries=n_anc,
-        mu=jnp.array(data["mu"]),
-        gen_since_admix=float(data["gen_since_admix"]),
-        allele_freq=jnp.array(data["allele_freq"]),
-        pattern_freq=pf,
-        block_data=bd,
-        gen_per_hap=gen_per_hap,
-        bucket_centers=bucket_centers,
-        bucket_assignments=bucket_assignments,
-    )
-    log.info("Loaded EM checkpoint: A=%d, H=%d, T=%d",
-             n_anc, chrom_data.n_haps, chrom_data.n_sites)
-    return model
-
-
-def _save_decode_workdir(wd, decode_result, chrom):
-    """Save decode global_sums companion file alongside the parquet."""
-    if decode_result.global_sums is not None:
-        gs_path = wd.stage_path("decode", chrom=chrom).with_suffix(
-            ".global_sums.npy",
-        )
-        wd.atomic_write_npy(gs_path, decode_result.global_sums)
-
-
-def _load_decode_workdir(wd, chrom, chrom_data):
-    """Load decode result from work directory parquet + global_sums.
-
-    Returns a DecodeResult with calls loaded from parquet and
-    global_sums loaded from companion file.
-    """
-    from .output import read_decode_parquet
-
-    pq_path = str(wd.stage_path("decode", chrom=chrom))
-    pq_data = read_decode_parquet(pq_path)
-    calls = pq_data["calls"].astype(np.int8)
-
-    gs_path = wd.stage_path("decode", chrom=chrom).with_suffix(
-        ".global_sums.npy",
-    )
-    global_sums = np.load(str(gs_path)) if gs_path.exists() else None
-
-    max_post = pq_data.get("max_post")
-
-    return DecodeResult(
-        calls=calls,
-        max_post=max_post,
-        global_sums=global_sums,
-        parquet_path=pq_path,
-    )
-
-
 def _labels_to_resp(labels, n_haps, n_anc, seeding_mask=None):
     """Convert hard leaf labels to soft responsibilities matrix."""
     if seeding_mask is not None:
@@ -1529,7 +1328,7 @@ def run_em_genome(
                 log.info("stage seed: loading from %s", wd.stage_path("seed"))
                 t0_stage = _time.perf_counter()
                 ckpt_model, ckpt_labels, leaf_info_for_ckpt = \
-                    _load_seed_workdir(wd, chrom_data)
+                    wd.load_seed(chrom_data)
                 n_leaves = ckpt_model.n_ancestries
                 seed_resp = _labels_to_resp(
                     ckpt_labels, chrom_data.n_haps, n_leaves,
@@ -1622,8 +1421,8 @@ def run_em_genome(
                                      depth=0, path=f"L{i}", bic_score=0.0)
                             for i in range(result.model.n_ancestries)
                         ]
-                    _save_seed_workdir(
-                        wd, result.model, leaf_labels_for_ckpt,
+                    wd.save_seed(
+                        result.model, leaf_labels_for_ckpt,
                         leaf_info_for_ckpt, chrom_data,
                     )
                     wd.mark_done("seed",
@@ -1637,7 +1436,7 @@ def run_em_genome(
             em_loaded = False
             if wd is not None and wd.stage_done("em"):
                 log.info("stage em: loading from %s", wd.stage_path("em"))
-                fitted_model = _load_em_workdir(wd, chrom_data)
+                fitted_model = wd.load_em(chrom_data)
                 em_loaded = True
             else:
                 t0_em = _time.perf_counter()
@@ -1673,8 +1472,8 @@ def run_em_genome(
                 # Save seed checkpoint (if we ran seeding fresh)
                 if wd is not None and not seed_loaded:
                     if leaf_labels_for_ckpt is not None and leaf_info_for_ckpt is not None:
-                        _save_seed_workdir(
-                            wd, result.model, leaf_labels_for_ckpt,
+                        wd.save_seed(
+                            result.model, leaf_labels_for_ckpt,
                             leaf_info_for_ckpt, chrom_data,
                         )
                         wd.mark_done("seed",
@@ -1682,7 +1481,7 @@ def run_em_genome(
 
                 # Save EM checkpoint
                 if wd is not None:
-                    _save_em_workdir(wd, fitted_model, chrom_data)
+                    wd.save_em(fitted_model, chrom_data)
                     wd.mark_done("em",
                                  wall_s=_time.perf_counter() - t0_em)
 
@@ -1700,7 +1499,7 @@ def run_em_genome(
                 log.info("stage decode chr%s: loading from %s",
                          chrom_data.chrom,
                          wd.stage_path("decode", chrom=chrom_data.chrom))
-                decode = _load_decode_workdir(wd, chrom_data.chrom, chrom_data)
+                decode = wd.load_decode(chrom_data.chrom, chrom_data)
                 result = AncestryResult(
                     calls=decode.calls, model=fitted_model,
                     chrom=chrom_data.chrom, decode=decode,
@@ -1729,7 +1528,7 @@ def run_em_genome(
                     chrom=chrom_data.chrom, decode=decode,
                 )
                 if wd is not None:
-                    _save_decode_workdir(wd, decode, chrom_data.chrom)
+                    wd.save_decode(decode, chrom_data.chrom)
                     wd.mark_done("decode", chrom=chrom_data.chrom,
                                  wall_s=_time.perf_counter() - t0_decode)
 
@@ -1751,9 +1550,7 @@ def run_em_genome(
                 log.info("stage decode chr%s: loading from %s",
                          chrom_data.chrom,
                          wd.stage_path("decode", chrom=chrom_data.chrom))
-                decode = _load_decode_workdir(
-                    wd, chrom_data.chrom, chrom_data,
-                )
+                decode = wd.load_decode(chrom_data.chrom, chrom_data)
                 result = AncestryResult(
                     calls=decode.calls, model=fitted_model,
                     chrom=chrom_data.chrom, decode=decode,
@@ -1841,7 +1638,7 @@ def run_em_genome(
                     chrom=chrom_data.chrom, decode=decode,
                 )
                 if wd is not None:
-                    _save_decode_workdir(wd, decode, chrom_data.chrom)
+                    wd.save_decode(decode, chrom_data.chrom)
                     wd.mark_done("decode", chrom=chrom_data.chrom,
                                  wall_s=_time.perf_counter() - t0_decode)
 
