@@ -418,6 +418,102 @@ def forward_backward_checkpointed(
 
 
 # ---------------------------------------------------------------------------
+# Bucket dispatch helper
+# ---------------------------------------------------------------------------
+
+def _iter_bucket_batches(
+    geno,
+    model: AncestryModel,
+    batch_size: int,
+    *,
+    yield_d_morgan_pc: bool = False,
+    d_morgan: jnp.ndarray | None = None,
+    T: int | None = None,
+):
+    """Yield ``(b_model, hap_idx_chunk[, b_pc])`` per (bucket, batch).
+
+    When ``model.bucket_assignments`` is None, yields the full cohort in
+    ``batch_size`` chunks against the input model unchanged. Otherwise
+    iterates over T-buckets, building a per-bucket model that carries
+    ``bucket_centers[b]`` as ``gen_since_admix``, and yields each
+    bucket's haplotypes in ``batch_size`` chunks.
+
+    When ``yield_d_morgan_pc=True``, additionally calls
+    ``_precompute_streaming_tensors`` per bucket and yields
+    ``(b_model, hap_idx_chunk, b_pc)``. Per-bucket recompute cost is
+    ~40 MB transient device memory; freed when the next bucket
+    overwrites ``b_pc``. The ``d_morgan`` and ``T`` kwargs become
+    required in this mode.
+
+    Memory invariants (DO NOT remove without re-checking
+    BIOBANK_SCALE.md memory traps #4 and #9):
+
+    - This function does not allocate any (H, ...) tensors; H-sized
+      work lives in the caller's accumulators.
+    - The caller is responsible for ``del``ing batch-scoped JAX arrays
+      and calling ``.block_until_ready()`` after each yield to keep
+      peak device memory bounded.
+
+    The bucket-validity assertions (shape == (H,), 0 <= min, max < B)
+    live ONLY in this function — duplicate inline copies in the four
+    bucketed FB entry points and decode_chromosome's branches are
+    deleted in the same commit that adds this generator.
+    """
+    H = geno.shape[0] if hasattr(geno, "shape") else None
+    if H is None and model.bucket_assignments is not None:
+        H = int(model.bucket_assignments.shape[0])
+    assert H is not None, "geno or bucket_assignments must convey H"
+
+    if model.bucket_assignments is None:
+        if yield_d_morgan_pc:
+            assert d_morgan is not None and T is not None
+            pc = _precompute_streaming_tensors(model, d_morgan, T)
+        for s in range(0, H, batch_size):
+            e = min(s + batch_size, H)
+            hap_idx = _np.arange(s, e)
+            if yield_d_morgan_pc:
+                yield model, hap_idx, pc
+            else:
+                yield model, hap_idx
+        return
+
+    B = len(model.bucket_centers)
+    bucket_np = _np.asarray(model.bucket_assignments)
+    assert bucket_np.shape == (H,), (
+        f"bucket_assignments shape {bucket_np.shape} does not match H={H}"
+    )
+    ba_min, ba_max = int(bucket_np.min()), int(bucket_np.max())
+    assert 0 <= ba_min and ba_max < B, (
+        f"bucket_assignments range [{ba_min}, {ba_max}] outside [0, {B})"
+    )
+
+    for b in range(B):
+        mask = bucket_np == b
+        n_b = int(mask.sum())
+        if n_b == 0:
+            continue
+        hap_idx = _np.where(mask)[0]
+        b_model = AncestryModel(
+            n_ancestries=model.n_ancestries,
+            mu=model.mu,
+            gen_since_admix=float(model.bucket_centers[b]),
+            allele_freq=model.allele_freq,
+            pattern_freq=model.pattern_freq,
+            block_data=model.block_data,
+        )
+        if yield_d_morgan_pc:
+            assert d_morgan is not None and T is not None
+            b_pc = _precompute_streaming_tensors(b_model, d_morgan, T)
+        for s in range(0, n_b, batch_size):
+            e = min(s + batch_size, n_b)
+            batch_idx = hap_idx[s:e]
+            if yield_d_morgan_pc:
+                yield b_model, batch_idx, b_pc
+            else:
+                yield b_model, batch_idx
+
+
+# ---------------------------------------------------------------------------
 # Streaming forward-backward (no full-tensor emission or gamma)
 # ---------------------------------------------------------------------------
 
@@ -1198,126 +1294,82 @@ def forward_backward_blocks_em(
     def _scatter_block(pat_col, gb_col):
         return jnp.zeros((_max_p, _n_anc)).at[pat_col].add(gb_col)
 
-    # Bucket dispatch: when bucket_assignments is set, run one
-    # forward-backward per bucket against a per-bucket model carrying
-    # that bucket's center as gen_since_admix. Otherwise run once over
-    # the full cohort with the parent model.
-    if model.bucket_assignments is not None:
-        bucket_centers_np = _np.array(model.bucket_centers)
-        bucket_np = _np.array(model.bucket_assignments)
-        B = len(bucket_centers_np)
-        assert bucket_np.shape == (H_total,), (
-            f"bucket_assignments shape {bucket_np.shape} != H={H_total}"
-        )
-        ba_min, ba_max = int(bucket_np.min()), int(bucket_np.max())
-        assert 0 <= ba_min and ba_max < B, (
-            f"bucket_assignments range [{ba_min}, {ba_max}] outside [0, {B})"
-        )
-        bucket_iter = list(range(B))
-    else:
-        bucket_centers_np = None
-        bucket_np = None
-        bucket_iter = [None]
+    # Bucket dispatch: per (bucket, batch) the generator yields a
+    # per-bucket model carrying its center as gen_since_admix and the
+    # haplotype indices to process. When bucket_assignments is None,
+    # one giant "bucket" covers the full cohort with the parent model.
+    for b_model, batch_idx in _iter_bucket_batches(geno, model, batch_size):
+        pat_idx_np = bd.pattern_indices[batch_idx]
+        geno_np = geno[batch_idx]
 
-    for b in bucket_iter:
-        if b is None:
-            b_model = model
-            bucket_hap_idx = None  # signal: contiguous full range
-            n_b = H_total
+        bd_chunk = BlockData(
+            pattern_indices=pat_idx_np,
+            block_starts=bd.block_starts,
+            block_ends=bd.block_ends,
+            block_distances=bd.block_distances,
+            pattern_counts=bd.pattern_counts,
+            max_patterns=bd.max_patterns,
+            block_size=bd.block_size,
+        )
+        # E-step: block-level forward-backward → (chunk, n_blocks, A)
+        # plus density-invariant soft switches (H,) for per-hap-T.
+        gb_chunk, sw_chunk = forward_backward_blocks(
+            b_model, bd_chunk, compute_soft_switches=True,
+        )
+        geno_chunk = jnp.asarray(geno_np, dtype=jnp.float32)
+
+        # --- M-step accumulators (vectorized, no Python loops) ---
+
+        # weighted_counts: pad geno to (chunk, n_blocks, block_size),
+        # then einsum with block gamma (chunk, n_blocks, A).
+        if pad_right > 0:
+            geno_blocked = jnp.pad(
+                geno_chunk, ((0, 0), (0, pad_right)),
+            ).reshape(-1, bd.n_blocks, bd.block_size)
         else:
-            mask = bucket_np == b
-            n_b = int(mask.sum())
-            if n_b == 0:
-                continue
-            bucket_hap_idx = _np.where(mask)[0]
-            b_model = AncestryModel(
-                n_ancestries=model.n_ancestries,
-                mu=model.mu,
-                gen_since_admix=float(bucket_centers_np[b]),
-                allele_freq=model.allele_freq,
-                pattern_freq=model.pattern_freq,
-                block_data=model.block_data,
+            geno_blocked = geno_chunk.reshape(-1, bd.n_blocks, bd.block_size)
+        wc_blocked = jnp.einsum('hba,hbs->abs', gb_chunk, geno_blocked)
+        weighted_counts = weighted_counts + wc_blocked.reshape(n_anc, T_padded)[:, :T_sites]
+
+        # total_weights: per-ancestry sum per block, broadcast to sites
+        per_anc_all = gb_chunk.sum(axis=0)  # (n_blocks, A)
+        tw_blocked = jnp.broadcast_to(
+            per_anc_all.T[:, :, None],
+            (n_anc, bd.n_blocks, bd.block_size),
+        )
+        total_weights = total_weights + tw_blocked.reshape(n_anc, T_padded)[:, :T_sites]
+
+        # mu_sum[a] = sum_h sum_b gamma_block[h,b,a] * width[b]
+        mu_sum = mu_sum + jnp.einsum('hba,b->a', gb_chunk, block_widths_j)
+
+        # Soft switches: density-invariant per-haplotype counts
+        # consumed by update_generations_per_hap_from_stats.
+        soft_switches_per_hap[batch_idx] = _np.asarray(sw_chunk)
+
+        # Hard switches: only at block boundaries (within-block
+        # gamma is constant). Used for switch_sum ancestry
+        # attribution and the legacy switches_per_hap field.
+        calls_block = jnp.argmax(gb_chunk, axis=2)
+        if bd.n_blocks > 1:
+            sw_block = (calls_block[:, 1:] != calls_block[:, :-1])
+            hard_switches_per_hap[batch_idx] = _np.array(
+                sw_block.sum(axis=1), dtype=_np.int32
             )
+            pre_calls = calls_block[:, :-1]
+            one_hot = jax.nn.one_hot(pre_calls, n_anc, dtype=jnp.float32)
+            switch_sum = switch_sum + (
+                one_hot * sw_block[..., None].astype(jnp.float32)
+            ).sum(axis=(0, 1))
 
-        for bs in range(0, n_b, batch_size):
-            be = min(bs + batch_size, n_b)
-            if bucket_hap_idx is None:
-                batch_idx = _np.arange(bs, be)
-                pat_idx_np = bd.pattern_indices[bs:be]
-                geno_np = geno[bs:be]
-            else:
-                batch_idx = bucket_hap_idx[bs:be]
-                pat_idx_np = bd.pattern_indices[batch_idx]
-                geno_np = geno[batch_idx]
+        # Pattern-freq scatter: vmap over blocks instead of Python loop
+        pat_idx_chunk = jnp.array(bd_chunk.pattern_indices)
+        _pf_counts = _pf_counts + jax.vmap(_scatter_block)(
+            pat_idx_chunk.T,                    # (n_blocks, chunk)
+            jnp.moveaxis(gb_chunk, 1, 0),       # (n_blocks, chunk, A)
+        )
 
-            bd_chunk = BlockData(
-                pattern_indices=pat_idx_np,
-                block_starts=bd.block_starts,
-                block_ends=bd.block_ends,
-                block_distances=bd.block_distances,
-                pattern_counts=bd.pattern_counts,
-                max_patterns=bd.max_patterns,
-                block_size=bd.block_size,
-            )
-            # E-step: block-level forward-backward → (chunk, n_blocks, A)
-            # plus density-invariant soft switches (H,) for per-hap-T.
-            gb_chunk, sw_chunk = forward_backward_blocks(
-                b_model, bd_chunk, compute_soft_switches=True,
-            )
-            geno_chunk = jnp.asarray(geno_np, dtype=jnp.float32)
-
-            # --- M-step accumulators (vectorized, no Python loops) ---
-
-            # weighted_counts: pad geno to (chunk, n_blocks, block_size),
-            # then einsum with block gamma (chunk, n_blocks, A).
-            if pad_right > 0:
-                geno_blocked = jnp.pad(
-                    geno_chunk, ((0, 0), (0, pad_right)),
-                ).reshape(-1, bd.n_blocks, bd.block_size)
-            else:
-                geno_blocked = geno_chunk.reshape(-1, bd.n_blocks, bd.block_size)
-            wc_blocked = jnp.einsum('hba,hbs->abs', gb_chunk, geno_blocked)
-            weighted_counts = weighted_counts + wc_blocked.reshape(n_anc, T_padded)[:, :T_sites]
-
-            # total_weights: per-ancestry sum per block, broadcast to sites
-            per_anc_all = gb_chunk.sum(axis=0)  # (n_blocks, A)
-            tw_blocked = jnp.broadcast_to(
-                per_anc_all.T[:, :, None],
-                (n_anc, bd.n_blocks, bd.block_size),
-            )
-            total_weights = total_weights + tw_blocked.reshape(n_anc, T_padded)[:, :T_sites]
-
-            # mu_sum[a] = sum_h sum_b gamma_block[h,b,a] * width[b]
-            mu_sum = mu_sum + jnp.einsum('hba,b->a', gb_chunk, block_widths_j)
-
-            # Soft switches: density-invariant per-haplotype counts
-            # consumed by update_generations_per_hap_from_stats.
-            soft_switches_per_hap[batch_idx] = _np.asarray(sw_chunk)
-
-            # Hard switches: only at block boundaries (within-block
-            # gamma is constant). Used for switch_sum ancestry
-            # attribution and the legacy switches_per_hap field.
-            calls_block = jnp.argmax(gb_chunk, axis=2)
-            if bd.n_blocks > 1:
-                sw_block = (calls_block[:, 1:] != calls_block[:, :-1])
-                hard_switches_per_hap[batch_idx] = _np.array(
-                    sw_block.sum(axis=1), dtype=_np.int32
-                )
-                pre_calls = calls_block[:, :-1]
-                one_hot = jax.nn.one_hot(pre_calls, n_anc, dtype=jnp.float32)
-                switch_sum = switch_sum + (
-                    one_hot * sw_block[..., None].astype(jnp.float32)
-                ).sum(axis=(0, 1))
-
-            # Pattern-freq scatter: vmap over blocks instead of Python loop
-            pat_idx_chunk = jnp.array(bd_chunk.pattern_indices)
-            _pf_counts = _pf_counts + jax.vmap(_scatter_block)(
-                pat_idx_chunk.T,                    # (n_blocks, chunk)
-                jnp.moveaxis(gb_chunk, 1, 0),       # (n_blocks, chunk, A)
-            )
-
-            weighted_counts.block_until_ready()
-            del gb_chunk, geno_chunk, geno_blocked, calls_block, pat_idx_chunk, sw_chunk
+        weighted_counts.block_until_ready()
+        del gb_chunk, geno_chunk, geno_blocked, calls_block, pat_idx_chunk, sw_chunk
 
     em_stats = EMStats(
         weighted_counts=weighted_counts,
@@ -1350,58 +1402,36 @@ def forward_backward_bucketed_em(
 
     H, T = geno.shape
     A = model.n_ancestries
-    B = len(model.bucket_centers)
-
-    bucket_np = _np.asarray(model.bucket_assignments)
-    assert bucket_np.shape == (H,), (
-        f"bucket_assignments shape {bucket_np.shape} does not match geno H={H}"
-    )
-    ba_min, ba_max = int(bucket_np.min()), int(bucket_np.max())
-    assert 0 <= ba_min and ba_max < B, (
-        f"bucket_assignments range [{ba_min}, {ba_max}] outside [0, {B})"
-    )
 
     weighted_counts = jnp.zeros((A, T))
     total_weights = jnp.zeros((A, T))
     mu_sum = jnp.zeros((A,))
     soft_switches_per_hap = _np.zeros(H, dtype=_np.float32)
 
-    for b in range(B):
-        mask = bucket_np == b
-        n_b = int(mask.sum())
-        if n_b == 0:
-            continue
-
-        hap_idx = _np.where(mask)[0]
-
-        b_model = AncestryModel(
-            n_ancestries=A,
-            mu=model.mu,
-            gen_since_admix=float(model.bucket_centers[b]),
-            allele_freq=model.allele_freq,
-        )
-        b_pc = _precompute_streaming_tensors(b_model, d_morgan, T)
+    for b_model, batch_idx, b_pc in _iter_bucket_batches(
+        geno, model, batch_size,
+        yield_d_morgan_pc=True, d_morgan=d_morgan, T=T,
+    ):
         b_emit_pad = b_pc["emit_pad"]
-
-        for s in range(0, n_b, batch_size):
-            e = min(s + batch_size, n_b)
-            batch_hap_idx = hap_idx[s:e]
-            batch_geno = jnp.asarray(geno[batch_hap_idx])
-            if b_emit_pad > 0:
-                batch_geno = jnp.concatenate(
-                    [batch_geno, jnp.zeros((e - s, b_emit_pad), dtype=batch_geno.dtype)],
-                    axis=1,
-                )
-            wc_b, tw_b, mu_b, sw_b = _streaming_em_checkpointed(
-                batch_geno, b_pc["log_f0"], b_pc["log_odds"], b_pc["seg_trans"],
-                b_pc["site_idx"], b_pc["gamma_site_idx"], b_pc["log_prior"],
-                C=b_pc["C"], S=b_pc["S"], n_fwd_steps=b_pc["n_fwd_steps"],
-                emit_pad=b_emit_pad,
+        n = len(batch_idx)
+        batch_geno = jnp.asarray(geno[batch_idx])
+        if b_emit_pad > 0:
+            batch_geno = jnp.concatenate(
+                [batch_geno, jnp.zeros((n, b_emit_pad), dtype=batch_geno.dtype)],
+                axis=1,
             )
-            weighted_counts = weighted_counts + wc_b
-            total_weights = total_weights + tw_b
-            mu_sum = mu_sum + mu_b
-            soft_switches_per_hap[batch_hap_idx] = _np.array(sw_b)
+        wc_b, tw_b, mu_b, sw_b = _streaming_em_checkpointed(
+            batch_geno, b_pc["log_f0"], b_pc["log_odds"], b_pc["seg_trans"],
+            b_pc["site_idx"], b_pc["gamma_site_idx"], b_pc["log_prior"],
+            C=b_pc["C"], S=b_pc["S"], n_fwd_steps=b_pc["n_fwd_steps"],
+            emit_pad=b_emit_pad,
+        )
+        weighted_counts = weighted_counts + wc_b
+        total_weights = total_weights + tw_b
+        mu_sum = mu_sum + mu_b
+        soft_switches_per_hap[batch_idx] = _np.array(sw_b)
+        weighted_counts.block_until_ready()
+        del batch_geno, wc_b, tw_b, mu_b, sw_b
 
     return EMStats(
         weighted_counts=weighted_counts,
@@ -1519,9 +1549,9 @@ def forward_backward_bucketed_decode(
     When ``calls_out`` and/or ``max_post_writer`` are provided, the global
     output buffers are externally managed (e.g. memmap-backed calls + a
     callback that streams max_post to a parquet writer); see
-    :func:`forward_backward_decode` for semantics. Per-bucket calls
-    delegate to ``forward_backward_decode`` with ``hap_idx_map`` set so
-    fancy-index writes land in the correct global rows.
+    :func:`forward_backward_decode` for semantics. Per-bucket batches
+    write into the global buffers via fancy-index writes so each row
+    lands in its original cohort position.
     """
     if model.bucket_assignments is None:
         return forward_backward_decode(
@@ -1531,16 +1561,6 @@ def forward_backward_bucketed_decode(
 
     H, T = geno.shape
     A = model.n_ancestries
-    B = len(model.bucket_centers)
-
-    bucket_np = _np.asarray(model.bucket_assignments)
-    assert bucket_np.shape == (H,), (
-        f"bucket_assignments shape {bucket_np.shape} does not match geno H={H}"
-    )
-    ba_min, ba_max = int(bucket_np.min()), int(bucket_np.max())
-    assert 0 <= ba_min and ba_max < B, (
-        f"bucket_assignments range [{ba_min}, {ba_max}] outside [0, {B})"
-    )
 
     calls = calls_out if calls_out is not None else _np.empty((H, T), dtype=_np.int8)
     if max_post_writer is None and compute_max_post:
@@ -1553,27 +1573,31 @@ def forward_backward_bucketed_decode(
         _user_writer = max_post_writer
     global_sums = _np.zeros((H, A), dtype=_np.float64) if compute_max_post else None
 
-    for b in range(B):
-        mask = bucket_np == b
-        n_b = int(mask.sum())
-        if n_b == 0:
-            continue
-
-        hap_idx = _np.where(mask)[0]
-        b_model = AncestryModel(
-            n_ancestries=A,
-            mu=model.mu,
-            gen_since_admix=float(model.bucket_centers[b]),
-            allele_freq=model.allele_freq,
+    for b_model, batch_idx, b_pc in _iter_bucket_batches(
+        geno, model, batch_size,
+        yield_d_morgan_pc=True, d_morgan=d_morgan, T=T,
+    ):
+        b_emit_pad = b_pc["emit_pad"]
+        n = len(batch_idx)
+        batch_geno = jnp.asarray(geno[batch_idx])
+        if b_emit_pad > 0:
+            batch_geno = jnp.concatenate(
+                [batch_geno, jnp.zeros((n, b_emit_pad), dtype=batch_geno.dtype)],
+                axis=1,
+            )
+        result = _streaming_decode_checkpointed(
+            batch_geno, b_pc["log_f0"], b_pc["log_odds"], b_pc["seg_trans"],
+            b_pc["site_idx"], b_pc["log_prior"],
+            C=b_pc["C"], S=b_pc["S"], n_fwd_steps=b_pc["n_fwd_steps"],
+            emit_pad=b_emit_pad,
+            compute_max_post=compute_max_post,
         )
-        bucket_decode = forward_backward_decode(
-            geno[hap_idx], b_model, d_morgan, batch_size, compute_max_post,
-            calls_out=calls,
-            max_post_writer=_user_writer,
-            hap_idx_map=hap_idx,
-        )
+        calls[batch_idx] = result.calls
         if compute_max_post:
-            global_sums[hap_idx] = bucket_decode.global_sums
+            global_sums[batch_idx] = result.global_sums
+            if _user_writer is not None:
+                _user_writer(batch_idx, result.max_post)
+        del batch_geno, result
 
     return DecodeResult(calls=calls, max_post=max_post, global_sums=global_sums)
 
@@ -1647,52 +1671,29 @@ def forward_backward_bucketed_ancestry_sums(
 
     H, T = geno.shape
     A = model.n_ancestries
-    B = len(model.bucket_centers)
-
-    bucket_np = _np.asarray(model.bucket_assignments)
-    assert bucket_np.shape == (H,), (
-        f"bucket_assignments shape {bucket_np.shape} does not match geno H={H}"
-    )
-    ba_min, ba_max = int(bucket_np.min()), int(bucket_np.max())
-    assert 0 <= ba_min and ba_max < B, (
-        f"bucket_assignments range [{ba_min}, {ba_max}] outside [0, {B})"
-    )
 
     global_sums = _np.zeros((H, A), dtype=_np.float64)
 
-    for b in range(B):
-        mask = bucket_np == b
-        n_b = int(mask.sum())
-        if n_b == 0:
-            continue
-
-        hap_idx = _np.where(mask)[0]
-
-        b_model = AncestryModel(
-            n_ancestries=A,
-            mu=model.mu,
-            gen_since_admix=float(model.bucket_centers[b]),
-            allele_freq=model.allele_freq,
-        )
-        b_pc = _precompute_streaming_tensors(b_model, d_morgan, T)
+    for b_model, batch_idx, b_pc in _iter_bucket_batches(
+        geno, model, batch_size,
+        yield_d_morgan_pc=True, d_morgan=d_morgan, T=T,
+    ):
         b_emit_pad = b_pc["emit_pad"]
-
-        for s in range(0, n_b, batch_size):
-            e = min(s + batch_size, n_b)
-            batch_hap_idx = hap_idx[s:e]
-            batch_geno = geno[batch_hap_idx]
-            if b_emit_pad > 0:
-                batch_geno = jnp.concatenate(
-                    [batch_geno, jnp.zeros((e - s, b_emit_pad), dtype=batch_geno.dtype)],
-                    axis=1,
-                )
-            result = _streaming_decode_checkpointed(
-                batch_geno, b_pc["log_f0"], b_pc["log_odds"], b_pc["seg_trans"],
-                b_pc["site_idx"], b_pc["log_prior"],
-                C=b_pc["C"], S=b_pc["S"], n_fwd_steps=b_pc["n_fwd_steps"],
-                emit_pad=b_emit_pad,
-                sums_only=True,
+        n = len(batch_idx)
+        batch_geno = jnp.asarray(geno[batch_idx])
+        if b_emit_pad > 0:
+            batch_geno = jnp.concatenate(
+                [batch_geno, jnp.zeros((n, b_emit_pad), dtype=batch_geno.dtype)],
+                axis=1,
             )
-            global_sums[batch_hap_idx] = result.global_sums
+        result = _streaming_decode_checkpointed(
+            batch_geno, b_pc["log_f0"], b_pc["log_odds"], b_pc["seg_trans"],
+            b_pc["site_idx"], b_pc["log_prior"],
+            C=b_pc["C"], S=b_pc["S"], n_fwd_steps=b_pc["n_fwd_steps"],
+            emit_pad=b_emit_pad,
+            sums_only=True,
+        )
+        global_sums[batch_idx] = result.global_sums
+        del batch_geno, result
 
     return global_sums

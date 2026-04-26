@@ -443,3 +443,95 @@ def test_decode_chromosome_streams_bucketed_to_parquet_no_blocks(tmp_path):
         assert not _P(str(_P(out).with_suffix(f".bucket{b}.parquet"))).exists(), (
             f"per-bucket parquet for bucket {b} should have been removed"
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 4 equivalence tests: bucketed wrappers refactored to use
+# _iter_bucket_batches must agree with the unbucketed paths when
+# B = 1 and the lone bucket center matches model.gen_since_admix.
+# ---------------------------------------------------------------------------
+
+def _bucketize_for_B1(model, H):
+    """Wrap *model* in an all-one-bucket assignment whose center matches
+    model.gen_since_admix. Used to drive the bucketed code path while
+    still being numerically equivalent to the unbucketed one."""
+    return AncestryModel(
+        n_ancestries=model.n_ancestries,
+        mu=model.mu,
+        gen_since_admix=model.gen_since_admix,
+        allele_freq=model.allele_freq,
+        bucket_centers=jnp.array([model.gen_since_admix], dtype=jnp.float32),
+        bucket_assignments=jnp.zeros(H, dtype=jnp.int32),
+    )
+
+
+def test_bucketed_em_after_refactor_matches_unbucketed_for_B_eq_1():
+    """forward_backward_bucketed_em with all-one-bucket B=1 matches
+    forward_backward_em on identical data. Confirms the Task 4 generator
+    rewrite preserves EMStats accumulation semantics."""
+    from popout.hmm import forward_backward_bucketed_em
+    geno, model, d_morgan = _tiny_setup(H=24, T=80, A=3, seed=11)
+    bucketed = _bucketize_for_B1(model, H=24)
+
+    em_a = forward_backward_em(geno, model, d_morgan, batch_size=12)
+    em_b = forward_backward_bucketed_em(geno, bucketed, d_morgan, batch_size=12)
+
+    np.testing.assert_allclose(
+        np.asarray(em_a.weighted_counts), np.asarray(em_b.weighted_counts),
+        rtol=1e-5, atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(em_a.total_weights), np.asarray(em_b.total_weights),
+        rtol=1e-5, atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(em_a.mu_sum), np.asarray(em_b.mu_sum),
+        rtol=1e-5, atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        np.asarray(em_a.soft_switches_per_hap),
+        np.asarray(em_b.soft_switches_per_hap),
+        rtol=1e-5, atol=1e-6,
+    )
+
+
+def test_bucketed_decode_after_refactor_matches_unbucketed_for_B_eq_1():
+    """forward_backward_bucketed_decode with all-one-bucket B=1 matches
+    forward_backward_decode on identical data. Confirms the Task 4
+    rewrite (now driving _streaming_decode_checkpointed directly per
+    bucket batch) preserves call/max_post/global_sums output."""
+    from popout.hmm import forward_backward_bucketed_decode
+    geno, model, d_morgan = _tiny_setup(H=24, T=80, A=3, seed=12)
+    bucketed = _bucketize_for_B1(model, H=24)
+
+    dec_a = forward_backward_decode(geno, model, d_morgan, batch_size=12)
+    dec_b = forward_backward_bucketed_decode(geno, bucketed, d_morgan, batch_size=12)
+
+    np.testing.assert_array_equal(
+        np.asarray(dec_a.calls), np.asarray(dec_b.calls),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(dec_a.max_post), np.asarray(dec_b.max_post),
+    )
+    np.testing.assert_allclose(
+        np.asarray(dec_a.global_sums), np.asarray(dec_b.global_sums),
+        rtol=1e-6, atol=1e-9,
+    )
+
+
+def test_bucketed_ancestry_sums_after_refactor_matches_unbucketed_for_B_eq_1():
+    """forward_backward_bucketed_ancestry_sums with all-one-bucket B=1
+    matches forward_backward_ancestry_sums."""
+    from popout.hmm import (
+        forward_backward_ancestry_sums,
+        forward_backward_bucketed_ancestry_sums,
+    )
+    geno, model, d_morgan = _tiny_setup(H=24, T=80, A=3, seed=13)
+    bucketed = _bucketize_for_B1(model, H=24)
+
+    gs_a = forward_backward_ancestry_sums(geno, model, d_morgan, batch_size=12)
+    gs_b = forward_backward_bucketed_ancestry_sums(geno, bucketed, d_morgan, batch_size=12)
+
+    np.testing.assert_allclose(
+        np.asarray(gs_a), np.asarray(gs_b), rtol=1e-6, atol=1e-9,
+    )
