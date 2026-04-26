@@ -683,6 +683,8 @@ def main(argv: list[str] | None = None) -> None:
                 "block_size": args.block_size,
                 "freeze_anchors_iters": args.freeze_anchors_iters,
                 "probs": args.probs,
+                "per_hap_T": args.per_hap_T,
+                "n_T_buckets": args.n_T_buckets,
             },
             restart_stage=args.restart_stage,
         )

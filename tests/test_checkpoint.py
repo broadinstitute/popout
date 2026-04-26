@@ -43,6 +43,8 @@ def _args():
         "block_size": 8,
         "freeze_anchors_iters": 0,
         "probs": False,
+        "per_hap_T": False,
+        "n_T_buckets": 20,
     }
 
 
@@ -214,6 +216,37 @@ class TestInvalidation:
         assert wd2.stage_done("seed")  # preserved
         assert not wd2.stage_done("em")  # invalidated
         assert not wd2.stage_done("decode", chrom="1")  # cascade
+
+    def test_resume_invalidates_em_when_per_hap_T_changes(self, work_path):
+        """Toggling --per-hap-T must invalidate em + decode but preserve
+        seed: the EM iteration produces a different model (with vs without
+        bucket_assignments) and decode follows a different code path."""
+        wd = WorkDir(work_path)
+        _open(wd)
+        wd.mark_done("seed", wall_s=100)
+        wd.mark_done("em", wall_s=200)
+        wd.mark_done("decode", chrom="1", wall_s=30)
+
+        wd2 = WorkDir(work_path)
+        _open(wd2, args_overrides={"per_hap_T": True})
+        assert wd2.stage_done("seed")
+        assert not wd2.stage_done("em")
+        assert not wd2.stage_done("decode", chrom="1")
+
+    def test_resume_invalidates_em_when_n_T_buckets_changes(self, work_path):
+        """Changing --n-T-buckets changes the bucket centers used by the EM
+        M-step and decode, so both stages must invalidate while seed stays."""
+        wd = WorkDir(work_path)
+        _open(wd)
+        wd.mark_done("seed", wall_s=100)
+        wd.mark_done("em", wall_s=200)
+        wd.mark_done("decode", chrom="1", wall_s=30)
+
+        wd2 = WorkDir(work_path)
+        _open(wd2, args_overrides={"n_T_buckets": 10})
+        assert wd2.stage_done("seed")
+        assert not wd2.stage_done("em")
+        assert not wd2.stage_done("decode", chrom="1")
 
     def test_restart_stage_em(self, work_path):
         wd = WorkDir(work_path)
