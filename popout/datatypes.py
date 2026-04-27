@@ -91,12 +91,33 @@ class AncestryModel:
     gen_per_hap: Optional[jnp.ndarray] = None       # (H,)
     bucket_centers: Optional[jnp.ndarray] = None     # (B,)
     bucket_assignments: Optional[jnp.ndarray] = None # (H,) int32
+    # Per-component T (optional — used by the priors path). When set,
+    # the transition matrix uses p_i = 1 - exp(-d * T_i) per origin
+    # ancestry instead of a scalar p_switch. Mutex with gen_per_hap /
+    # bucket_assignments (different math; bundling not supported).
+    gen_per_comp: Optional[jnp.ndarray] = None      # (A,)
     # Block emission model (optional — None means single-site Bernoulli)
     pattern_freq: Optional[jnp.ndarray] = None       # (n_blocks, max_patterns, A)
     block_data: object = None                         # BlockData (avoid circular import)
 
+    def __post_init__(self):
+        # Per-component T and per-hap T are different math; bundling
+        # them is not supported — `--per-hap-T` and `--priors` are
+        # mutually exclusive at the CLI for the same reason.
+        if self.gen_per_comp is not None and (
+            self.gen_per_hap is not None or self.bucket_assignments is not None
+        ):
+            raise ValueError(
+                "AncestryModel cannot have gen_per_comp and "
+                "gen_per_hap/bucket_assignments both set"
+            )
+
     def log_transition_matrix(self, d_morgan: jnp.ndarray) -> jnp.ndarray:
         """Build (n_intervals, A, A) log transition matrices.
+
+        When ``gen_per_comp`` is set, the per-origin-ancestry switch
+        rate ``p_i = 1 - exp(-d * T_i)`` replaces the scalar ``p_switch``.
+        The destination distribution remains ``mu`` regardless.
 
         Parameters
         ----------
@@ -107,19 +128,41 @@ class AncestryModel:
         -------
         log_trans : array, shape (n_intervals, A, A)
         """
-        T = self.gen_since_admix
         A = self.n_ancestries
+        log_mu = jnp.log(self.mu)  # (A,)
+        eye = jnp.eye(A)
+
+        if self.gen_per_comp is not None:
+            # Per-origin-ancestry switch rate.
+            # p[i, n] = 1 - exp(-d_n * T_i)
+            T_per = self.gen_per_comp                          # (A,)
+            d_T = d_morgan[:, None] * T_per[None, :]            # (I, A)
+            p_switch = 1.0 - jnp.exp(-d_T)                      # (I, A)
+            log_p = jnp.log(p_switch + 1e-30)                   # (I, A)
+            log_1mp = jnp.log(1.0 - p_switch + 1e-30)           # (I, A)
+            # trans[n, i, j]:
+            #   off (i != j): log(p[n, i] * mu[j])
+            #   diag (i == j): logaddexp(log(1 - p[n, i]), log(p[n, i] * mu[i]))
+            log_off = log_p[:, :, None] + log_mu[None, None, :]                # (I, A, A)
+            log_diag = jnp.logaddexp(
+                log_1mp[:, :, None],
+                log_p[:, :, None] + log_mu[None, None, :],
+            )                                                                   # (I, A, A)
+            log_trans = jnp.where(
+                eye[None, :, :], log_diag, log_off,
+            )
+            return log_trans
+
+        T = self.gen_since_admix
         # Probability of at least one recombination in interval
         p_switch = 1.0 - jnp.exp(-d_morgan * T)  # (n_intervals,)
         # Off-diagonal: switch to ancestry j with prob mu[j] * p_switch
         # Diagonal: stay with prob (1 - p_switch) + p_switch * mu[i]
-        log_mu = jnp.log(self.mu)  # (A,)
         log_p = jnp.log(p_switch + 1e-30)[:, None, None]       # (I, 1, 1)
         log_1mp = jnp.log(1.0 - p_switch + 1e-30)[:, None, None]
 
         # trans[i,j] = (1-p)*I(i==j) + p*mu[j]
         # In log-space, use logsumexp for diagonal
-        eye = jnp.eye(A)
         # Off-diagonal terms: log(p * mu[j])
         log_off = log_p + log_mu[None, None, :]  # (I, 1, A)
         # Diagonal terms: log((1-p) + p*mu[i])
@@ -239,6 +282,12 @@ class EMStats:
     soft_switches_per_hap: np.ndarray  # (H,) float32 — expected transitions per hap (xi-based)
     n_haps: int
     n_sites: int
+    # Per-component sufficient stats for the priors M-step. None when the
+    # xi-with-transitions branch was not requested or the HMM did not
+    # accumulate them (older code paths). Required for the per-component
+    # MAP T update; consumers must check for None and fall back.
+    switches_per_comp: Optional[np.ndarray] = None       # (A,) Σ_{h,n} (γ[h,n,a] − ξ_diag[h,n,a])
+    d_weighted_occupancy: Optional[np.ndarray] = None    # (A,) Σ_{h,n} d_n · γ[h,n,a]
 
 
 @dataclass

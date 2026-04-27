@@ -31,12 +31,16 @@ def _call_streaming_em(geno, model, d_morgan, checkpoint_interval=None):
             [geno_j, jnp.zeros((geno_j.shape[0], emit_pad), dtype=geno_j.dtype)],
             axis=1,
         )
-    return _streaming_em_checkpointed(
-        geno_j, pc["log_f0"], pc["log_odds"], pc["seg_trans"],
+    out = _streaming_em_checkpointed(
+        geno_j, pc["log_f0"], pc["log_odds"], pc["seg_trans"], pc["seg_d"],
         pc["site_idx"], pc["gamma_site_idx"], pc["log_prior"],
         C=pc["C"], S=pc["S"], n_fwd_steps=pc["n_fwd_steps"],
         emit_pad=emit_pad,
     )
+    # Old test interface returned (wc, tw, mu_sum, soft_sw); the kernel
+    # also returns (switches_per_comp, d_weighted_occupancy) for the
+    # priors path — strip them here.
+    return out[:4]
 
 
 def _call_streaming_decode(geno, model, d_morgan, checkpoint_interval=None,

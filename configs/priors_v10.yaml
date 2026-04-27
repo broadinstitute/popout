@@ -1,0 +1,42 @@
+# Anthropogenic priors for the v10 EUR/MID gen-degeneracy experiment.
+#
+# Each component_idx refers to a component in v10's labels output.
+# gen_mean is the documented central estimate; gen_lo/gen_hi bracket
+# 90% of demographic uncertainty. The Beta prior on per-step transition
+# probability r = 1 - exp(-T * morgans_per_step) is solved at load time
+# so that its 5th/95th percentiles match r(gen_lo)/r(gen_hi).
+#
+# Unprimed components (any component_idx not listed here) get the bare
+# MLE in the M-step — the Beta(1,1) flow-through is intentionally
+# avoided to prevent one-event bias at biobank scale.
+#
+# morgans_per_step is decoupled from cohort grid density: it is the
+# representative per-step distance assumed by the demographic
+# conversion. 1.2e-4 Morgans/step ≈ AoU thinning at thin_cm=0.012.
+
+morgans_per_step: 1.2e-4
+
+components:
+  - component_idx: 7      # afr.0 from v10 labels
+    gen_mean: 7
+    gen_lo: 4
+    gen_hi: 12
+    source: "Atlantic slave trade primary phase + post-emancipation; Bryc 2015, Baharian 2016"
+
+  - component_idx: 2      # eur.anchor from v10
+    gen_mean: 2
+    gen_lo: 1
+    gen_hi: 4
+    source: "Recent European immigration to US; minimal admixture beyond founder events"
+
+  - component_idx: 4      # mid.4 — the diagnostic test.
+                          # v10's post-EM consolidation relabels mid.4
+                          # as eur because its T drifts to EUR-like
+                          # values. If priors hold T near gen=2 and the
+                          # allele-frequency profile differentiates, the
+                          # consolidation rule no longer fires and the
+                          # gen-degeneracy hypothesis is supported.
+    gen_mean: 2
+    gen_lo: 1
+    gen_hi: 3
+    source: "20th-century Levantine immigration; Hellenthal 2014 admixture dating"

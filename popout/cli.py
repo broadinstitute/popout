@@ -255,6 +255,13 @@ def main(argv: list[str] | None = None) -> None:
         help="Number of transition-matrix buckets for per-haplotype T (default: 20)",
     )
     parser.add_argument(
+        "--priors", type=str, default=None, metavar="PATH",
+        help="YAML file specifying per-component priors on generations "
+             "since admixture (Beta priors on per-step transition rate). "
+             "Mutually exclusive with --per-hap-T. HMM method only. "
+             "See popout/priors.py for the YAML schema.",
+    )
+    parser.add_argument(
         "--block-emissions", action="store_true",
         help="Use block-level haplotype pattern emissions instead of single-site Bernoulli",
     )
@@ -471,6 +478,23 @@ def main(argv: list[str] | None = None) -> None:
         )
         sys.exit(1)
 
+    if args.priors is not None and args.per_hap_T:
+        print(
+            "ERROR: --priors and --per-hap-T are mutually exclusive: per-hap-T "
+            "and per-component priors use different M-step math (per-(k,h) vs "
+            "per-k). Choose one. See docs/PRIORS.md.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if args.priors is not None and args.method not in ("hmm",):
+        print(
+            f"ERROR: --priors requires --method hmm; got --method {args.method}. "
+            "Per-component priors are HMM-specific.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     # --- Logging ---
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
@@ -661,6 +685,7 @@ def main(argv: list[str] | None = None) -> None:
                 "probs": args.probs,
                 "per_hap_T": args.per_hap_T,
                 "n_T_buckets": args.n_T_buckets,
+                "priors_sha256": WorkDir.hash_priors_file(args.priors),
             },
             restart_stage=args.restart_stage,
         )
@@ -708,6 +733,17 @@ def main(argv: list[str] | None = None) -> None:
 
         write_dense_decode = args.probs or args.write_dense_decode
 
+        priors_obj = None
+        if args.priors is not None:
+            from .priors import load_priors
+            priors_obj = load_priors(args.priors)
+            log.info(
+                "Loaded priors from %s: %d component priors, morgans_per_step=%g, "
+                "fingerprint=%s…",
+                args.priors, len(priors_obj.components),
+                priors_obj.morgans_per_step, priors_obj.fingerprint[:12],
+            )
+
         results = run_em_genome(
             chrom_iter_with_save(),
             n_ancestries=args.n_ancestries,
@@ -730,6 +766,7 @@ def main(argv: list[str] | None = None) -> None:
             write_dense_decode=write_dense_decode,
             seeding_mask=seeding_mask,
             work_dir=work_dir,
+            priors=priors_obj,
         )
 
     t_compute = time.perf_counter() - t0

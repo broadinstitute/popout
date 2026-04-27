@@ -266,6 +266,105 @@ def update_generations_from_stats(
     return max(1.0, min(float(np.exp(log_T)), 1000.0))
 
 
+def update_generations_per_component_from_stats(
+    stats: EMStats,
+    current_T_per_comp: jnp.ndarray,
+    mu: jnp.ndarray,
+    priors,  # popout.priors.Priors  (avoid circular import for type hint)
+) -> jnp.ndarray:
+    """Per-component MAP estimate of generations since admixture.
+
+    For each component k, the per-step transition probability
+    ``r_k = 1 - exp(-T_k * morgans_per_step)`` is updated from the
+    forward-backward sufficient statistics under an optional Beta(α, β)
+    prior taken from ``priors``.
+
+    The Bernoulli likelihood is approximated as if the data were drawn
+    from independent steps at distance ``priors.morgans_per_step``;
+    sufficient stats are rescaled accordingly:
+
+    * ``successes_eff[k] = switches_per_comp[k] / (1 - mu[k])`` —
+      effective "would-be switches" if self-reentries (mu[k] of switches
+      at the trans matrix landing back on k) were observable
+    * ``trials_eff[k] = d_weighted_occupancy[k] / morgans_per_step`` —
+      occupancy in k expressed as effective number of independent steps
+
+    MAP shift: ``r_k = (successes + α - 1) / (trials + α + β - 2)``.
+    Components without a prior use the bare MLE (no Beta(1,1) flow-through —
+    the spec explicitly avoids the one-event bias that would introduce at
+    biobank scale).
+
+    Parameters
+    ----------
+    stats
+        Must have ``switches_per_comp`` and ``d_weighted_occupancy``
+        populated (raises if either is None — caller is responsible for
+        running the xi-with-transitions branch of forward-backward).
+    current_T_per_comp : (A,)
+        Previous per-component T estimate for log-space blending.
+    mu : (A,)
+        Current global ancestry proportions.
+    priors
+        :class:`popout.priors.Priors`. Components without a matching
+        ``component_idx`` get the bare MLE.
+
+    Returns
+    -------
+    (A,) array of updated per-component T values.
+    """
+    if stats.switches_per_comp is None or stats.d_weighted_occupancy is None:
+        raise ValueError(
+            "EMStats lacks per-component switch stats; the xi-with-transitions "
+            "branch of forward-backward must populate switches_per_comp and "
+            "d_weighted_occupancy when priors are in use."
+        )
+
+    sw = np.asarray(stats.switches_per_comp, dtype=np.float64)   # (A,)
+    occ = np.asarray(stats.d_weighted_occupancy, dtype=np.float64)  # (A,)
+    mu_np = np.asarray(mu, dtype=np.float64)
+    cur_T = np.asarray(current_T_per_comp, dtype=np.float64)
+
+    A = sw.shape[0]
+    mps = float(priors.morgans_per_step)
+
+    # (1 - mu[k]) correction; clamp to keep numerics sane when one
+    # component dominates the cohort.
+    one_minus_mu = np.maximum(1.0 - mu_np, 1e-3)
+
+    successes_eff = sw / one_minus_mu                       # (A,)
+    trials_eff = occ / max(mps, 1e-12)                       # (A,)
+
+    new_T = np.empty(A, dtype=np.float64)
+    for k in range(A):
+        prior_k = priors.get(k)
+        if prior_k is None:
+            # Bare MLE — no Beta(1,1) flow-through.
+            denom = max(trials_eff[k], 1e-9)
+            r_k = successes_eff[k] / denom
+        else:
+            num = successes_eff[k] + (prior_k.alpha - 1.0)
+            den = trials_eff[k] + (prior_k.alpha + prior_k.beta - 2.0)
+            num = max(num, 1e-9)
+            den = max(den, 1e-9)
+            r_k = num / den
+
+        # r_k must lie strictly in (0, 1).
+        r_k = float(np.clip(r_k, 1e-12, 1.0 - 1e-12))
+        T_est = -np.log1p(-r_k) / mps
+        T_est = max(1.0, min(T_est, 1000.0))
+
+        # Log-space blend toward previous estimate (matches sibling
+        # functions for consistency).
+        blend_alpha = 0.3
+        log_T = (
+            (1.0 - blend_alpha) * np.log(max(cur_T[k], 1.0))
+            + blend_alpha * np.log(T_est)
+        )
+        new_T[k] = max(1.0, min(float(np.exp(log_T)), 1000.0))
+
+    return jnp.asarray(new_T, dtype=jnp.float32)
+
+
 def update_generations_per_hap_from_stats(
     stats: EMStats,
     d_morgan: jnp.ndarray,
@@ -397,6 +496,7 @@ def run_em(
     write_dense_decode: bool = False,
     decode_parquet_path: Optional[str] = None,
     skip_decode: bool = False,
+    priors=None,  # popout.priors.Priors | None
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -550,6 +650,7 @@ def run_em(
         # iteration 1 onward, T is updated every iteration alongside mu and freq.
         T_per_hap = None
         bucket_assignments = None
+        new_gen_per_comp = model.gen_per_comp  # carry forward unless updated
         should_update_T = iteration > 0
 
         if not should_update_T:
@@ -560,6 +661,21 @@ def run_em(
             )
             log.info("  T (per-hap): mean=%.1f, std=%.1f",
                      float(jnp.mean(T_per_hap)), float(jnp.std(T_per_hap)))
+        elif priors is not None:
+            cur_per = (
+                model.gen_per_comp
+                if model.gen_per_comp is not None
+                else jnp.full((n_anc,), model.gen_since_admix, dtype=jnp.float32)
+            )
+            new_gen_per_comp = update_generations_per_component_from_stats(
+                em_stats, cur_per, new_mu, priors,
+            )
+            new_T = float(jnp.mean(new_gen_per_comp))   # logging-only summary
+            log.info(
+                "  T (per-comp): %s → %s",
+                np.array(cur_per).round(2).tolist(),
+                np.array(new_gen_per_comp).round(2).tolist(),
+            )
         else:
             new_T = update_generations_from_stats(em_stats, d_morgan_j, model.gen_since_admix, model.mu)
             log.info("  T: %.1f → %.1f", model.gen_since_admix, new_T)
@@ -592,6 +708,7 @@ def run_em(
             gen_per_hap=T_per_hap,
             bucket_centers=bucket_centers,
             bucket_assignments=bucket_assignments,
+            gen_per_comp=new_gen_per_comp,
             pattern_freq=new_pf,
             block_data=bd,
         )
@@ -1135,6 +1252,7 @@ def run_em_genome(
     write_dense_decode: bool = False,
     seeding_mask: np.ndarray | None = None,
     work_dir=None,
+    priors=None,  # popout.priors.Priors | None
 ) -> list[AncestryResult] | None:
     """Run self-bootstrapping LAI across all chromosomes.
 
@@ -1316,6 +1434,7 @@ def run_em_genome(
                     seed_responsibilities=seed_resp,
                     freeze_anchors_iters=freeze_anchors_iters,
                     skip_decode=True,
+                    priors=priors,
                 )
                 fitted_model = result.model
 
@@ -1446,6 +1565,7 @@ def run_em_genome(
                     gen_per_hap=fitted_model.gen_per_hap,
                     bucket_centers=fitted_model.bucket_centers,
                     bucket_assignments=fitted_model.bucket_assignments,
+                    gen_per_comp=fitted_model.gen_per_comp,
                 )
 
                 # Auto-tune batch_size

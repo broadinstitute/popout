@@ -45,6 +45,7 @@ def _args():
         "probs": False,
         "per_hap_T": False,
         "n_T_buckets": 20,
+        "priors_sha256": None,
     }
 
 
@@ -248,6 +249,50 @@ class TestInvalidation:
         assert not wd2.stage_done("em")
         assert not wd2.stage_done("decode", chrom="1")
 
+    def test_resume_invalidates_em_decode_when_priors_change(self, work_path):
+        """Switching priors files invalidates em + decode (per-comp T
+        affects both M-step and decode transition matrix), but the seed
+        stage is untouched (priors do not affect seeding)."""
+        wd = WorkDir(work_path)
+        _open(wd, args_overrides={"priors_sha256": "abcd1234"})
+        wd.mark_done("seed", wall_s=100)
+        wd.mark_done("em", wall_s=200)
+        wd.mark_done("decode", chrom="1", wall_s=30)
+
+        wd2 = WorkDir(work_path)
+        _open(wd2, args_overrides={"priors_sha256": "ef567890"})
+        assert wd2.stage_done("seed")
+        assert not wd2.stage_done("em")
+        assert not wd2.stage_done("decode", chrom="1")
+
+    def test_resume_priors_unchanged_loads_em(self, work_path):
+        """Reopening with the same priors_sha256 keeps em and decode loaded."""
+        wd = WorkDir(work_path)
+        _open(wd, args_overrides={"priors_sha256": "abcd1234"})
+        wd.mark_done("seed", wall_s=100)
+        wd.mark_done("em", wall_s=200)
+        wd.mark_done("decode", chrom="1", wall_s=30)
+
+        wd2 = WorkDir(work_path)
+        _open(wd2, args_overrides={"priors_sha256": "abcd1234"})
+        assert wd2.stage_done("seed")
+        assert wd2.stage_done("em")
+        assert wd2.stage_done("decode", chrom="1")
+
+    def test_resume_dropping_priors_invalidates_em(self, work_path):
+        """Going from --priors A to no --priors must invalidate em+decode."""
+        wd = WorkDir(work_path)
+        _open(wd, args_overrides={"priors_sha256": "abcd1234"})
+        wd.mark_done("seed", wall_s=100)
+        wd.mark_done("em", wall_s=200)
+        wd.mark_done("decode", chrom="1", wall_s=30)
+
+        wd2 = WorkDir(work_path)
+        _open(wd2, args_overrides={"priors_sha256": None})
+        assert wd2.stage_done("seed")
+        assert not wd2.stage_done("em")
+        assert not wd2.stage_done("decode", chrom="1")
+
     def test_restart_stage_em(self, work_path):
         wd = WorkDir(work_path)
         _open(wd)
@@ -349,6 +394,29 @@ class TestFingerprint:
         fp2 = WorkDir.compute_pgen_fingerprint(pgen)
         assert fp1 == fp2
         assert len(fp1) == 16
+
+    def test_hash_priors_file_none(self):
+        assert WorkDir.hash_priors_file(None) is None
+
+    def test_hash_priors_file_missing(self, tmp_path):
+        assert WorkDir.hash_priors_file(tmp_path / "missing.yaml") is None
+
+    def test_hash_priors_file_deterministic(self, tmp_path):
+        p = tmp_path / "priors.yaml"
+        p.write_text("morgans_per_step: 1.2e-4\ncomponents: []\n")
+        h1 = WorkDir.hash_priors_file(p)
+        h2 = WorkDir.hash_priors_file(p)
+        assert h1 is not None
+        assert h1 == h2
+        assert len(h1) == 16
+
+    def test_hash_priors_file_changes_on_edit(self, tmp_path):
+        p = tmp_path / "priors.yaml"
+        p.write_text("morgans_per_step: 1.2e-4\n")
+        h1 = WorkDir.hash_priors_file(p)
+        p.write_text("morgans_per_step: 5e-4\n")
+        h2 = WorkDir.hash_priors_file(p)
+        assert h1 != h2
 
     def test_pgen_fingerprint_differs_on_content(self, tmp_path):
         p1 = tmp_path / "a.pgen"

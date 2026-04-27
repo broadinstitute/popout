@@ -34,6 +34,7 @@ task popout_task {
     Boolean write_probs        = false
     Boolean write_dense_decode = false
     String? ancestry_names      # comma list or gs:// URL to a TSV
+    File?   priors_yaml         # per-component T priors (mutex with --per-hap-T)
 
     # Recursive seeding (--seed-method recursive)
     String  seed_method              = "gmm"
@@ -60,7 +61,7 @@ task popout_task {
     String gpu_type      = "nvidia-tesla-a100"
     String zones         = "us-central1-c us-central1-a"
     Int    disk_size_gb  = 500
-    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:worktree-per-hap-t"
+    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:worktree-priors"
   }
 
   command <<<
@@ -127,6 +128,7 @@ task popout_task {
     ~{if write_probs then 'CMD="$CMD --probs"' else ''}
     ~{if write_dense_decode then 'CMD="$CMD --write-dense-decode"' else ''}
     ~{if defined(ancestry_names) then 'CMD="$CMD --ancestry-names ~{ancestry_names}"' else ''}
+    ~{if defined(priors_yaml) then 'CMD="$CMD --priors ~{priors_yaml}"' else ''}
 
     CMD="$CMD --seed-method ~{seed_method}"
     CMD="$CMD --recursive-merge-hellinger ~{recursive_merge_hellinger}"
@@ -229,6 +231,7 @@ workflow popout {
     Boolean write_probs        = false
     Boolean write_dense_decode = false
     String? ancestry_names
+    File?   priors_yaml
 
     # Recursive seeding
     String  seed_method              = "gmm"
@@ -255,7 +258,7 @@ workflow popout {
     String gpu_type      = "nvidia-tesla-a100"
     String zones         = "us-central1-c us-central1-a"
     Int    disk_size_gb  = 500
-    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:worktree-per-hap-t"
+    String docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/popout:worktree-priors"
   }
 
   call popout_task {
@@ -277,6 +280,7 @@ workflow popout {
       write_probs        = write_probs,
       write_dense_decode = write_dense_decode,
       ancestry_names     = ancestry_names,
+      priors_yaml        = priors_yaml,
       seed_method               = seed_method,
       freeze_anchors_iters      = freeze_anchors_iters,
       recursive_merge_hellinger = recursive_merge_hellinger,

@@ -55,13 +55,16 @@ STAGE_DEPS: dict[str, dict[str, list[str]]] = {
         "args": [
             "gen_since_admix", "n_em_iter", "block_emissions", "block_size",
             "freeze_anchors_iters", "per_hap_T", "n_T_buckets",
+            "priors_sha256",
         ],
     },
     "decode": {
         "fingerprint": [],
         # bucketed decode is a different code path from standard decode,
-        # and parquet output presence depends on probs
-        "args": ["probs", "per_hap_T", "n_T_buckets"],
+        # and parquet output presence depends on probs.
+        # priors_sha256 affects per-component T → transition matrix at
+        # decode, so a priors change must invalidate decode too.
+        "args": ["probs", "per_hap_T", "n_T_buckets", "priors_sha256"],
     },
     "tracts": {
         "fingerprint": [],
@@ -480,6 +483,23 @@ class WorkDir:
         # Sort keys for determinism, then hash the JSON repr
         canonical = json.dumps(kwargs, sort_keys=True, default=str)
         return hashlib.sha256(canonical.encode()).hexdigest()[:16]
+
+    @staticmethod
+    def hash_priors_file(path: str | Path | None) -> str | None:
+        """SHA-256 prefix of the priors YAML, or None when not supplied.
+
+        Used as a manifest dependency for the em + decode stages so that
+        any change to the priors file invalidates downstream artifacts.
+        """
+        if path is None:
+            return None
+        p = Path(path)
+        if not p.exists():
+            return None
+        h = hashlib.sha256()
+        with open(p, "rb") as f:
+            h.update(f.read())
+        return h.hexdigest()[:16]
 
     # ------------------------------------------------------------------
     # Stage save/load
