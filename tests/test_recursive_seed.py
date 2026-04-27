@@ -555,3 +555,40 @@ def test_excluded_samples_get_calls():
     # Check accuracy for excluded haplotypes is still reasonable
     metrics = evaluate_accuracy(result.calls, true_ancestry, n_leaves)
     assert metrics["overall_accuracy"] > 0.60
+
+
+def test_recursive_split_seed_is_reproducible():
+    """Two runs with the same rng_seed must produce identical leaf
+    labels.
+
+    Guards against the class of regressions that broke seeding
+    reproducibility: GPU non-deterministic atomics in scatter ops,
+    PRNGKey(0) fallbacks that swallowed the caller's key, dynamic
+    device-memory branching, hash()-based key derivation. If any of
+    those reappears, this test fails immediately.
+    """
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=2000, n_sites=1000, n_ancestries=3,
+        gen_since_admix=20, pure_fraction=0.3, rng_seed=42,
+    )
+
+    labels_a, info_a = recursive_split_seed(
+        chrom_data.geno,
+        min_cluster_size=500,
+        rng_seed=42,
+        chrom_data=chrom_data,
+    )
+    labels_b, info_b = recursive_split_seed(
+        chrom_data.geno,
+        min_cluster_size=500,
+        rng_seed=42,
+        chrom_data=chrom_data,
+    )
+
+    np.testing.assert_array_equal(labels_a, labels_b)
+    assert len(info_a) == len(info_b)
+    for a, b in zip(info_a, info_b):
+        assert a.label == b.label
+        assert a.n_haps == b.n_haps
+        assert a.depth == b.depth
+        assert a.path == b.path

@@ -194,8 +194,9 @@ def _find_pgen_files(
             pvar = _find_pvar_str(stem)
             psam = Path(stem + ".psam")
             if not psam.exists():
-                # Try shared .psam in directory
-                shared_psam = list(path.glob("*.psam"))
+                # Try shared .psam in directory. Sort so the choice is
+                # filesystem-order-independent and reproducible.
+                shared_psam = sorted(path.glob("*.psam"))
                 if shared_psam:
                     psam = shared_psam[0]
 
