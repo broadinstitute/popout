@@ -103,6 +103,46 @@ def test_priors_far_from_truth_pull_components(tmp_path):
     )
 
 
+def test_block_emissions_with_priors_runs_to_convergence(tmp_path):
+    """End-to-end: --block-emissions + --priors must run without raising
+    and must produce a per-comp T vector on the fitted model.
+
+    Regression test for the AoU 2026-04-27 crash where the block path
+    didn't populate switches_per_comp / d_weighted_occupancy on EMStats."""
+    true_T = 8.0
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=80, n_sites=200, n_ancestries=3,
+        gen_since_admix=int(true_T),
+        chrom_length_cm=40.0, rng_seed=44,
+    )
+
+    priors = _write_priors(tmp_path, """
+        morgans_per_step: 1.2e-4
+        components:
+          - {component_idx: 0, gen_mean: 5, gen_lo: 3, gen_hi: 9}
+          - {component_idx: 1, gen_mean: 5, gen_lo: 3, gen_hi: 9}
+          - {component_idx: 2, gen_mean: 5, gen_lo: 3, gen_hi: 9}
+    """)
+
+    # use_block_emissions=True is the path that crashed at AoU iter 2.
+    # We need n_em_iter ≥ 2 to exercise the M-step priors branch (T is
+    # frozen for iter 0).
+    res = run_em(
+        chrom_data, n_ancestries=3, n_em_iter=3, gen_since_admix=true_T,
+        rng_seed=0, priors=priors,
+        use_block_emissions=True, block_size=8,
+    )
+
+    assert res.model.gen_per_comp is not None
+    gpc = np.array(res.model.gen_per_comp)
+    assert gpc.shape == (3,)
+    # Sanity: each per-comp T is a finite, positive value in the clipping
+    # band [1, 1000]. This test deliberately does not pin specific
+    # numerics; the point is just that the priors M-step ran.
+    assert np.isfinite(gpc).all()
+    assert (gpc >= 1.0).all() and (gpc <= 1000.0).all()
+
+
 def test_priors_unprimed_components_use_mle(tmp_path):
     """A run with priors only on a subset of components: the unprimed
     ones inherit the bare MLE path, primed ones see the prior pull."""

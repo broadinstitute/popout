@@ -151,6 +151,93 @@ def test_em_stats_per_comp_switches_nonneg():
     assert (stats.switches_per_comp >= -1e-5).all()
 
 
+def _setup_block_em(n_samples, n_sites, A, gen, cm, rng_seed, block_size=8):
+    """Build geno, BlockData, and an initial AncestryModel with pattern_freq.
+
+    Mirrors the run_em block-emissions setup just enough to drive
+    forward_backward_blocks_em directly from a test.
+    """
+    from popout.blocks import pack_blocks, init_pattern_freq
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=n_samples, n_sites=n_sites, n_ancestries=A,
+        gen_since_admix=gen, chrom_length_cm=cm, rng_seed=rng_seed,
+    )
+    geno = chrom_data.geno
+    bd = pack_blocks(geno, block_size=block_size, pos_cm=chrom_data.pos_cm)
+    allele_freq = jnp.full((A, chrom_data.n_sites), 0.5)
+    pf = init_pattern_freq(allele_freq, bd, geno)
+    model = AncestryModel(
+        n_ancestries=A,
+        mu=jnp.full((A,), 1.0 / A),
+        gen_since_admix=float(gen),
+        allele_freq=allele_freq,
+        pattern_freq=pf,
+        block_data=bd,
+    )
+    return geno, model, bd, chrom_data
+
+
+def test_block_em_stats_have_per_comp_fields():
+    """forward_backward_blocks_em must populate switches_per_comp /
+    d_weighted_occupancy on EMStats. Total occupancy across components
+    equals (sum of block_distances) × H within rounding."""
+    from popout.hmm import forward_backward_blocks_em
+    geno, model, bd, chrom_data = _setup_block_em(
+        n_samples=80, n_sites=200, A=3, gen=8, cm=40.0, rng_seed=20,
+        block_size=8,
+    )
+    H = geno.shape[0]
+    A = model.n_ancestries
+
+    stats, _ = forward_backward_blocks_em(geno, model, bd, batch_size=H)
+
+    assert stats.switches_per_comp is not None
+    assert stats.switches_per_comp.shape == (A,)
+    assert stats.d_weighted_occupancy is not None
+    assert stats.d_weighted_occupancy.shape == (A,)
+
+    # γ at each block sums to 1 over A; pair with block_distances and sum
+    # across (h, b in 0..n_blocks-1) gives total_distance × H.
+    total_d = float(np.asarray(bd.block_distances).sum())
+    observed_total = float(stats.d_weighted_occupancy.sum())
+    expected = total_d * H
+    np.testing.assert_allclose(observed_total, expected, rtol=2e-3)
+
+
+def test_block_em_stats_per_comp_switches_nonneg():
+    """switches_per_comp[k] = Σ (γ - ξ_diag)[a=k] is always ≥ 0 in the
+    block path too."""
+    from popout.hmm import forward_backward_blocks_em
+    geno, model, bd, _ = _setup_block_em(
+        n_samples=60, n_sites=160, A=2, gen=15, cm=30.0, rng_seed=21,
+    )
+    stats, _ = forward_backward_blocks_em(geno, model, bd, batch_size=geno.shape[0])
+    assert (stats.switches_per_comp >= -1e-5).all()
+
+
+def test_block_em_stats_per_comp_invariant_to_batching():
+    """Splitting H into batches must give identical per-comp stats in the
+    block path (within float rounding)."""
+    from popout.hmm import forward_backward_blocks_em
+    geno, model, bd, _ = _setup_block_em(
+        n_samples=64, n_sites=120, A=3, gen=10, cm=30.0, rng_seed=22,
+        block_size=8,
+    )
+    H = geno.shape[0]
+
+    stats_full, _ = forward_backward_blocks_em(geno, model, bd, batch_size=H)
+    stats_split, _ = forward_backward_blocks_em(geno, model, bd, batch_size=16)
+
+    np.testing.assert_allclose(
+        stats_full.switches_per_comp, stats_split.switches_per_comp,
+        rtol=1e-3, atol=1e-3,
+    )
+    np.testing.assert_allclose(
+        stats_full.d_weighted_occupancy, stats_split.d_weighted_occupancy,
+        rtol=1e-3, atol=1e-3,
+    )
+
+
 def test_em_stats_per_comp_invariant_to_batching():
     """Splitting H into batches must give identical per-comp stats."""
     chrom_data, _, _ = simulate_admixed(

@@ -903,7 +903,8 @@ def forward_backward_blocks(
     block_data,
     *,
     compute_soft_switches: bool = False,
-) -> jnp.ndarray | tuple[jnp.ndarray, jnp.ndarray]:
+    compute_per_comp_stats: bool = False,
+) -> jnp.ndarray | tuple:
     """Forward-backward operating on block-level emissions.
 
     The scan iterates over blocks instead of sites. Emissions come from
@@ -915,12 +916,18 @@ def forward_backward_blocks(
     block_data : BlockData
     compute_soft_switches : if True, also return per-haplotype expected
         transition counts (soft switches) from block-boundary xi.
+    compute_per_comp_stats : if True, also return the per-component
+        sufficient statistics consumed by the priors M-step
+        (switches_per_comp, d_weighted_occupancy). Implies
+        compute_soft_switches semantically — uses the same xi_diag.
 
     Returns
     -------
     gamma_block : (H, n_blocks, A) — block-level posteriors
-        — or (gamma_block, soft_switches) when compute_soft_switches=True,
-        where soft_switches is (H,) float32.
+        — or (gamma_block, soft_switches) when only
+        compute_soft_switches=True, where soft_switches is (H,) float32.
+        — or (gamma_block, soft_switches, switches_per_comp,
+        d_weighted_occupancy) when compute_per_comp_stats=True.
     """
     log_emit = model.log_emission_block(block_data)  # (H, n_blocks, A)
     d_block = jnp.array(block_data.block_distances)   # (n_blocks-1,)
@@ -958,6 +965,12 @@ def forward_backward_blocks(
     log_betas = jnp.transpose(log_betas, (1, 0, 2))  # (H, n_blocks, A)
 
     gamma_block = posteriors(log_alphas, log_betas)
+
+    if compute_per_comp_stats:
+        soft_sw, sw_pc, occ_pc = _compute_block_xi_stats(
+            log_alphas, log_betas, log_emit, log_trans, d_block,
+        )
+        return gamma_block, soft_sw, sw_pc, occ_pc
     if compute_soft_switches:
         soft_sw = _compute_soft_switches_block(
             log_alphas, log_betas, log_emit, log_trans,
@@ -1105,6 +1118,83 @@ def _compute_soft_switches_block(
     xi_diag = jnp.exp(log_xi_diag - log_P[:, None, None])
     stay = xi_diag.sum(axis=2)                                 # (H, n_blocks-1)
     return jnp.clip(1.0 - stay, 0.0, 1.0).sum(axis=1)         # (H,)
+
+
+def _compute_block_xi_stats(
+    log_alpha_block: jnp.ndarray,   # (H, n_blocks, A)
+    log_beta_block: jnp.ndarray,    # (H, n_blocks, A)
+    log_emit_block: jnp.ndarray,    # (H, n_blocks, A)
+    log_trans_block: jnp.ndarray,   # (n_blocks-1, A, A)
+    block_distances: jnp.ndarray,   # (n_blocks-1,)
+) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """Block-path xi reductions: soft switches + per-component stats.
+
+    Same xi_diag computation as :func:`_compute_soft_switches_block`,
+    extended with two `(A,)`-shape reductions consumed by the priors
+    M-step:
+
+      switches_per_comp[a] = Σ_{h, b} (γ_block[h, b, a] − ξ_diag[h, b, a])
+      d_weighted_occupancy[a] = Σ_{h, b} block_distances[b] · γ_block[h, b, a]
+
+    Both summed over block boundaries b ∈ [0, n_blocks-1). The last
+    block has no outgoing transition, so it contributes 0 to both —
+    matches the padding-zero convention used by
+    :func:`_streaming_em_checkpointed`.
+
+    Returns
+    -------
+    soft_switches : (H,) — per-haplotype expected transitions
+    switches_per_comp : (A,) — Σ_{h,b} (γ − ξ_diag)
+    d_weighted_occupancy : (A,) — Σ_{h,b} d_block · γ
+    """
+    H, n_blocks, A = log_alpha_block.shape
+
+    # Block-level posteriors. Same reduction as :func:`posteriors`.
+    log_gamma = log_alpha_block + log_beta_block
+    log_norm = jax.nn.logsumexp(log_gamma, axis=2, keepdims=True)
+    gamma_block = jnp.exp(log_gamma - log_norm)  # (H, n_blocks, A)
+
+    if n_blocks <= 1:
+        return (
+            jnp.zeros(H),
+            jnp.zeros(A),
+            jnp.zeros(A),
+        )
+
+    log_P = jax.nn.logsumexp(
+        log_alpha_block[:, 0, :] + log_beta_block[:, 0, :], axis=1,
+    )  # (H,)
+    log_trans_diag = jnp.diagonal(log_trans_block, axis1=1, axis2=2)  # (n_blocks-1, A)
+
+    log_xi_diag = (
+        log_alpha_block[:, :-1, :]
+        + log_trans_diag[None, :, :]
+        + log_emit_block[:, 1:, :]
+        + log_beta_block[:, 1:, :]
+    )  # (H, n_blocks-1, A)
+    xi_diag = jnp.exp(log_xi_diag - log_P[:, None, None])
+
+    # soft_switches: (H,) — sum over (b, a) of (1 - xi_diag.sum(a))
+    stay = xi_diag.sum(axis=2)                                  # (H, n_blocks-1)
+    soft_switches = jnp.clip(1.0 - stay, 0.0, 1.0).sum(axis=1)  # (H,)
+
+    # switches_per_comp: (A,) — γ at boundary b minus ξ_diag at b,
+    # summed over (h, b). γ at the last block contributes 0 because
+    # ξ_diag is undefined there; we pair γ_block[:, :-1, :] with
+    # xi_diag.
+    switches_per_comp = (
+        gamma_block[:, :-1, :] - xi_diag
+    ).sum(axis=(0, 1))  # (A,)
+
+    # d_weighted_occupancy: (A,) — γ_block weighted by block_distances.
+    # Pair γ at boundary b with d_block[b]; last block has no outgoing
+    # distance and contributes 0.
+    d = block_distances.astype(gamma_block.dtype)
+    d_weighted_occupancy = jnp.einsum(
+        'hba,b->a', gamma_block[:, :-1, :], d,
+    )
+
+    return soft_switches, switches_per_comp, d_weighted_occupancy
 
 
 def forward_backward(
@@ -1328,6 +1418,8 @@ def forward_backward_blocks_em(
     switch_sum = jnp.zeros(n_anc, dtype=jnp.float32)
     soft_switches_per_hap = _np.zeros(H_total, dtype=_np.float32)
     hard_switches_per_hap = _np.zeros(H_total, dtype=_np.int32)
+    switches_per_comp = _np.zeros(n_anc, dtype=_np.float64)
+    d_weighted_occupancy = _np.zeros(n_anc, dtype=_np.float64)
     _pf_counts = jnp.zeros((bd.n_blocks, bd.max_patterns, n_anc), dtype=jnp.float32)
 
     T_padded = bd.n_blocks * bd.block_size
@@ -1355,9 +1447,10 @@ def forward_backward_blocks_em(
             block_size=bd.block_size,
         )
         # E-step: block-level forward-backward → (chunk, n_blocks, A)
-        # plus density-invariant soft switches (H,) for per-hap-T.
-        gb_chunk, sw_chunk = forward_backward_blocks(
-            b_model, bd_chunk, compute_soft_switches=True,
+        # plus density-invariant soft switches (H,) for per-hap-T and
+        # per-component xi reductions (A,) for the priors M-step.
+        gb_chunk, sw_chunk, sw_pc_chunk, occ_pc_chunk = forward_backward_blocks(
+            b_model, bd_chunk, compute_per_comp_stats=True,
         )
         geno_chunk = jnp.asarray(geno_np, dtype=jnp.float32)
 
@@ -1389,6 +1482,12 @@ def forward_backward_blocks_em(
         # consumed by update_generations_per_hap_from_stats.
         soft_switches_per_hap[batch_idx] = _np.asarray(sw_chunk)
 
+        # Per-component reductions consumed by the priors M-step. Sum
+        # across (bucket, batch) the same way mu_sum and weighted_counts
+        # do — priors are not bucket-aware, so this is just total mass.
+        switches_per_comp += _np.asarray(sw_pc_chunk, dtype=_np.float64)
+        d_weighted_occupancy += _np.asarray(occ_pc_chunk, dtype=_np.float64)
+
         # Hard switches: only at block boundaries (within-block
         # gamma is constant). Used for switch_sum ancestry
         # attribution and the legacy switches_per_hap field.
@@ -1413,6 +1512,7 @@ def forward_backward_blocks_em(
 
         weighted_counts.block_until_ready()
         del gb_chunk, geno_chunk, geno_blocked, calls_block, pat_idx_chunk, sw_chunk
+        del sw_pc_chunk, occ_pc_chunk
 
     em_stats = EMStats(
         weighted_counts=weighted_counts,
@@ -1423,6 +1523,8 @@ def forward_backward_blocks_em(
         soft_switches_per_hap=soft_switches_per_hap,
         n_haps=H_total,
         n_sites=T_sites,
+        switches_per_comp=switches_per_comp,
+        d_weighted_occupancy=d_weighted_occupancy,
     )
     return em_stats, _pf_counts
 

@@ -56,9 +56,13 @@ def test_run_em_per_hap_T_with_block_emissions_uses_buckets(monkeypatch):
     iter_buf: list[float] = []
     real_fb_blocks = hmm_mod.forward_backward_blocks
 
-    def spy(model, bd, *, compute_soft_switches=False):
+    def spy(model, bd, *, compute_soft_switches=False, compute_per_comp_stats=False):
         iter_buf.append(float(model.gen_since_admix))
-        return real_fb_blocks(model, bd, compute_soft_switches=compute_soft_switches)
+        return real_fb_blocks(
+            model, bd,
+            compute_soft_switches=compute_soft_switches,
+            compute_per_comp_stats=compute_per_comp_stats,
+        )
 
     # Patch on hmm.py — the new forward_backward_blocks_em (extracted in
     # the housekeeping refactor) calls forward_backward_blocks via the
