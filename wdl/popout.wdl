@@ -50,6 +50,14 @@ task popout_task {
     String? restart_stage                          # seed, em, decode, tracts, or all
     Boolean no_checkpoint            = false
 
+    # Reproducibility mode — passed through to popout's --reproducible.
+    # off: no XLA determinism (default; fastest).
+    # seeding: spawn a deterministic seeding subprocess, then run EM at
+    #   full speed via checkpoint resume (requires no_checkpoint=false).
+    # all: force XLA determinism for the whole run (EM ~50× slower at
+    #   biobank scale; only when bit-exact EM is required).
+    String  reproducible             = "off"
+
     String  extra_args               = ""
 
     # Weights & Biases — API key string or gs:// URL to a file containing it
@@ -99,28 +107,29 @@ task popout_task {
     # ---- GPU check ----
     nvidia-smi || echo "WARNING: nvidia-smi failed"
 
-    # ---- Determinism / reproducibility environment ----
-    # Set BEFORE any python invocation so child processes inherit it.
-    # PYTHONHASHSEED in particular is read at interpreter startup and
-    # cannot be retrofitted; popout will warn if it sees a non-zero
-    # value here.
+    # ---- Reproducibility / determinism environment ----
+    # Set BEFORE any python invocation so popout (and any subprocess it
+    # spawns for --reproducible=seeding) inherit these.
+    #
+    # PYTHONHASHSEED is read at interpreter startup and cannot be
+    # retrofitted; popout will warn if it sees a non-zero value here.
     #
     # XLA_FLAGS:
     #   --xla_gpu_enable_triton_gemm=false — Triton autotuner fails on
     #     some A100 driver combos ("All configs failed during profiling
     #     / WRONG RESULTS"); cuBLAS is equally fast for popout shapes.
-    #   --xla_gpu_deterministic_ops=true — forces deterministic GPU
-    #     scatter/reduction ordering. Without this, parallel atomicAdd
-    #     in HMM forward-backward EM produces run-to-run float drift
-    #     that flips ancestry-pool partitions even with a fixed --seed.
-    export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_triton_gemm=false --xla_gpu_deterministic_ops=true"
+    #
+    # Note: --xla_gpu_deterministic_ops is NOT set globally because it
+    # serializes parallel atomicAdd and slows the block-emissions E-step
+    # ~50× at biobank scale. popout opts in via --reproducible=seeding
+    # (subprocess-scoped) or --reproducible=all (process-wide).
+    export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_triton_gemm=false"
     export PYTHONHASHSEED=0
 
-    # Sanity-check the env at the point where popout will inherit it,
-    # and surface the values in run logs for forensic traceability.
-    echo "=== Determinism env (must appear before 'Running: popout ...') ==="
+    echo "=== Reproducibility env (must appear before 'Running: popout ...') ==="
     echo "  PYTHONHASHSEED=${PYTHONHASHSEED}"
     echo "  XLA_FLAGS=${XLA_FLAGS}"
+    echo "  reproducible=~{reproducible}"
     if [ "${PYTHONHASHSEED}" != "0" ]; then
       echo "ERROR: PYTHONHASHSEED is '${PYTHONHASHSEED}', expected '0'." >&2
       echo "Refusing to launch popout: hash-based key derivation would not be reproducible." >&2
@@ -152,6 +161,7 @@ task popout_task {
     ~{if defined(ancestry_names) then 'CMD="$CMD --ancestry-names ~{ancestry_names}"' else ''}
 
     CMD="$CMD --seed-method ~{seed_method}"
+    CMD="$CMD --reproducible ~{reproducible}"
     CMD="$CMD --recursive-merge-hellinger ~{recursive_merge_hellinger}"
     CMD="$CMD --recursive-max-leaves ~{recursive_max_leaves}"
     CMD="$CMD --recursive-min-leaf-size ~{recursive_min_leaf_size}"

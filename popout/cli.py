@@ -30,16 +30,15 @@ for _var in (
     "NUMEXPR_NUM_THREADS",
 ):
     _os.environ.setdefault(_var, _n_threads)
+del _os, _cpu_count, _n_threads, _var
 
-# XLA determinism. MUST run before jax import — XLA latches flags at
-# initialization. Without this, GPU scatter (.at[].add) accumulates via
-# parallel atomicAdd in non-deterministic order, producing different
-# float32 sums across runs even with a fixed --seed. Affects
-# forward_backward_em on the recursive-seeding path.
-_xla = _os.environ.get("XLA_FLAGS", "")
-if "--xla_gpu_deterministic_ops" not in _xla:
-    _os.environ["XLA_FLAGS"] = (_xla + " --xla_gpu_deterministic_ops=true").strip()
-del _os, _cpu_count, _n_threads, _var, _xla
+# Note: GPU determinism is opt-in via --reproducible={seeding,all}.
+# When enabled, XLA_FLAGS is set BEFORE jax import inside main(). The
+# flag is *not* set globally because --xla_gpu_deterministic_ops=true
+# serializes parallel atomicAdd in scatter ops, slowing the block-emissions
+# E-step by ~50× at biobank scale (measured: 67s/iter → 63min/iter on
+# 1M haps × 25k sites × 19 ancestries). See _enable_xla_determinism and
+# _spawn_deterministic_seeding below.
 
 import argparse
 import datetime
@@ -147,6 +146,102 @@ def load_seeding_exclusion_list(path: str) -> set[str]:
     return set(ids)
 
 
+_XLA_DETERMINISM_FLAG = "--xla_gpu_deterministic_ops=true"
+
+
+def _peek_reproducible(raw_args: list[str]) -> str:
+    """Pre-parse --reproducible without invoking the full argparse.
+
+    Must run before any popout/jax import so we can decide whether to
+    set XLA_FLAGS or spawn a deterministic seeding subprocess.
+    """
+    p = argparse.ArgumentParser(add_help=False)
+    p.add_argument(
+        "--reproducible",
+        choices=["off", "seeding", "all"],
+        default="off",
+    )
+    args, _ = p.parse_known_args(raw_args)
+    return args.reproducible
+
+
+def _enable_xla_determinism() -> None:
+    """Set XLA_FLAGS so JAX init picks up deterministic GPU ops."""
+    cur = os.environ.get("XLA_FLAGS", "")
+    if _XLA_DETERMINISM_FLAG not in cur:
+        os.environ["XLA_FLAGS"] = (cur + " " + _XLA_DETERMINISM_FLAG).strip()
+    print(
+        f"=== Reproducibility: XLA_FLAGS={os.environ['XLA_FLAGS']!r}",
+        file=sys.stderr,
+    )
+
+
+def _spawn_deterministic_seeding(raw_args: list[str]) -> None:
+    """Run the seeding stage in a child process with XLA determinism on,
+    then return so the parent can run EM at full speed.
+
+    The child writes a seed checkpoint; when the parent continues normal
+    main() execution, the checkpoint short-circuits the seeding stage
+    and EM picks up from there (without the XLA flag, so no slowdown).
+    Requires checkpointing to be on.
+    """
+    if "--no-checkpoint" in raw_args:
+        print(
+            "ERROR: --reproducible=seeding requires checkpointing. "
+            "Either drop --no-checkpoint, or use --reproducible=all "
+            "(slower but works without checkpoints).",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    # Strip --reproducible from child args so the child doesn't recurse
+    # into another spawn; the child's determinism comes from XLA_FLAGS.
+    child_args: list[str] = []
+    skip_next = False
+    for a in raw_args:
+        if skip_next:
+            skip_next = False
+            continue
+        if a == "--reproducible":
+            skip_next = True
+            continue
+        if a.startswith("--reproducible="):
+            continue
+        child_args.append(a)
+    if "--stop-after-seeding" not in child_args:
+        child_args.append("--stop-after-seeding")
+
+    env = os.environ.copy()
+    cur_xla = env.get("XLA_FLAGS", "")
+    if _XLA_DETERMINISM_FLAG not in cur_xla:
+        env["XLA_FLAGS"] = (cur_xla + " " + _XLA_DETERMINISM_FLAG).strip()
+
+    print(
+        ">>> [reproducible=seeding] Stage 1/2: deterministic seeding subprocess",
+        file=sys.stderr,
+    )
+    print(
+        f"    child env XLA_FLAGS={env['XLA_FLAGS']!r}",
+        file=sys.stderr,
+    )
+    rc = subprocess.run(
+        [sys.executable, "-m", "popout", *child_args],
+        env=env,
+    ).returncode
+    if rc != 0:
+        print(
+            f"ERROR: deterministic seeding subprocess exited {rc}; "
+            "not continuing to EM stage.",
+            file=sys.stderr,
+        )
+        sys.exit(rc)
+    print(
+        ">>> [reproducible=seeding] Stage 2/2: continuing with EM at full speed "
+        "(seed checkpoint will be reused)",
+        file=sys.stderr,
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     # Dispatch subcommands before parsing main args
     raw_args = argv if argv is not None else sys.argv[1:]
@@ -194,6 +289,19 @@ def main(argv: list[str] | None = None) -> None:
     if raw_args and raw_args[0] == "convert":
         _cmd_convert(raw_args[1:])
         return
+
+    # Reproducibility dispatch — must run BEFORE any popout/jax import
+    # in this process. Sets XLA_FLAGS or spawns a deterministic seeding
+    # subprocess as appropriate.
+    _repro = _peek_reproducible(raw_args)
+    if _repro == "all":
+        _enable_xla_determinism()
+    elif _repro == "seeding":
+        _spawn_deterministic_seeding(raw_args)
+        # Subprocess wrote the seed checkpoint; fall through and continue
+        # main() in this parent at full speed (XLA flag NOT set here).
+        # The checkpoint will short-circuit the seeding stage when EM
+        # reaches it.
 
     parser = argparse.ArgumentParser(
         description="GPU-accelerated self-bootstrapping local ancestry inference",
@@ -358,6 +466,18 @@ def main(argv: list[str] | None = None) -> None:
         "--stop-after-seeding", action="store_true",
         help="Exit after recursive seeding and Stage 1 model init, before "
              "starting EM iterations.",
+    )
+
+    parser.add_argument(
+        "--reproducible",
+        choices=["off", "seeding", "all"],
+        default="off",
+        help="GPU determinism mode. off (default): no XLA determinism, "
+             "fastest. seeding: spawn a deterministic seeding subprocess "
+             "(~30%% slower than baseline), then run EM at full speed via "
+             "checkpoint resume; requires checkpointing on. all: force "
+             "XLA determinism for the whole run (EM E-step ~50× slower at "
+             "biobank scale; only use when bit-exact EM matters).",
     )
 
     # --- Checkpoint / resume ---
