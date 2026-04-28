@@ -161,6 +161,7 @@ task popout_task {
     ~{if write_dense_decode then 'CMD="$CMD --write-dense-decode"' else ''}
     ~{if defined(ancestry_names) then 'CMD="$CMD --ancestry-names ~{ancestry_names}"' else ''}
     ~{if defined(priors_yaml) then 'CMD="$CMD --priors ~{priors_yaml}"' else ''}
+    ~{if defined(priors_yaml) then 'CMD="$CMD --priors-dump-assignments ~{output_prefix}.priors_assignments.tsv"' else ''}
 
     CMD="$CMD --seed-method ~{seed_method}"
     CMD="$CMD --reproducible ~{reproducible}"
@@ -228,6 +229,12 @@ task popout_task {
 
     # Post-EM consolidation report (produced when post_em_consolidation = true)
     File? consolidation_report = "~{output_prefix}.post_em_consolidation.tsv"
+
+    # Priors-to-component assignment audit TSV (produced when priors_yaml is set).
+    # Rows: prior names. Cols: component indices, with a comment row
+    # annotating each component's nearest 1KG superpop. The diagnostic
+    # file for verifying that priors landed on the right components.
+    File? priors_assignments = "~{output_prefix}.priors_assignments.tsv"
   }
 
   runtime {
@@ -360,5 +367,7 @@ workflow popout {
     Array[File] decode_parquet = popout_task.decode_parquet
 
     File? consolidation_report = popout_task.consolidation_report
+
+    File? priors_assignments = popout_task.priors_assignments
   }
 }
