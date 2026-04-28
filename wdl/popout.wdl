@@ -100,10 +100,33 @@ task popout_task {
     # ---- GPU check ----
     nvidia-smi || echo "WARNING: nvidia-smi failed"
 
-    # Disable Triton GEMM autotuner — fails on some A100 driver combos
-    # with "All configs failed during profiling / WRONG RESULTS". cuBLAS
-    # fallback is equally fast for the matmul shapes popout uses.
-    export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_triton_gemm=false"
+    # ---- Determinism / reproducibility environment ----
+    # Set BEFORE any python invocation so child processes inherit it.
+    # PYTHONHASHSEED in particular is read at interpreter startup and
+    # cannot be retrofitted; popout will warn if it sees a non-zero
+    # value here.
+    #
+    # XLA_FLAGS:
+    #   --xla_gpu_enable_triton_gemm=false — Triton autotuner fails on
+    #     some A100 driver combos ("All configs failed during profiling
+    #     / WRONG RESULTS"); cuBLAS is equally fast for popout shapes.
+    #   --xla_gpu_deterministic_ops=true — forces deterministic GPU
+    #     scatter/reduction ordering. Without this, parallel atomicAdd
+    #     in HMM forward-backward EM produces run-to-run float drift
+    #     that flips ancestry-pool partitions even with a fixed --seed.
+    export XLA_FLAGS="${XLA_FLAGS:-} --xla_gpu_enable_triton_gemm=false --xla_gpu_deterministic_ops=true"
+    export PYTHONHASHSEED=0
+
+    # Sanity-check the env at the point where popout will inherit it,
+    # and surface the values in run logs for forensic traceability.
+    echo "=== Determinism env (must appear before 'Running: popout ...') ==="
+    echo "  PYTHONHASHSEED=${PYTHONHASHSEED}"
+    echo "  XLA_FLAGS=${XLA_FLAGS}"
+    if [ "${PYTHONHASHSEED}" != "0" ]; then
+      echo "ERROR: PYTHONHASHSEED is '${PYTHONHASHSEED}', expected '0'." >&2
+      echo "Refusing to launch popout: hash-based key derivation would not be reproducible." >&2
+      exit 1
+    fi
 
     # ---- Restore work directory from a previous run (for resume) ----
     RESUME_TAR="~{default="" resume_work_dir}"

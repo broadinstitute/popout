@@ -65,7 +65,8 @@ def _geno_sub_pca(
     max_snps: int = 10_000,
     max_haps_svd: int = 100_000,
     projection_batch: int = 50_000,
-    key: jax.Array | None = None,
+    *,
+    key: jax.Array,
 ) -> jnp.ndarray:
     """Patterson-normalised PCA on a genotype subset.
 
@@ -77,8 +78,6 @@ def _geno_sub_pca(
     -------
     proj : (H_sub, n_components) — PCA projection
     """
-    if key is None:
-        key = jax.random.PRNGKey(0)
     proj, _S, _key = _genotypes_to_pca_projection(
         geno, n_components, key,
         max_snps=max_snps,
@@ -432,6 +431,7 @@ def recursive_split_seed(
         # Build seed responsibilities from GMM labels
         seed_resp_k2 = jax.nn.one_hot(selected_labels, 2, dtype=jnp.float32)
 
+        key, subkey = jax.random.split(key)
         t_em_start = time.perf_counter()
         child_labels = _run_k2_em_split(
             geno, node.indices, chrom_data,
@@ -439,6 +439,7 @@ def recursive_split_seed(
             n_iter=em_iter_per_split,
             gen_since_admix=gen_since_admix,
             seed_resp=seed_resp_k2,
+            rng_key=subkey,
         )
         t_em = time.perf_counter() - t_em_start
         log.info("node %s depth=%d n=%d: prep=%.1fs em=%.1fs",
@@ -931,7 +932,11 @@ def _run_k2_em_split(
     else:
         from .spectral import seed_ancestry_soft
         if rng_key is None:
-            rng_key = jax.random.PRNGKey(0)
+            raise ValueError(
+                "_run_k2_em_split: rng_key is required when seed_resp is None "
+                "(spectral fallback path). Pass a freshly split subkey from "
+                "the caller's PRNG chain."
+            )
         derived_seed = int(jax.random.bits(rng_key, dtype=jnp.uint32))
         sub_geno = _sub_geno(geno, indices)
         _labels, resp, _n_anc, _proj = seed_ancestry_soft(

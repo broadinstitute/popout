@@ -8,6 +8,7 @@ objects that are consumed by the same downstream output and panel-export code.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Optional
 
@@ -393,8 +394,15 @@ def run_cnn_genome(
                 batch_size=cnn_batch_size,
             )
 
-            # Fine-tune CNN for 1 epoch
-            key = jax.random.PRNGKey(rng_seed + hash(chrom_data.chrom) % 2**31)
+            # Fine-tune CNN for 1 epoch.
+            # Use a stable digest of the chromosome name. Python's builtin
+            # hash() is salted by PYTHONHASHSEED — different processes
+            # produce different keys, breaking reproducibility.
+            chrom_int = int.from_bytes(
+                hashlib.sha256(str(chrom_data.chrom).encode()).digest()[:4],
+                "big",
+            ) & 0x7fffffff
+            key = jax.random.fold_in(jax.random.PRNGKey(rng_seed), chrom_int)
             crf_loss_fn = None
             if use_crf and crf_params_fitted is not None:
                 from .crf import crf_soft_loss

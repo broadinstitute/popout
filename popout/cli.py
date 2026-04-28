@@ -30,7 +30,16 @@ for _var in (
     "NUMEXPR_NUM_THREADS",
 ):
     _os.environ.setdefault(_var, _n_threads)
-del _os, _cpu_count, _n_threads, _var
+
+# XLA determinism. MUST run before jax import — XLA latches flags at
+# initialization. Without this, GPU scatter (.at[].add) accumulates via
+# parallel atomicAdd in non-deterministic order, producing different
+# float32 sums across runs even with a fixed --seed. Affects
+# forward_backward_em on the recursive-seeding path.
+_xla = _os.environ.get("XLA_FLAGS", "")
+if "--xla_gpu_deterministic_ops" not in _xla:
+    _os.environ["XLA_FLAGS"] = (_xla + " --xla_gpu_deterministic_ops=true").strip()
+del _os, _cpu_count, _n_threads, _var, _xla
 
 import argparse
 import datetime
@@ -143,6 +152,20 @@ def main(argv: list[str] | None = None) -> None:
     raw_args = argv if argv is not None else sys.argv[1:]
 
     _boot_banner(raw_args)
+
+    # PYTHONHASHSEED must be set in the shell before Python starts; once
+    # the interpreter is up, str-hash randomization is already
+    # initialized and assigning to os.environ here is too late. Warn
+    # loudly when it's unset so reproducibility-critical runs don't
+    # silently drift if a hash() leak ever reappears.
+    _hashseed = os.environ.get("PYTHONHASHSEED")
+    if _hashseed != "0":
+        print(
+            f"WARNING: PYTHONHASHSEED={_hashseed!r} (expected '0'). "
+            "Set `export PYTHONHASHSEED=0` before invoking popout for "
+            "reproducible runs across processes.",
+            file=sys.stderr,
+        )
 
     if raw_args and raw_args[0] == "report":
         from .report import report_main
