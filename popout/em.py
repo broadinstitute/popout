@@ -299,13 +299,15 @@ def write_priors_assignment_dump(
     priors,
     model,
     chrom_data,
+    *,
+    superpop_freqs: str | None = None,
 ) -> None:
     """Write the (P, K) prior→component assignment matrix as TSV.
 
     Header rows
     -----------
     1. ``# nearest_1KG`` line — per-component nearest 1KG superpop label
-       (or ``-`` if the 1KG reference cache is not populated).
+       (or ``-`` if the 1KG superpop-freqs cache is not populated).
     2. Column header: ``prior\\tcomp_0\\tcomp_1\\t...``.
 
     Each subsequent row is one prior's name plus its softmax weights.
@@ -316,7 +318,9 @@ def write_priors_assignment_dump(
     EUR-bearing component) would have shown its mismatch instantly.
     """
     P, K = assignment.shape
-    annotations = _annotate_components_with_1kg(model, chrom_data)
+    annotations = _annotate_components_with_1kg(
+        model, chrom_data, superpop_freqs=superpop_freqs,
+    )
     annot_strs = [
         annotations.get(k, ("-", float("nan"))) for k in range(K)
     ]
@@ -340,29 +344,35 @@ def write_priors_assignment_dump(
 
 
 def _annotate_components_with_1kg(
-    model, chrom_data,
+    model, chrom_data, *, superpop_freqs: str | None = None,
 ) -> dict[int, tuple[str, float]]:
     """Map component_idx → (nearest 1KG superpop name, correlation).
 
     Uses the same site-aligned Pearson correlation as ``popout label``.
-    Returns ``("-", NaN)`` per component if the 1KG cache is missing or
-    no positions overlap.
+    Returns ``("-", NaN)`` per component if the 1KG superpop-freqs cache
+    is missing or no positions overlap. ``superpop_freqs`` overrides the
+    cached lookup when supplied (Terra-localized TSV path).
     """
     try:
-        from .fetch_ref import load_ref_frequencies, resolve_ref_path
+        from .fetch_superpop_freqs import (
+            load_superpop_frequencies,
+            resolve_superpop_freqs_path,
+        )
         from .label import _correlation_matrix
     except Exception:
         return {k: ("-", float("nan")) for k in range(int(model.n_ancestries))}
 
     K = int(model.n_ancestries)
     try:
-        ref_path = resolve_ref_path("GRCh38")
+        superpop_freqs_path = resolve_superpop_freqs_path(
+            "GRCh38", arg=superpop_freqs,
+        )
     except FileNotFoundError:
         return {k: ("-", float("nan")) for k in range(K)}
 
     try:
-        ref_freq, ref_pos, ref_names = load_ref_frequencies(
-            ref_path, chrom=str(chrom_data.chrom),
+        ref_freq, ref_pos, ref_names = load_superpop_frequencies(
+            superpop_freqs_path, chrom=str(chrom_data.chrom),
         )
     except Exception:
         return {k: ("-", float("nan")) for k in range(K)}
@@ -645,6 +655,7 @@ def run_em(
     skip_decode: bool = False,
     priors=None,  # popout.prior_spec.Priors | None
     priors_dump_path: Optional[str] = None,
+    superpop_freqs: Optional[str] = None,
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -914,7 +925,7 @@ def run_em(
     if priors_dump_path is not None and last_priors_assignment is not None:
         write_priors_assignment_dump(
             priors_dump_path, last_priors_assignment, priors, model,
-            chrom_data,
+            chrom_data, superpop_freqs=superpop_freqs,
         )
 
     # --- Skip decode if no EM iterations or skip_decode requested ---
@@ -1420,6 +1431,7 @@ def run_em_genome(
     work_dir=None,
     priors=None,  # popout.prior_spec.Priors | None
     priors_dump_path: Optional[str] = None,
+    superpop_freqs: Optional[str] = None,
 ) -> list[AncestryResult] | None:
     """Run self-bootstrapping LAI across all chromosomes.
 
@@ -1603,6 +1615,7 @@ def run_em_genome(
                     skip_decode=True,
                     priors=priors,
                     priors_dump_path=priors_dump_path,
+                    superpop_freqs=superpop_freqs,
                 )
                 fitted_model = result.model
 

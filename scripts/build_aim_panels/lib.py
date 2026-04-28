@@ -57,10 +57,10 @@ class FreqRow:
         )
 
 
-def iter_1kg_rows(ref_path: Path) -> Iterator[FreqRow]:
+def iter_1kg_rows(superpop_freqs_path: Path) -> Iterator[FreqRow]:
     """Stream parsed rows from the 1KG TSV (gzipped or plain)."""
-    opener = gzip.open if ref_path.suffix == ".gz" else open
-    with opener(ref_path, "rt") as f:
+    opener = gzip.open if superpop_freqs_path.suffix == ".gz" else open
+    with opener(superpop_freqs_path, "rt") as f:
         reader = csv.reader(f, delimiter="\t")
         for row in reader:
             if not row or row[0].startswith("#"):

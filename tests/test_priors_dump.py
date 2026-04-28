@@ -77,12 +77,14 @@ def test_dump_handles_missing_1kg_cache(tmp_path, monkeypatch):
     """When the 1KG cache isn't populated, the annotation row falls
     back to '-' and the dump still writes."""
     # Force the 1KG resolver to fail.
-    from popout import fetch_ref
+    from popout import fetch_superpop_freqs
 
     def _missing(*args, **kwargs):
         raise FileNotFoundError("test stub: cache missing")
 
-    monkeypatch.setattr(fetch_ref, "resolve_ref_path", _missing)
+    monkeypatch.setattr(
+        fetch_superpop_freqs, "resolve_superpop_freqs_path", _missing,
+    )
 
     P, K = 2, 3
     assignment = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])

@@ -35,6 +35,7 @@ task popout_task {
     Boolean write_dense_decode = false
     String? ancestry_names      # comma list or gs:// URL to a TSV
     File?   priors_yaml         # per-component T priors (mutex with --per-hap-T)
+    File?   superpop_freqs      # 1KG superpop allele-frequency TSV (1kg_superpop_freq.tsv.gz)
 
     # Recursive seeding (--seed-method recursive)
     String  seed_method              = "gmm"
@@ -162,6 +163,7 @@ task popout_task {
     ~{if defined(ancestry_names) then 'CMD="$CMD --ancestry-names ~{ancestry_names}"' else ''}
     ~{if defined(priors_yaml) then 'CMD="$CMD --priors ~{priors_yaml}"' else ''}
     ~{if defined(priors_yaml) then 'CMD="$CMD --priors-dump-assignments ~{output_prefix}.priors_assignments.tsv"' else ''}
+    ~{if defined(superpop_freqs) then 'CMD="$CMD --superpop-freqs ~{superpop_freqs}"' else ''}
 
     CMD="$CMD --seed-method ~{seed_method}"
     CMD="$CMD --reproducible ~{reproducible}"
@@ -272,6 +274,7 @@ workflow popout {
     Boolean write_dense_decode = false
     String? ancestry_names
     File?   priors_yaml
+    File?   superpop_freqs
 
     # Recursive seeding
     String  seed_method              = "gmm"
@@ -321,6 +324,7 @@ workflow popout {
       write_dense_decode = write_dense_decode,
       ancestry_names     = ancestry_names,
       priors_yaml        = priors_yaml,
+      superpop_freqs     = superpop_freqs,
       seed_method               = seed_method,
       freeze_anchors_iters      = freeze_anchors_iters,
       recursive_merge_hellinger = recursive_merge_hellinger,

@@ -487,16 +487,24 @@ class WorkDir:
         return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
     @staticmethod
-    def hash_priors_bundle(path: str | Path | None) -> str | None:
+    def hash_priors_bundle(
+        path: str | Path | None,
+        *,
+        superpop_freqs: str | Path | None = None,
+    ) -> str | None:
         """Content-aware fingerprint covering the priors YAML *plus*
-        every referenced data file (AIM panel TSVs, 1KG ref TSV bytes).
+        every referenced data file (AIM panel TSVs, 1KG superpop-freqs
+        TSV bytes).
 
         Returned as a 16-char prefix of :attr:`Priors.fingerprint`.
 
         Used as a manifest dependency for the em + decode stages, so any
-        content change — to the YAML *or* to a panel/ref TSV — invalidates
-        downstream artifacts. The previous v1 hash covered only YAML
-        bytes and silently accepted stale panel content.
+        content change — to the YAML *or* to a panel/superpop-freqs TSV —
+        invalidates downstream artifacts. The previous v1 hash covered
+        only YAML bytes and silently accepted stale panel content.
+
+        ``superpop_freqs`` is forwarded to :func:`load_priors` so that
+        Terra-localized 1KG TSVs hash through the same path as runtime.
         """
         if path is None:
             return None
@@ -505,7 +513,7 @@ class WorkDir:
             return None
         from .prior_spec import load_priors
         try:
-            priors = load_priors(p)
+            priors = load_priors(p, superpop_freqs=superpop_freqs)
         except Exception:
             # Don't crash manifest construction over a malformed priors
             # file — caller validates separately and will surface the

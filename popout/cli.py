@@ -278,13 +278,13 @@ def main(argv: list[str] | None = None) -> None:
         from .label import label_main
         label_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] == "fetch-ref":
-        from .fetch_ref import fetch_ref_main
-        fetch_ref_main(raw_args[1:])
+    if raw_args and raw_args[0] == "fetch-superpop-freqs":
+        from .fetch_superpop_freqs import fetch_superpop_freqs_main
+        fetch_superpop_freqs_main(raw_args[1:])
         return
-    if raw_args and raw_args[0] == "build-ref":
-        from .build_ref import build_ref_main
-        build_ref_main(raw_args[1:])
+    if raw_args and raw_args[0] == "build-superpop-freqs":
+        from .build_superpop_freqs import build_superpop_freqs_main
+        build_superpop_freqs_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "convert":
         _cmd_convert(raw_args[1:])
@@ -399,6 +399,13 @@ def main(argv: list[str] | None = None) -> None:
              "component indices with their nearest-1KG-superpop "
              "annotation. The audit artifact for diagnosing "
              "prior-to-component mismatch — read this first.",
+    )
+    parser.add_argument(
+        "--superpop-freqs", type=str, default=None, metavar="PATH",
+        help="Path to the 1KG superpop allele-frequency TSV "
+             "(1kg_superpop_freq.tsv.gz). When set, overrides the cached "
+             "lookup at ~/.popout/superpop_freqs/{genome}/. Used by the "
+             "WDL/Terra pipeline where the cache is not pre-populated.",
     )
     parser.add_argument(
         "--block-emissions", action="store_true",
@@ -836,7 +843,9 @@ def main(argv: list[str] | None = None) -> None:
                 "probs": args.probs,
                 "per_hap_T": args.per_hap_T,
                 "n_T_buckets": args.n_T_buckets,
-                "priors_fingerprint": WorkDir.hash_priors_bundle(args.priors),
+                "priors_fingerprint": WorkDir.hash_priors_bundle(
+                    args.priors, superpop_freqs=args.superpop_freqs,
+                ),
             },
             restart_stage=args.restart_stage,
         )
@@ -887,7 +896,9 @@ def main(argv: list[str] | None = None) -> None:
         priors_obj = None
         if args.priors is not None:
             from .prior_spec import load_priors
-            priors_obj = load_priors(args.priors)
+            priors_obj = load_priors(
+                args.priors, superpop_freqs=args.superpop_freqs,
+            )
             log.info(
                 "Loaded priors from %s: %d priors, morgans_per_step=%g, "
                 "fingerprint=%s…",
@@ -919,6 +930,7 @@ def main(argv: list[str] | None = None) -> None:
             work_dir=work_dir,
             priors=priors_obj,
             priors_dump_path=args.priors_dump_assignments,
+            superpop_freqs=args.superpop_freqs,
         )
 
     t_compute = time.perf_counter() - t0

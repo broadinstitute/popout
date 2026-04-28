@@ -8,7 +8,7 @@ population" contract.
 
 Reference frequencies for AFR, EUR, EAS, AMR, and SAS come from the
 1KG Phase 3 TSV at ``~/.popout/ref/GRCh38/1kg_superpop_freq.tsv.gz``
-(populated via ``popout fetch-ref`` or by symlinking a built ref).
+(populated via ``popout fetch-superpop-freqs`` or by symlinking a built freqs TSV).
 
 MID has no 1KG superpop reference. The MID test reference at
 ``tests/data/aim_panels/mid_reference.tsv`` ships per-locus MID
@@ -32,7 +32,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from popout.fetch_ref import resolve_ref_path
+from popout.fetch_superpop_freqs import resolve_superpop_freqs_path
 from popout.identity import (
     AIMPanel,
     AIMSignature,
@@ -72,13 +72,13 @@ def _load_1kg_lookup(panel_positions: set[tuple[str, int]]) -> dict[
     import csv
     import gzip
 
-    ref_path = resolve_ref_path()
+    superpop_freqs_path = resolve_superpop_freqs_path()
     by_pos: dict[tuple[str, int], dict[str, float]] = {}
     by_chrom: dict[str, list[int]] = defaultdict(list)
     pops_order = ("EUR", "EAS", "AMR", "AFR", "SAS")
 
-    opener = gzip.open if ref_path.suffix == ".gz" else open
-    with opener(ref_path, "rt") as f:
+    opener = gzip.open if superpop_freqs_path.suffix == ".gz" else open
+    with opener(superpop_freqs_path, "rt") as f:
         reader = csv.reader(f, delimiter="\t")
         for row in reader:
             if not row or row[0].startswith("#"):

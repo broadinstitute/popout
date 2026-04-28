@@ -9,10 +9,10 @@ A prior carries:
 
 The container also carries the annealing schedule for soft assignment
 and a content-aware fingerprint covering the YAML *and* every
-referenced data file (AIM panel TSVs, 1KG reference TSV bytes for the
-superpops requested by the priors). Changing any of these invalidates
-cached EM/decode stages — the previous v1 fingerprint covered only the
-YAML and silently accepted stale panel content.
+referenced data file (AIM panel TSVs, 1KG superpop-frequency TSV bytes
+for the superpops requested by the priors). Changing any of these
+invalidates cached EM/decode stages — the previous v1 fingerprint
+covered only the YAML and silently accepted stale panel content.
 
 YAML schema (v2)::
 
@@ -27,7 +27,7 @@ YAML schema (v2)::
                                               # absolute, or 'bundled:<name>'
             weight: 1.0                       # optional, default 1.0
           fst_reference:
-            superpop: AFR                     # name in the 1KG ref TSV
+            superpop: AFR                     # name in the 1KG superpop-freqs TSV
             weight: 1.0
         parameters:
           gen:
@@ -59,7 +59,7 @@ import yaml
 from scipy.optimize import least_squares
 from scipy.stats import beta as scipy_beta
 
-from .fetch_ref import resolve_ref_path
+from .fetch_superpop_freqs import resolve_superpop_freqs_path
 from .identity import (
     AIMPanel,
     AIMSignature,
@@ -240,12 +240,12 @@ def _resolve_panel_path(panel: str, yaml_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# 1KG reference loading (multi-chrom for FSTReferenceSignature)
+# 1KG superpop-frequencies loading (multi-chrom for FSTReferenceSignature)
 # ---------------------------------------------------------------------------
 
 
 def _load_superpop_freqs(
-    ref_path: Path,
+    superpop_freqs_path: Path,
     superpop: str,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Read the 1KG TSV and return per-site (chrom, pos_bp, freq) arrays
@@ -259,8 +259,8 @@ def _load_superpop_freqs(
     freqs: list[float] = []
     pop_names: list[str] | None = None
 
-    opener = gzip.open if ref_path.suffix == ".gz" else open
-    with opener(ref_path, "rt") as f:
+    opener = gzip.open if superpop_freqs_path.suffix == ".gz" else open
+    with opener(superpop_freqs_path, "rt") as f:
         reader = csv.reader(f, delimiter="\t")
         for row in reader:
             if not row:
@@ -270,13 +270,13 @@ def _load_superpop_freqs(
                 continue
             if pop_names is None:
                 raise ValueError(
-                    f"reference TSV {ref_path} is missing a header row "
-                    f"(expected: '#chrom  pos  ref  alt  POP1  POP2 ...')"
+                    f"superpop frequencies TSV {superpop_freqs_path} is missing "
+                    f"a header row (expected: '#chrom  pos  ref  alt  POP1  POP2 ...')"
                 )
             if superpop not in pop_names:
                 raise ValueError(
-                    f"superpop {superpop!r} not in reference TSV "
-                    f"{ref_path}; available: {pop_names}"
+                    f"superpop {superpop!r} not in superpop frequencies TSV "
+                    f"{superpop_freqs_path}; available: {pop_names}"
                 )
             col = pop_names.index(superpop) + 4  # +4 for the chrom/pos/ref/alt prefix
             chroms.append(str(row[0]))
@@ -284,7 +284,7 @@ def _load_superpop_freqs(
             freqs.append(float(row[col]))
 
     if not chroms:
-        raise ValueError(f"no sites loaded from {ref_path}")
+        raise ValueError(f"no sites loaded from {superpop_freqs_path}")
     return (
         np.array(chroms, dtype=object),
         np.array(positions, dtype=np.int64),
@@ -305,10 +305,25 @@ _SCHEMA_V1_MIGRATION = (
 )
 
 
-def load_priors(path: str | Path) -> Priors:
+def load_priors(
+    path: str | Path,
+    *,
+    superpop_freqs: str | Path | None = None,
+) -> Priors:
     """Load and validate a v2 priors YAML; build identity signatures and
     Beta parameters; return a :class:`Priors` container with a content-
     aware fingerprint.
+
+    Parameters
+    ----------
+    path : YAML file path.
+    superpop_freqs : optional explicit path to the 1KG superpop allele-
+        frequency TSV. When given, every ``fst_reference: superpop: ...``
+        block in the YAML resolves through this file instead of the
+        cached ``~/.popout/superpop_freqs/GRCh38/1kg_superpop_freq.tsv.gz``.
+        Used by the WDL/Terra pipeline where the cache is not pre-
+        populated; users can localize the TSV via Terra and pass its
+        container path here.
     """
     p = Path(path)
     if not p.exists():
@@ -362,7 +377,7 @@ def load_priors(path: str | Path) -> Priors:
 
     # Collect referenced files for fingerprinting.
     referenced_aim_paths: list[Path] = []
-    referenced_ref_paths: list[Path] = []
+    referenced_superpop_freqs_paths: list[Path] = []
 
     priors_list: list[Prior] = []
     for entry in priors_raw:
@@ -421,21 +436,21 @@ def load_priors(path: str | Path) -> Priors:
                     f"prior {name!r}: 'identity.fst_reference.superpop' "
                     f"is required (e.g. 'AFR', 'EUR')"
                 )
-            ref_path_arg = fst_block.get("ref_path")
-            ref_path = (
-                _resolve_panel_path(str(ref_path_arg), yaml_dir)
-                if ref_path_arg
-                else resolve_ref_path("GRCh38")
+            superpop_freqs_arg = fst_block.get("superpop_freqs_path")
+            superpop_freqs_path = (
+                _resolve_panel_path(str(superpop_freqs_arg), yaml_dir)
+                if superpop_freqs_arg
+                else resolve_superpop_freqs_path("GRCh38", arg=superpop_freqs)
             )
-            if not ref_path.exists():
+            if not superpop_freqs_path.exists():
                 raise FileNotFoundError(
-                    f"prior {name!r}: 1KG reference TSV not found: "
-                    f"{ref_path}. Provide one via 'ref_path' or run "
-                    f"'popout fetch-ref' to populate the cache."
+                    f"prior {name!r}: 1KG superpop frequencies TSV not found: "
+                    f"{superpop_freqs_path}. Provide one via 'superpop_freqs_path' "
+                    f"or run 'popout fetch-superpop-freqs' to populate the cache."
                 )
-            referenced_ref_paths.append(ref_path)
+            referenced_superpop_freqs_paths.append(superpop_freqs_path)
             chrom_arr, pos_arr, freq_arr = _load_superpop_freqs(
-                ref_path, str(superpop),
+                superpop_freqs_path, str(superpop),
             )
             signatures.append(
                 FSTReferenceSignature(
@@ -489,7 +504,7 @@ def load_priors(path: str | Path) -> Priors:
     fingerprint = _compute_fingerprint(
         yaml_bytes=yaml_bytes,
         aim_paths=sorted(set(referenced_aim_paths)),
-        ref_paths=sorted(set(referenced_ref_paths)),
+        superpop_freqs_paths=sorted(set(referenced_superpop_freqs_paths)),
     )
 
     return Priors(
@@ -509,7 +524,7 @@ def load_priors(path: str | Path) -> Priors:
 def _compute_fingerprint(
     yaml_bytes: bytes,
     aim_paths: list[Path],
-    ref_paths: list[Path],
+    superpop_freqs_paths: list[Path],
 ) -> str:
     """SHA-256 over the YAML bytes plus every referenced data file's SHA-256.
 
@@ -523,7 +538,7 @@ def _compute_fingerprint(
     for ap in aim_paths:
         h.update(b"aim:")
         h.update(hashlib.sha256(ap.read_bytes()).digest())
-    for rp in ref_paths:
-        h.update(b"ref:")
-        h.update(hashlib.sha256(rp.read_bytes()).digest())
+    for sp in superpop_freqs_paths:
+        h.update(b"superpop_freqs:")
+        h.update(hashlib.sha256(sp.read_bytes()).digest())
     return h.hexdigest()

@@ -231,7 +231,7 @@ class FSTReferenceSignature:
 
     Reference vectors cover ALL chromosomes of the source data
     (typically a 1KG superpop loaded via
-    :func:`popout.fetch_ref.load_ref_frequencies`). The signature
+    :func:`popout.fetch_superpop_freqs.load_superpop_frequencies`). The signature
     filters to the component's chromosome at score time, mirroring how
     :class:`AIMSignature` handles its panel.
     """

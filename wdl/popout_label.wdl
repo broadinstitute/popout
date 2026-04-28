@@ -1,23 +1,23 @@
 version 1.0
 
-## Label inferred ancestries using 1KG superpopulation reference frequencies.
+## Label inferred ancestries using 1KG superpopulation allele frequencies.
 ##
 ## One-stop workflow: just provide popout outputs and the task handles the rest.
-## It will auto-download 1KG data and build the reference if needed.
+## It will auto-download 1KG data and build the superpop-freqs TSV if needed.
 ##
-## The reference build is scattered across chromosomes for parallelism —
-## each chromosome is downloaded and processed independently, then gathered
-## into a single reference file before labeling.
+## The build is scattered across chromosomes for parallelism — each
+## chromosome is downloaded and processed independently, then gathered
+## into a single superpop-freqs file before labeling.
 ##
-## Optionally provide a pre-built `reference` file to skip the build step,
-## or `kg_vcfs` to build from specific VCF files.
+## Optionally provide a pre-built `superpop_freqs` file to skip the build
+## step, or `kg_vcfs` to build from specific VCF files.
 ##
 ## Inputs (required):
 ##   - .model.npz, .global.tsv, .tracts.tsv.gz from a popout run
 ##
 ## Inputs (optional — zero-config by default):
-##   - `reference`: pre-built superpop freq TSV (skips build, fastest)
-##   - `kg_vcfs`:   specific 1KG VCFs to build from
+##   - `superpop_freqs`: pre-built superpop allele-frequency TSV (skips build, fastest)
+##   - `kg_vcfs`:        specific 1KG VCFs to build from
 ##
 ## Outputs: labeled versions of global and tracts files, plus a labels.json
 ## metadata report with correlation scores and assignment details.
@@ -25,7 +25,7 @@ version 1.0
 # ---------------------------------------------------------------------------
 # Task: download + process a single chromosome from 1KG
 # ---------------------------------------------------------------------------
-task build_ref_chrom_task {
+task build_superpop_freqs_chrom_task {
   input {
     String chrom
     String genome   = "GRCh38"
@@ -36,17 +36,17 @@ task build_ref_chrom_task {
 
   command <<<
     set -euo pipefail
-    popout build-ref \
+    popout build-superpop-freqs \
       --download \
       --genome ~{genome} \
       --chromosomes ~{chrom} \
       ~{if defined(kg_panel) then '--panel ~{kg_panel}' else ''} \
       --min-maf ~{min_maf} \
-      --out chrom_ref.tsv.gz
+      --out chrom_freqs.tsv.gz
   >>>
 
   output {
-    File chrom_ref = "chrom_ref.tsv.gz"
+    File chrom_freqs = "chrom_freqs.tsv.gz"
   }
 
   runtime {
@@ -60,7 +60,7 @@ task build_ref_chrom_task {
 # ---------------------------------------------------------------------------
 # Task: process a single provided VCF file
 # ---------------------------------------------------------------------------
-task build_ref_vcf_task {
+task build_superpop_freqs_vcf_task {
   input {
     File   vcf_file
     File?  kg_panel
@@ -72,15 +72,15 @@ task build_ref_vcf_task {
 
   command <<<
     set -euo pipefail
-    popout build-ref \
+    popout build-superpop-freqs \
       --vcf ~{vcf_file} \
       ~{if defined(kg_panel) then '--panel ~{kg_panel}' else ''} \
       --min-maf ~{min_maf} \
-      --out chrom_ref.tsv.gz
+      --out chrom_freqs.tsv.gz
   >>>
 
   output {
-    File chrom_ref = "chrom_ref.tsv.gz"
+    File chrom_freqs = "chrom_freqs.tsv.gz"
   }
 
   runtime {
@@ -92,17 +92,17 @@ task build_ref_vcf_task {
 }
 
 # ---------------------------------------------------------------------------
-# Task: concatenate per-chromosome reference files into one
+# Task: concatenate per-chromosome superpop-freqs files into one
 # ---------------------------------------------------------------------------
-task gather_ref_task {
+task gather_superpop_freqs_task {
   input {
-    Array[File] chrom_refs
+    Array[File] chrom_freqs
     String      docker_image
   }
 
   command <<<
     set -euo pipefail
-    REFS=(~{sep=' ' chrom_refs})
+    REFS=(~{sep=' ' chrom_freqs})
 
     # Header from first file, then data rows from all files
     zgrep -m1 '^' "${REFS[0]}" > combined.tsv
@@ -111,12 +111,12 @@ task gather_ref_task {
     done
 
     gzip combined.tsv
-    mv combined.tsv.gz built_ref.tsv.gz
-    echo "Gathered ${#REFS[@]} files -> $(wc -l < <(zcat built_ref.tsv.gz)) lines"
+    mv combined.tsv.gz built_superpop_freqs.tsv.gz
+    echo "Gathered ${#REFS[@]} files -> $(wc -l < <(zcat built_superpop_freqs.tsv.gz)) lines"
   >>>
 
   output {
-    File reference = "built_ref.tsv.gz"
+    File superpop_freqs = "built_superpop_freqs.tsv.gz"
   }
 
   runtime {
@@ -128,14 +128,14 @@ task gather_ref_task {
 }
 
 # ---------------------------------------------------------------------------
-# Task: label ancestries using a reference
+# Task: label ancestries using a superpop-freqs TSV
 # ---------------------------------------------------------------------------
 task label_task {
   input {
     File   model_npz
     File   global_ancestry
     File   tracts
-    File   reference
+    File   superpop_freqs
     String genome        = "GRCh38"
     String output_prefix = "popout.labeled"
 
@@ -145,21 +145,21 @@ task label_task {
     String docker_image
   }
 
-  Int tracts_size_gb = ceil(size(tracts, "GB"))
-  Int ref_size_gb    = ceil(size(reference, "GB"))
-  Int disk_size_gb   = 2 * tracts_size_gb + ref_size_gb + extra_disk_gb
+  Int tracts_size_gb         = ceil(size(tracts, "GB"))
+  Int superpop_freqs_size_gb = ceil(size(superpop_freqs, "GB"))
+  Int disk_size_gb           = 2 * tracts_size_gb + superpop_freqs_size_gb + extra_disk_gb
 
   command <<<
     set -euo pipefail
 
     echo "=== Labeling ancestries ==="
-    ls -lh ~{model_npz} ~{global_ancestry} ~{tracts} ~{reference}
+    ls -lh ~{model_npz} ~{global_ancestry} ~{tracts} ~{superpop_freqs}
 
     popout label \
       --model ~{model_npz} \
       --global ~{global_ancestry} \
       --tracts ~{tracts} \
-      --reference ~{reference} \
+      --superpop-freqs ~{superpop_freqs} \
       --genome ~{genome} \
       --out ~{output_prefix}
 
@@ -191,8 +191,8 @@ workflow popout_label {
     File   global_ancestry
     File   tracts
 
-    # Reference (all optional — auto-builds from 1KG by default)
-    File?        reference
+    # Superpop frequencies (all optional — auto-builds from 1KG by default)
+    File?        superpop_freqs
     Array[File]  kg_vcfs  = []
     File?        kg_panel
 
@@ -210,13 +210,13 @@ workflow popout_label {
     "21", "22"
   ]
 
-  Boolean need_download  = !defined(reference) && length(kg_vcfs) == 0
-  Boolean need_vcf_build = !defined(reference) && length(kg_vcfs) > 0
+  Boolean need_download  = !defined(superpop_freqs) && length(kg_vcfs) == 0
+  Boolean need_vcf_build = !defined(superpop_freqs) && length(kg_vcfs) > 0
 
   # Path A: auto-download — scatter across chromosomes
   if (need_download) {
     scatter (chrom in autosomes) {
-      call build_ref_chrom_task {
+      call build_superpop_freqs_chrom_task {
         input:
           chrom        = chrom,
           genome       = genome,
@@ -226,9 +226,9 @@ workflow popout_label {
       }
     }
 
-    call gather_ref_task as gather_download {
+    call gather_superpop_freqs_task as gather_download {
       input:
-        chrom_refs   = build_ref_chrom_task.chrom_ref,
+        chrom_freqs  = build_superpop_freqs_chrom_task.chrom_freqs,
         docker_image = docker_image
     }
   }
@@ -236,7 +236,7 @@ workflow popout_label {
   # Path B: provided VCFs — scatter across files
   if (need_vcf_build) {
     scatter (vcf in kg_vcfs) {
-      call build_ref_vcf_task {
+      call build_superpop_freqs_vcf_task {
         input:
           vcf_file     = vcf,
           kg_panel     = kg_panel,
@@ -245,32 +245,34 @@ workflow popout_label {
       }
     }
 
-    call gather_ref_task as gather_vcf {
+    call gather_superpop_freqs_task as gather_vcf {
       input:
-        chrom_refs   = build_ref_vcf_task.chrom_ref,
+        chrom_freqs  = build_superpop_freqs_vcf_task.chrom_freqs,
         docker_image = docker_image
     }
   }
 
-  # Path C: pre-built reference — used directly
-  File effective_ref = select_first([reference, gather_download.reference, gather_vcf.reference])
+  # Path C: pre-built superpop-freqs — used directly
+  File effective_freqs = select_first([
+    superpop_freqs, gather_download.superpop_freqs, gather_vcf.superpop_freqs
+  ])
 
   call label_task {
     input:
       model_npz       = model_npz,
       global_ancestry = global_ancestry,
       tracts          = tracts,
-      reference       = effective_ref,
+      superpop_freqs  = effective_freqs,
       genome          = genome,
       output_prefix   = output_prefix,
       docker_image    = docker_image
   }
 
   output {
-    File  labeled_global   = label_task.labeled_global
-    File  labeled_tracts   = label_task.labeled_tracts
-    File  labels_json      = label_task.labels_json
-    File? built_reference  = if need_download then gather_download.reference
-                             else gather_vcf.reference
+    File  labeled_global         = label_task.labeled_global
+    File  labeled_tracts         = label_task.labeled_tracts
+    File  labels_json            = label_task.labels_json
+    File? built_superpop_freqs   = if need_download then gather_download.superpop_freqs
+                                    else gather_vcf.superpop_freqs
   }
 }

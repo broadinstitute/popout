@@ -1,13 +1,15 @@
-"""Download and cache 1000 Genomes superpopulation allele frequency reference.
+"""Download and cache 1000 Genomes superpopulation allele-frequency TSV.
 
-The reference file is a gzipped TSV with columns:
+The file is a gzipped TSV with columns:
     #chrom  pos  ref  alt  EUR  EAS  AMR  AFR  SAS
 
-This module handles downloading, caching, and loading the reference for
-use by ``popout label``.
+This module handles downloading, caching, and loading the per-superpop
+allele-frequency table used by ``popout label`` and the priors framework's
+identity scoring. (It is NOT the genome FASTA — that's a separate
+"reference" concept; this file is the 1KG superpop frequency table only.)
 
 Usage:
-    popout fetch-ref [--genome GRCh38|GRCh37] [--dest PATH]
+    popout fetch-superpop-freqs [--genome GRCh38|GRCh37] [--dest PATH]
 """
 
 from __future__ import annotations
@@ -25,93 +27,93 @@ log = logging.getLogger(__name__)
 
 SUPERPOP_NAMES = ["EUR", "EAS", "AMR", "AFR", "SAS"]
 
-REF_URLS: dict[str, str] = {
+SUPERPOP_FREQS_URLS: dict[str, str] = {
     # Placeholder — replace with hosted URL after running scripts/build_1kg_ref.py
     # "GRCh38": "https://storage.googleapis.com/popout-ref/1kg_superpop_freq.GRCh38.tsv.gz",
 }
 
-_CACHE_DIR = Path.home() / ".popout" / "ref"
+_CACHE_DIR = Path.home() / ".popout" / "superpop_freqs"
 
 
-def resolve_ref_path(
+def resolve_superpop_freqs_path(
     genome: str = "GRCh38",
-    ref_arg: str | None = None,
+    arg: str | None = None,
 ) -> Path:
-    """Resolve reference frequency file path.
+    """Resolve the 1KG superpop-frequency TSV path.
 
     Priority:
-        1. Explicit ``ref_arg`` path
-        2. Local cache (``~/.popout/ref/{genome}/1kg_superpop_freq.tsv.gz``)
+        1. Explicit ``arg`` path (e.g. from ``--superpop-freqs``)
+        2. Local cache (``~/.popout/superpop_freqs/{genome}/1kg_superpop_freq.tsv.gz``)
         3. Auto-download to local cache
 
     Returns
     -------
-    Path to the gzipped TSV reference file.
+    Path to the gzipped TSV file.
     """
-    if ref_arg is not None:
-        p = Path(ref_arg)
+    if arg is not None:
+        p = Path(arg)
         if p.is_file():
             return p
-        raise FileNotFoundError(f"Reference file not found: {p}")
+        raise FileNotFoundError(f"Superpop frequencies file not found: {p}")
 
     cache = _CACHE_DIR / genome / "1kg_superpop_freq.tsv.gz"
     if cache.is_file():
-        log.info("Using cached reference: %s", cache)
+        log.info("Using cached superpop frequencies: %s", cache)
         return cache
 
-    if genome not in REF_URLS:
+    if genome not in SUPERPOP_FREQS_URLS:
         raise FileNotFoundError(
-            f"No cached reference for {genome} and no download URL configured. "
-            f"Provide a reference file via --reference, or build one with "
+            f"No cached superpop frequencies for {genome} and no download URL configured. "
+            f"Provide a file via --superpop-freqs, or build one with "
             f"scripts/build_1kg_ref.py and place it at {cache}"
         )
 
-    log.info("Reference not found locally — downloading %s...", genome)
-    return fetch_ref(genome, dest=cache)
+    log.info("Superpop frequencies not found locally — downloading %s...", genome)
+    return fetch_superpop_freqs(genome, dest=cache)
 
 
-def fetch_ref(genome: str = "GRCh38", dest: Path | None = None) -> Path:
-    """Download 1KG superpopulation frequency reference.
+def fetch_superpop_freqs(genome: str = "GRCh38", dest: Path | None = None) -> Path:
+    """Download the 1KG superpop allele-frequency TSV.
 
     Parameters
     ----------
-    genome : reference genome build
-    dest : target file path (default: ``~/.popout/ref/{genome}/1kg_superpop_freq.tsv.gz``)
+    genome : genome build (GRCh38 or GRCh37)
+    dest : target file path (default: ``~/.popout/superpop_freqs/{genome}/1kg_superpop_freq.tsv.gz``)
 
     Returns
     -------
     Path to the downloaded file.
     """
-    if genome not in REF_URLS:
+    if genome not in SUPERPOP_FREQS_URLS:
         raise ValueError(
             f"No download URL for genome build {genome!r}. "
-            f"Available: {', '.join(REF_URLS) or '(none — build with scripts/build_1kg_ref.py)'}"
+            f"Available: {', '.join(SUPERPOP_FREQS_URLS) or '(none — build with scripts/build_1kg_ref.py)'}"
         )
 
-    url = REF_URLS[genome]
+    url = SUPERPOP_FREQS_URLS[genome]
     if dest is None:
         dest = _CACHE_DIR / genome / "1kg_superpop_freq.tsv.gz"
 
     dest.parent.mkdir(parents=True, exist_ok=True)
 
-    log.info("Downloading %s reference from %s", genome, url)
+    log.info("Downloading %s superpop frequencies from %s", genome, url)
     data = urllib.request.urlopen(url).read()
     log.info("Downloaded %.1f MB", len(data) / 1e6)
 
     dest.write_bytes(data)
-    log.info("Saved reference to %s", dest)
+    log.info("Saved superpop frequencies to %s", dest)
     return dest
 
 
-def load_ref_frequencies(
-    ref_path: str | Path,
+def load_superpop_frequencies(
+    superpop_freqs_path: str | Path,
     chrom: str | None = None,
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-    """Load reference superpopulation frequencies from TSV.
+    """Load 1KG superpopulation frequencies from TSV.
 
     Parameters
     ----------
-    ref_path : path to gzipped TSV
+    superpop_freqs_path : path to gzipped TSV
     chrom : if given, filter to this chromosome only
 
     Returns
@@ -120,13 +122,13 @@ def load_ref_frequencies(
     pos_bp : (n_sites,) int64 array
     pop_names : list of population names from the header
     """
-    ref_path = Path(ref_path)
+    superpop_freqs_path = Path(superpop_freqs_path)
     positions = []
     freq_rows = []
     pop_names = None
 
-    opener = gzip.open if ref_path.suffix == ".gz" else open
-    with opener(ref_path, "rt") as f:
+    opener = gzip.open if superpop_freqs_path.suffix == ".gz" else open
+    with opener(superpop_freqs_path, "rt") as f:
         reader = csv.reader(f, delimiter="\t")
         for row in reader:
             if not row:
@@ -150,29 +152,29 @@ def load_ref_frequencies(
 
     if not positions:
         raise ValueError(
-            f"No sites loaded from {ref_path}"
+            f"No sites loaded from {superpop_freqs_path}"
             + (f" for chrom={chrom}" if chrom else "")
         )
 
     pos_bp = np.array(positions, dtype=np.int64)
     freq = np.array(freq_rows, dtype=np.float32).T  # (n_pops, n_sites)
 
-    log.info("Loaded %d reference sites (%d populations)", len(positions), freq.shape[0])
+    log.info("Loaded %d sites (%d populations)", len(positions), freq.shape[0])
     return freq, pos_bp, pop_names
 
 
-def fetch_ref_main(argv: list[str] | None = None) -> None:
-    """CLI entry point: ``popout fetch-ref``."""
+def fetch_superpop_freqs_main(argv: list[str] | None = None) -> None:
+    """CLI entry point: ``popout fetch-superpop-freqs``."""
     parser = argparse.ArgumentParser(
-        description="Download 1000 Genomes superpopulation frequency reference",
+        description="Download 1000 Genomes superpopulation allele-frequency TSV",
     )
     parser.add_argument(
         "--genome", choices=["GRCh38", "GRCh37"], default="GRCh38",
-        help="Reference genome build (default: GRCh38)",
+        help="Genome build (default: GRCh38)",
     )
     parser.add_argument(
         "--dest", default=None,
-        help="Destination file path (default: ~/.popout/ref/GENOME/1kg_superpop_freq.tsv.gz)",
+        help="Destination file path (default: ~/.popout/superpop_freqs/GENOME/1kg_superpop_freq.tsv.gz)",
     )
     args = parser.parse_args(argv)
 
@@ -183,5 +185,5 @@ def fetch_ref_main(argv: list[str] | None = None) -> None:
     )
 
     dest = Path(args.dest) if args.dest else None
-    result = fetch_ref(args.genome, dest=dest)
+    result = fetch_superpop_freqs(args.genome, dest=dest)
     print(result)

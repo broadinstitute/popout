@@ -32,7 +32,7 @@ import logging
 from collections import defaultdict
 from pathlib import Path
 
-from popout.fetch_ref import resolve_ref_path
+from popout.fetch_superpop_freqs import resolve_superpop_freqs_path
 
 from .lib import (
     SUPERPOPS_AOU,
@@ -137,7 +137,7 @@ def _candidate_for_pop(row, pop: str, threshold: float) -> Candidate | None:
 
 
 def scan(
-    ref_path: Path,
+    superpop_freqs_path: Path,
     out_dir: Path,
     separation_threshold: float = 0.40,
     log_every: int = 1_000_000,
@@ -148,7 +148,7 @@ def scan(
     """
     candidates: dict[str, list[Candidate]] = defaultdict(list)
     n_rows = 0
-    for row in iter_1kg_rows(ref_path):
+    for row in iter_1kg_rows(superpop_freqs_path):
         n_rows += 1
         if n_rows % log_every == 0:
             log.info(
@@ -177,10 +177,10 @@ def scan(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--ref", type=Path, default=None,
+        "--superpop-freqs", type=Path, default=None,
         help=(
             "Path to 1KG superpop freq TSV (default: resolve via "
-            "popout.fetch_ref.resolve_ref_path)"
+            "popout.fetch_superpop_freqs.resolve_superpop_freqs_path)"
         ),
     )
     parser.add_argument(
@@ -199,9 +199,12 @@ def main(argv: list[str] | None = None) -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    ref_path = args.ref if args.ref is not None else resolve_ref_path()
+    superpop_freqs_path = (
+        args.superpop_freqs if args.superpop_freqs is not None
+        else resolve_superpop_freqs_path()
+    )
     counts = scan(
-        ref_path=ref_path,
+        superpop_freqs_path=superpop_freqs_path,
         out_dir=args.out_dir,
         separation_threshold=args.separation_threshold,
     )

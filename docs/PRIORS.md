@@ -27,8 +27,8 @@ priors:
         panel: bundled:african.tsv     # path to AIM panel TSV
         weight: 1.0                    # optional, default 1.0
       fst_reference:
-        superpop: AFR                  # column name in the 1KG ref TSV
-        # ref_path: <path>             # optional override; default = ~/.popout cache
+        superpop: AFR                  # column name in the 1KG superpop-freqs TSV
+        # superpop_freqs_path: <path>  # optional override; default = ~/.popout cache
         weight: 1.0
     parameters:
       gen:
@@ -74,9 +74,11 @@ Each prior must have **at least one** identity signature.
   `panel: bundled:<name>.tsv`.
 
 * **`fst_reference`** — negative Hudson F_ST against a 1KG superpop
-  frequency vector. Resolves the ref TSV from
-  `~/.popout/ref/{genome}/1kg_superpop_freq.tsv.gz` by default
-  (populate via `popout fetch-ref`) or via an explicit `ref_path`.
+  frequency vector. Resolves the superpop-freqs TSV from
+  `~/.popout/superpop_freqs/{genome}/1kg_superpop_freq.tsv.gz` by
+  default (populate via `popout fetch-superpop-freqs`), via the
+  `--superpop-freqs PATH` CLI flag, or via an explicit
+  `superpop_freqs_path` in the YAML block.
 
 Add new signature types by writing a frozen dataclass that conforms to
 `popout.identity.IdentitySignature`; the dispatcher needs no changes.

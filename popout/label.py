@@ -11,7 +11,7 @@ Algorithm:
 Usage:
     popout label --model PREFIX.model.npz --global PREFIX.global.tsv \\
                  --tracts PREFIX.tracts.tsv.gz --out PREFIX.labeled \\
-                 [--reference REF.tsv.gz] [--genome GRCh38]
+                 [--superpop-freqs FREQS.tsv.gz] [--genome GRCh38]
 """
 
 from __future__ import annotations
@@ -27,7 +27,10 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
-from .fetch_ref import load_ref_frequencies, resolve_ref_path
+from .fetch_superpop_freqs import (
+    load_superpop_frequencies,
+    resolve_superpop_freqs_path,
+)
 
 log = logging.getLogger(__name__)
 
@@ -54,14 +57,14 @@ class LabelResult:
 
 def label_ancestries(
     model_npz_path: str | Path,
-    ref_path: str | Path,
+    superpop_freqs_path: str | Path,
 ) -> LabelResult:
-    """Label inferred ancestries by correlating with reference frequencies.
+    """Label inferred ancestries by correlating with 1KG superpop frequencies.
 
     Parameters
     ----------
     model_npz_path : path to .model.npz file (must contain pos_bp, pos_cm, chrom)
-    ref_path : path to reference frequency TSV
+    superpop_freqs_path : path to 1KG superpop allele-frequency TSV
 
     Returns
     -------
@@ -77,7 +80,9 @@ def label_ancestries(
     K_inf = allele_freq.shape[0]
     log.info("Model: K=%d, T=%d sites on %s", K_inf, allele_freq.shape[1], chrom)
 
-    ref_freq, ref_pos, ref_names = load_ref_frequencies(ref_path, chrom=chrom)
+    ref_freq, ref_pos, ref_names = load_superpop_frequencies(
+        superpop_freqs_path, chrom=chrom,
+    )
     K_ref = ref_freq.shape[0]
 
     # Intersect sites by position
@@ -87,8 +92,8 @@ def label_ancestries(
 
     if n_overlap < 10:
         raise ValueError(
-            f"Only {n_overlap} overlapping sites between model and reference. "
-            f"Need at least 10 for reliable correlation."
+            f"Only {n_overlap} overlapping sites between model and superpop "
+            f"frequencies. Need at least 10 for reliable correlation."
         )
     if n_overlap < 100:
         log.warning("Only %d overlapping sites — correlation may be unreliable", n_overlap)
@@ -316,7 +321,7 @@ def write_label_report(out_path: str | Path, label_result: LabelResult) -> None:
 def label_main(argv: list[str] | None = None) -> None:
     """CLI entry point: ``popout label``."""
     parser = argparse.ArgumentParser(
-        description="Label inferred ancestries using 1KG superpopulation reference",
+        description="Label inferred ancestries using 1KG superpopulation frequencies",
     )
     parser.add_argument(
         "--model", required=True,
@@ -335,12 +340,12 @@ def label_main(argv: list[str] | None = None) -> None:
         help="Output prefix (produces .global.tsv, .tracts.tsv.gz, .labels.json)",
     )
     parser.add_argument(
-        "--reference", default=None,
-        help="Path to reference frequency TSV (default: auto-resolve from cache)",
+        "--superpop-freqs", default=None,
+        help="Path to 1KG superpop allele-frequency TSV (default: auto-resolve from cache)",
     )
     parser.add_argument(
         "--genome", default="GRCh38",
-        help="Reference genome build (default: GRCh38)",
+        help="Genome build (default: GRCh38)",
     )
     args = parser.parse_args(argv)
 
@@ -350,8 +355,10 @@ def label_main(argv: list[str] | None = None) -> None:
         datefmt="%H:%M:%S",
     )
 
-    ref_path = resolve_ref_path(args.genome, ref_arg=args.reference)
-    result = label_ancestries(args.model, ref_path)
+    superpop_freqs_path = resolve_superpop_freqs_path(
+        args.genome, arg=args.superpop_freqs,
+    )
+    result = label_ancestries(args.model, superpop_freqs_path)
 
     out = args.out
     rewrite_global_tsv(args.global_tsv, f"{out}.global.tsv", result)

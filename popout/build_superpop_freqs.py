@@ -1,16 +1,17 @@
-"""Build 1KG superpopulation allele frequency reference from Phase 3 VCFs.
+"""Build 1KG superpopulation allele-frequency TSV from Phase 3 VCFs.
 
-Generates the reference frequency file used by ``popout label``.
-Reads 1000 Genomes Phase 3 VCFs and computes per-superpopulation allele
-frequencies for biallelic SNPs.
+Generates the per-superpop frequency file used by ``popout label`` and
+the priors framework's identity scoring. Reads 1000 Genomes Phase 3
+VCFs and computes per-superpopulation allele frequencies for biallelic
+SNPs.
 
 Output format (gzipped TSV):
     #chrom  pos  ref  alt  EUR  EAS  AMR  AFR  SAS
 
 Usage:
-    popout build-ref --vcf chr20.vcf.gz chr21.vcf.gz --out 1kg_superpop_freq.GRCh38.tsv.gz
-    popout build-ref --vcf-dir /path/to/1kg/vcfs --out 1kg_superpop_freq.GRCh38.tsv.gz
-    popout build-ref --download --genome GRCh38 --out 1kg_superpop_freq.GRCh38.tsv.gz
+    popout build-superpop-freqs --vcf chr20.vcf.gz chr21.vcf.gz --out 1kg_superpop_freq.GRCh38.tsv.gz
+    popout build-superpop-freqs --vcf-dir /path/to/1kg/vcfs --out 1kg_superpop_freq.GRCh38.tsv.gz
+    popout build-superpop-freqs --download --genome GRCh38 --out 1kg_superpop_freq.GRCh38.tsv.gz
 """
 
 from __future__ import annotations
@@ -225,10 +226,10 @@ def download_kg_vcfs(
     return paths
 
 
-def build_ref_main(argv: list[str] | None = None) -> None:
-    """CLI entry point: ``popout build-ref``."""
+def build_superpop_freqs_main(argv: list[str] | None = None) -> None:
+    """CLI entry point: ``popout build-superpop-freqs``."""
     parser = argparse.ArgumentParser(
-        description="Build 1KG superpopulation frequency reference for popout label",
+        description="Build 1KG superpopulation allele-frequency TSV for popout",
     )
     parser.add_argument(
         "--vcf", nargs="+",
@@ -314,4 +315,4 @@ def build_ref_main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    build_ref_main()
+    build_superpop_freqs_main()

@@ -77,7 +77,7 @@ def _yaml_v2(aim_rel: str, ref_rel: str) -> str:
                 weight: 1.5
               fst_reference:
                 superpop: AFR
-                ref_path: {ref_rel}
+                superpop_freqs_path: {ref_rel}
             parameters:
               gen:
                 mean: 7
@@ -87,7 +87,7 @@ def _yaml_v2(aim_rel: str, ref_rel: str) -> str:
             identity:
               fst_reference:
                 superpop: EUR
-                ref_path: {ref_rel}
+                superpop_freqs_path: {ref_rel}
             parameters:
               gen:
                 mean: 2
@@ -198,11 +198,11 @@ def test_load_priors_rejects_duplicate_names(yaml_dir):
         priors:
           - name: AFR
             identity:
-              fst_reference: {{superpop: AFR, ref_path: {ref.name}}}
+              fst_reference: {{superpop: AFR, superpop_freqs_path: {ref.name}}}
             parameters: {{gen: {{mean: 7, range: [4, 12]}}}}
           - name: AFR
             identity:
-              fst_reference: {{superpop: AFR, ref_path: {ref.name}}}
+              fst_reference: {{superpop: AFR, superpop_freqs_path: {ref.name}}}
             parameters: {{gen: {{mean: 7, range: [4, 12]}}}}
     """))
     with pytest.raises(ValueError, match="duplicate prior name"):
@@ -233,7 +233,7 @@ def test_load_priors_rejects_gen_out_of_range(yaml_dir):
         priors:
           - name: BAD
             identity:
-              fst_reference: {{superpop: AFR, ref_path: {ref.name}}}
+              fst_reference: {{superpop: AFR, superpop_freqs_path: {ref.name}}}
             parameters: {{gen: {{mean: 100, range: [4, 12]}}}}
     """))
     with pytest.raises(ValueError, match="gen_lo < gen_mean < gen_hi"):
