@@ -132,7 +132,7 @@ def test_fst_signature_ranks_matching_component_first():
     sig = FSTReferenceSignature(
         ref_freq=ref_freq,
         ref_pos_bp=pos,
-        ref_chrom="1",
+        ref_chrom=np.array(["1"] * n_sites, dtype=object),
         ref_name="1KG_TEST",
     )
 
@@ -155,7 +155,7 @@ def test_fst_signature_zero_on_chrom_mismatch():
     sig = FSTReferenceSignature(
         ref_freq=np.array([0.5, 0.6, 0.7]),
         ref_pos_bp=np.array([10, 20, 30]),
-        ref_chrom="1",
+        ref_chrom=np.array(["1", "1", "1"], dtype=object),
         ref_name="1KG_TEST",
     )
     cs = _make_state([0.5, 0.6, 0.7], [10, 20, 30], chrom="2")
@@ -166,13 +166,44 @@ def test_fst_signature_handles_nan_freq():
     sig = FSTReferenceSignature(
         ref_freq=np.array([0.5, 0.6, 0.7]),
         ref_pos_bp=np.array([10, 20, 30]),
-        ref_chrom="1",
+        ref_chrom=np.array(["1", "1", "1"], dtype=object),
         ref_name="1KG_TEST",
     )
     cs = _make_state([np.nan, np.nan, np.nan], [10, 20, 30])
     s = sig.score(cs)
     assert np.isfinite(s)
     assert s == 0.0
+
+
+def test_fst_signature_filters_to_component_chrom():
+    """A multi-chrom reference signature should only score sites on the
+    component's chromosome."""
+    rng = np.random.default_rng(7)
+    n = 50
+    pos1 = np.arange(100, 100 + n, dtype=np.int64)
+    pos2 = np.arange(500, 500 + n, dtype=np.int64)
+    ref_freq = np.concatenate([
+        np.full(n, 0.9),  # chrom 1: all 0.9
+        np.full(n, 0.1),  # chrom 2: all 0.1
+    ])
+    ref_pos = np.concatenate([pos1, pos2])
+    ref_chrom = np.array(["1"] * n + ["2"] * n, dtype=object)
+    sig = FSTReferenceSignature(
+        ref_freq=ref_freq, ref_pos_bp=ref_pos, ref_chrom=ref_chrom,
+        ref_name="multi",
+    )
+    # Component on chrom 1 with freq=0.9 should score near 0 (perfect match).
+    cs1 = _make_state(np.full(n, 0.9), pos1, chrom="1")
+    s1 = sig.score(cs1)
+    # Component on chrom 1 with freq=0.1 should score badly.
+    cs1_bad = _make_state(np.full(n, 0.1), pos1, chrom="1")
+    s1_bad = sig.score(cs1_bad)
+    assert s1 > s1_bad
+
+    # Component on chrom 2 with freq=0.1 (matches chrom 2's ref) > 0.9 (mismatches)
+    cs2 = _make_state(np.full(n, 0.1), pos2, chrom="2")
+    cs2_bad = _make_state(np.full(n, 0.9), pos2, chrom="2")
+    assert sig.score(cs2) > sig.score(cs2_bad)
 
 
 # --------------------------------------------------------------------------
@@ -209,7 +240,7 @@ def test_compose_scores_combines_two_signatures():
     fst_sig = FSTReferenceSignature(
         ref_freq=truth_fst,
         ref_pos_bp=pos[n_aim:].copy(),
-        ref_chrom="1",
+        ref_chrom=np.array(["1"] * n_fst, dtype=object),
         ref_name="ref",
     )
 

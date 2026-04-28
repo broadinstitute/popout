@@ -229,36 +229,47 @@ class FSTReferenceSignature:
     Lower F_ST = closer match; the score returns ``-F_ST`` so higher =
     better, consistent with other signatures.
 
-    The reference vectors are typically loaded once per superpop via
-    :func:`popout.fetch_ref.load_ref_frequencies` and filtered to a
-    single chromosome before being passed to this constructor.
+    Reference vectors cover ALL chromosomes of the source data
+    (typically a 1KG superpop loaded via
+    :func:`popout.fetch_ref.load_ref_frequencies`). The signature
+    filters to the component's chromosome at score time, mirroring how
+    :class:`AIMSignature` handles its panel.
     """
 
     ref_freq: np.ndarray      # (n_ref_sites,) float
     ref_pos_bp: np.ndarray    # (n_ref_sites,) int
-    ref_chrom: str
+    ref_chrom: np.ndarray     # (n_ref_sites,) str — chromosome of each ref site
     ref_name: str
     weight: float = 1.0
 
     def __post_init__(self) -> None:
-        if len(self.ref_freq) != len(self.ref_pos_bp):
+        n = len(self.ref_freq)
+        if len(self.ref_pos_bp) != n or len(self.ref_chrom) != n:
             raise ValueError(
-                f"ref_freq ({len(self.ref_freq)}) and ref_pos_bp "
-                f"({len(self.ref_pos_bp)}) must have the same length"
+                f"ref_freq, ref_pos_bp, ref_chrom must be parallel; got "
+                f"{n}, {len(self.ref_pos_bp)}, {len(self.ref_chrom)}"
             )
 
     def score(self, cs: ComponentState) -> float:
-        if _normalize_chrom(cs.chrom) != _normalize_chrom(self.ref_chrom):
+        norm_cs = _normalize_chrom(cs.chrom)
+        norm_ref = np.array(
+            [_normalize_chrom(c) for c in self.ref_chrom], dtype=object,
+        )
+        chrom_mask = norm_ref == norm_cs
+        if not chrom_mask.any():
             return 0.0
 
+        ref_pos = self.ref_pos_bp[chrom_mask]
+        ref_freq = self.ref_freq[chrom_mask]
+
         _common, ref_idx, c_idx = np.intersect1d(
-            self.ref_pos_bp, cs.pos_bp, return_indices=True,
+            ref_pos, cs.pos_bp, return_indices=True,
         )
         if len(_common) == 0:
             return 0.0
 
         p1 = np.asarray(cs.freq, dtype=np.float64)[c_idx]
-        p2 = np.asarray(self.ref_freq, dtype=np.float64)[ref_idx]
+        p2 = np.asarray(ref_freq, dtype=np.float64)[ref_idx]
 
         finite = np.isfinite(p1) & np.isfinite(p2)
         if not finite.any():
@@ -269,8 +280,6 @@ class FSTReferenceSignature:
         num = float(((p1 - p2) ** 2).mean())
         den = float((p1 * (1.0 - p2) + p2 * (1.0 - p1)).mean())
         if den < 1e-9:
-            # Both populations fixed at the same allele across all sites:
-            # no information, return 0 (neutral).
             return 0.0
         return float(-(num / den))
 
