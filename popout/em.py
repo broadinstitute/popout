@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gc
 import logging
+from pathlib import Path
 from typing import Optional
 
 import jax
@@ -266,33 +267,174 @@ def update_generations_from_stats(
     return max(1.0, min(float(np.exp(log_T)), 1000.0))
 
 
-def update_generations_per_component_from_stats(
+def build_component_states(
+    allele_freq: jnp.ndarray,
+    mu: jnp.ndarray,
+    chrom_data,
+) -> list:
+    """Build one :class:`popout.identity.ComponentState` per ancestry
+    from the most recent M-step allele frequencies.
+
+    Identity scoring is per-chromosome in the current EM loop — each
+    state carries this chromosome's ``pos_bp`` and ``chrom`` only.
+    Aggregating across chromosomes is an additive future change (see
+    ``docs/PRIORS.md``); the per-chromosome view is acceptable because
+    a component's ancestry is visible from any one chromosome's freqs.
+    """
+    from .identity import ComponentState
+
+    af = np.asarray(allele_freq)
+    mu_np = np.asarray(mu)
+    pos_bp = np.asarray(chrom_data.pos_bp)
+    chrom = str(chrom_data.chrom)
+    return [
+        ComponentState(freq=af[k], mu=float(mu_np[k]), pos_bp=pos_bp, chrom=chrom)
+        for k in range(af.shape[0])
+    ]
+
+
+def write_priors_assignment_dump(
+    path: str,
+    assignment: np.ndarray,
+    priors,
+    model,
+    chrom_data,
+) -> None:
+    """Write the (P, K) prior→component assignment matrix as TSV.
+
+    Header rows
+    -----------
+    1. ``# nearest_1KG`` line — per-component nearest 1KG superpop label
+       (or ``-`` if the 1KG reference cache is not populated).
+    2. Column header: ``prior\\tcomp_0\\tcomp_1\\t...``.
+
+    Each subsequent row is one prior's name plus its softmax weights.
+
+    The annotation row is the load-bearing diagnostic: at a glance you
+    see whether each prior latched onto a component whose nearest-1KG
+    label matches the prior's name. priors_v1 (where AFR bound to a
+    EUR-bearing component) would have shown its mismatch instantly.
+    """
+    P, K = assignment.shape
+    annotations = _annotate_components_with_1kg(model, chrom_data)
+    annot_strs = [
+        annotations.get(k, ("-", float("nan"))) for k in range(K)
+    ]
+
+    lines = []
+    lines.append(
+        "# nearest_1KG\t"
+        + "\t".join(
+            f"{name}(r={r:.3f})" if np.isfinite(r) else name
+            for name, r in annot_strs
+        )
+    )
+    lines.append("prior\t" + "\t".join(f"comp_{k}" for k in range(K)))
+    for p, prior in enumerate(priors.priors):
+        row = [prior.name] + [f"{assignment[p, k]:.6f}" for k in range(K)]
+        lines.append("\t".join(row))
+
+    Path(path).write_text("\n".join(lines) + "\n")
+    log.info("Wrote priors assignment dump (%d priors x %d components) to %s",
+             P, K, path)
+
+
+def _annotate_components_with_1kg(
+    model, chrom_data,
+) -> dict[int, tuple[str, float]]:
+    """Map component_idx → (nearest 1KG superpop name, correlation).
+
+    Uses the same site-aligned Pearson correlation as ``popout label``.
+    Returns ``("-", NaN)`` per component if the 1KG cache is missing or
+    no positions overlap.
+    """
+    try:
+        from .fetch_ref import load_ref_frequencies, resolve_ref_path
+        from .label import _correlation_matrix
+    except Exception:
+        return {k: ("-", float("nan")) for k in range(int(model.n_ancestries))}
+
+    K = int(model.n_ancestries)
+    try:
+        ref_path = resolve_ref_path("GRCh38")
+    except FileNotFoundError:
+        return {k: ("-", float("nan")) for k in range(K)}
+
+    try:
+        ref_freq, ref_pos, ref_names = load_ref_frequencies(
+            ref_path, chrom=str(chrom_data.chrom),
+        )
+    except Exception:
+        return {k: ("-", float("nan")) for k in range(K)}
+
+    pos_bp = np.asarray(chrom_data.pos_bp)
+    _common, model_idx, ref_idx = np.intersect1d(
+        pos_bp, ref_pos, return_indices=True,
+    )
+    if len(_common) < 10:
+        return {k: ("-", float("nan")) for k in range(K)}
+
+    af = np.asarray(model.allele_freq)[:, model_idx]   # (K, n_overlap)
+    rf = ref_freq[:, ref_idx]                          # (P_ref, n_overlap)
+    corr = _correlation_matrix(af, rf)                 # (K, P_ref)
+
+    out: dict[int, tuple[str, float]] = {}
+    for k in range(K):
+        j = int(np.argmax(corr[k]))
+        out[k] = (str(ref_names[j]), float(corr[k, j]))
+    return out
+
+
+def log_priors_assignment(assignment, priors, component_states) -> None:
+    """Log each prior's dominant component and weight."""
+    A = assignment.shape[1] if assignment.size else 0
+    for p, prior in enumerate(priors.priors):
+        if A == 0:
+            continue
+        k_dom = int(np.argmax(assignment[p]))
+        w_dom = float(assignment[p, k_dom])
+        log.info(
+            "  prior %s → comp %d (w=%.3f, gen_mean=%.1f)",
+            prior.name, k_dom, w_dom, prior.gen_mean,
+        )
+
+
+def update_generations_with_priors(
     stats: EMStats,
     current_T_per_comp: jnp.ndarray,
     mu: jnp.ndarray,
-    priors,  # popout.priors.Priors  (avoid circular import for type hint)
+    priors,        # popout.prior_spec.Priors (avoid import cycle in hint)
+    assignment: np.ndarray,  # (P, K) soft prior→component weights
 ) -> jnp.ndarray:
-    """Per-component MAP estimate of generations since admixture.
+    """Per-component MAP T-update under similarity-weighted Beta priors.
 
-    For each component k, the per-step transition probability
-    ``r_k = 1 - exp(-T_k * morgans_per_step)`` is updated from the
-    forward-backward sufficient statistics under an optional Beta(α, β)
-    prior taken from ``priors``.
+    For each component ``k``, the effective Beta(α_eff, β_eff) is
+    constructed by accumulating each prior's pseudocount excess
+    (α_p - 1, β_p - 1) weighted by the soft assignment::
 
-    The Bernoulli likelihood is approximated as if the data were drawn
-    from independent steps at distance ``priors.morgans_per_step``;
-    sufficient stats are rescaled accordingly:
+        α_eff[k] = 1 + Σ_p assignment[p, k] * (α_p - 1)
+        β_eff[k] = 1 + Σ_p assignment[p, k] * (β_p - 1)
 
-    * ``successes_eff[k] = switches_per_comp[k] / (1 - mu[k])`` —
-      effective "would-be switches" if self-reentries (mu[k] of switches
-      at the trans matrix landing back on k) were observable
-    * ``trials_eff[k] = d_weighted_occupancy[k] / morgans_per_step`` —
-      occupancy in k expressed as effective number of independent steps
+    The standard Beta-Bernoulli MAP then gives::
 
-    MAP shift: ``r_k = (successes + α - 1) / (trials + α + β - 2)``.
-    Components without a prior use the bare MLE (no Beta(1,1) flow-through —
-    the spec explicitly avoids the one-event bias that would introduce at
-    biobank scale).
+        r_MAP[k] = (successes_eff[k] + α_eff[k] - 1)
+                 / (trials_eff[k] + α_eff[k] + β_eff[k] - 2)
+        T_MAP[k] = -log(1 - r_MAP[k]) / morgans_per_step
+
+    The mu-correction (``successes_eff = switches_per_comp / (1 - mu)``)
+    and log-space blend toward ``current_T_per_comp`` are unchanged
+    from the previous M-step.
+
+    Limits — both verified by unit test:
+
+    * If ``Σ_p assignment[p, k] == 0`` for some k, α_eff=β_eff=1
+      (Beta(1,1) is uniform), so the MAP collapses to the bare MLE.
+    * If ``assignment[p, k] = 1`` for one p and 0 for others,
+      α_eff=α_p, β_eff=β_p — the standard MAP shift for that prior.
+
+    Intermediate ``assignment[p, k] = 0.5`` is *not* a half-strength
+    prior — it is the full prior weighted at 0.5 effective pseudocount
+    strength.
 
     Parameters
     ----------
@@ -301,12 +443,14 @@ def update_generations_per_component_from_stats(
         populated (raises if either is None — caller is responsible for
         running the xi-with-transitions branch of forward-backward).
     current_T_per_comp : (A,)
-        Previous per-component T estimate for log-space blending.
+        Previous per-component T estimate, used for log-space blending.
     mu : (A,)
         Current global ancestry proportions.
     priors
-        :class:`popout.priors.Priors`. Components without a matching
-        ``component_idx`` get the bare MLE.
+        :class:`popout.prior_spec.Priors`.
+    assignment : (P, K) ndarray
+        Soft prior→component weights from
+        :func:`popout.identity_assignment.assign_priors_to_components`.
 
     Returns
     -------
@@ -323,38 +467,41 @@ def update_generations_per_component_from_stats(
     occ = np.asarray(stats.d_weighted_occupancy, dtype=np.float64)  # (A,)
     mu_np = np.asarray(mu, dtype=np.float64)
     cur_T = np.asarray(current_T_per_comp, dtype=np.float64)
+    assignment_np = np.asarray(assignment, dtype=np.float64)  # (P, K)
 
     A = sw.shape[0]
+    P = len(priors.priors)
+    if assignment_np.shape != (P, A):
+        raise ValueError(
+            f"assignment shape {assignment_np.shape} does not match "
+            f"(n_priors={P}, n_components={A})"
+        )
+
     mps = float(priors.morgans_per_step)
-
-    # (1 - mu[k]) correction; clamp to keep numerics sane when one
-    # component dominates the cohort.
     one_minus_mu = np.maximum(1.0 - mu_np, 1e-3)
+    successes_eff = sw / one_minus_mu
+    trials_eff = occ / max(mps, 1e-12)
 
-    successes_eff = sw / one_minus_mu                       # (A,)
-    trials_eff = occ / max(mps, 1e-12)                       # (A,)
+    # Per-prior pseudocount excesses (alpha - 1, beta - 1).
+    alpha_excess = np.array(
+        [p.alpha - 1.0 for p in priors.priors], dtype=np.float64,
+    )                                                            # (P,)
+    beta_excess = np.array(
+        [p.beta - 1.0 for p in priors.priors], dtype=np.float64,
+    )                                                            # (P,)
+    # alpha_eff[k] = 1 + sum_p assignment[p, k] * alpha_excess[p]
+    alpha_eff = 1.0 + assignment_np.T @ alpha_excess              # (A,)
+    beta_eff = 1.0 + assignment_np.T @ beta_excess                # (A,)
 
     new_T = np.empty(A, dtype=np.float64)
     for k in range(A):
-        prior_k = priors.get(k)
-        if prior_k is None:
-            # Bare MLE — no Beta(1,1) flow-through.
-            denom = max(trials_eff[k], 1e-9)
-            r_k = successes_eff[k] / denom
-        else:
-            num = successes_eff[k] + (prior_k.alpha - 1.0)
-            den = trials_eff[k] + (prior_k.alpha + prior_k.beta - 2.0)
-            num = max(num, 1e-9)
-            den = max(den, 1e-9)
-            r_k = num / den
+        num = max(successes_eff[k] + alpha_eff[k] - 1.0, 1e-9)
+        den = max(trials_eff[k] + alpha_eff[k] + beta_eff[k] - 2.0, 1e-9)
+        r_k = float(np.clip(num / den, 1e-12, 1.0 - 1e-12))
 
-        # r_k must lie strictly in (0, 1).
-        r_k = float(np.clip(r_k, 1e-12, 1.0 - 1e-12))
         T_est = -np.log1p(-r_k) / mps
         T_est = max(1.0, min(T_est, 1000.0))
 
-        # Log-space blend toward previous estimate (matches sibling
-        # functions for consistency).
         blend_alpha = 0.3
         log_T = (
             (1.0 - blend_alpha) * np.log(max(cur_T[k], 1.0))
@@ -496,7 +643,8 @@ def run_em(
     write_dense_decode: bool = False,
     decode_parquet_path: Optional[str] = None,
     skip_decode: bool = False,
-    priors=None,  # popout.priors.Priors | None
+    priors=None,  # popout.prior_spec.Priors | None
+    priors_dump_path: Optional[str] = None,
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -595,6 +743,7 @@ def run_em(
     bucket_centers = compute_bucket_centers(n_T_buckets) if per_hap_T else None
     prev_freq = model.allele_freq
     prev_T = model.gen_since_admix
+    last_priors_assignment = None  # (P, K), captured for the end-of-run dump
 
     for iteration in range(n_em_iter):
         log.info("--- EM iteration %d/%d ---", iteration + 1, n_em_iter)
@@ -662,13 +811,23 @@ def run_em(
             log.info("  T (per-hap): mean=%.1f, std=%.1f",
                      float(jnp.mean(T_per_hap)), float(jnp.std(T_per_hap)))
         elif priors is not None:
+            from .identity_assignment import assign_priors_to_components
+
             cur_per = (
                 model.gen_per_comp
                 if model.gen_per_comp is not None
                 else jnp.full((n_anc,), model.gen_since_admix, dtype=jnp.float32)
             )
-            new_gen_per_comp = update_generations_per_component_from_stats(
-                em_stats, cur_per, new_mu, priors,
+            component_states = build_component_states(
+                new_freq, new_mu, chrom_data,
+            )
+            assignment = assign_priors_to_components(
+                priors, component_states, iteration,
+            )
+            log_priors_assignment(assignment, priors, component_states)
+            last_priors_assignment = np.array(assignment, copy=True)
+            new_gen_per_comp = update_generations_with_priors(
+                em_stats, cur_per, new_mu, priors, assignment,
             )
             new_T = float(jnp.mean(new_gen_per_comp))   # logging-only summary
             log.info(
@@ -750,6 +909,13 @@ def run_em(
             break
         prev_freq = new_freq
         prev_T = new_T
+
+    # --- Optional priors-assignment dump (audit artifact) ---
+    if priors_dump_path is not None and last_priors_assignment is not None:
+        write_priors_assignment_dump(
+            priors_dump_path, last_priors_assignment, priors, model,
+            chrom_data,
+        )
 
     # --- Skip decode if no EM iterations or skip_decode requested ---
     if n_em_iter == 0 or skip_decode:
@@ -1252,7 +1418,8 @@ def run_em_genome(
     write_dense_decode: bool = False,
     seeding_mask: np.ndarray | None = None,
     work_dir=None,
-    priors=None,  # popout.priors.Priors | None
+    priors=None,  # popout.prior_spec.Priors | None
+    priors_dump_path: Optional[str] = None,
 ) -> list[AncestryResult] | None:
     """Run self-bootstrapping LAI across all chromosomes.
 
@@ -1435,6 +1602,7 @@ def run_em_genome(
                     freeze_anchors_iters=freeze_anchors_iters,
                     skip_decode=True,
                     priors=priors,
+                    priors_dump_path=priors_dump_path,
                 )
                 fitted_model = result.model
 

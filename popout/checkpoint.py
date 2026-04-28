@@ -55,16 +55,18 @@ STAGE_DEPS: dict[str, dict[str, list[str]]] = {
         "args": [
             "gen_since_admix", "n_em_iter", "block_emissions", "block_size",
             "freeze_anchors_iters", "per_hap_T", "n_T_buckets",
-            "priors_sha256",
+            "priors_fingerprint",
         ],
     },
     "decode": {
         "fingerprint": [],
         # bucketed decode is a different code path from standard decode,
         # and parquet output presence depends on probs.
-        # priors_sha256 affects per-component T → transition matrix at
-        # decode, so a priors change must invalidate decode too.
-        "args": ["probs", "per_hap_T", "n_T_buckets", "priors_sha256"],
+        # priors_fingerprint covers the YAML + every referenced data
+        # file (AIM panels, 1KG TSV) — content changes in those files
+        # must invalidate the decode stage too because per-component T
+        # feeds the transition matrix at decode.
+        "args": ["probs", "per_hap_T", "n_T_buckets", "priors_fingerprint"],
     },
     "tracts": {
         "fingerprint": [],
@@ -485,21 +487,31 @@ class WorkDir:
         return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
     @staticmethod
-    def hash_priors_file(path: str | Path | None) -> str | None:
-        """SHA-256 prefix of the priors YAML, or None when not supplied.
+    def hash_priors_bundle(path: str | Path | None) -> str | None:
+        """Content-aware fingerprint covering the priors YAML *plus*
+        every referenced data file (AIM panel TSVs, 1KG ref TSV bytes).
 
-        Used as a manifest dependency for the em + decode stages so that
-        any change to the priors file invalidates downstream artifacts.
+        Returned as a 16-char prefix of :attr:`Priors.fingerprint`.
+
+        Used as a manifest dependency for the em + decode stages, so any
+        content change — to the YAML *or* to a panel/ref TSV — invalidates
+        downstream artifacts. The previous v1 hash covered only YAML
+        bytes and silently accepted stale panel content.
         """
         if path is None:
             return None
         p = Path(path)
         if not p.exists():
             return None
-        h = hashlib.sha256()
-        with open(p, "rb") as f:
-            h.update(f.read())
-        return h.hexdigest()[:16]
+        from .prior_spec import load_priors
+        try:
+            priors = load_priors(p)
+        except Exception:
+            # Don't crash manifest construction over a malformed priors
+            # file — caller validates separately and will surface the
+            # real error.
+            return None
+        return priors.fingerprint[:16]
 
     # ------------------------------------------------------------------
     # Stage save/load

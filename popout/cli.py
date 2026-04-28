@@ -387,10 +387,18 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--priors", type=str, default=None, metavar="PATH",
-        help="YAML file specifying per-component priors on generations "
-             "since admixture (Beta priors on per-step transition rate). "
-             "Mutually exclusive with --per-hap-T. HMM method only. "
-             "See popout/priors.py for the YAML schema.",
+        help="YAML file specifying priors on generations since admixture "
+             "(Beta priors on per-step transition rate). v2 schema only — "
+             "see docs/PRIORS.md. Mutually exclusive with --per-hap-T. "
+             "HMM method only.",
+    )
+    parser.add_argument(
+        "--priors-dump-assignments", type=str, default=None, metavar="PATH",
+        help="Write the final (P, K) prior→component assignment matrix "
+             "to PATH (TSV). Rows are prior names; columns are "
+             "component indices with their nearest-1KG-superpop "
+             "annotation. The audit artifact for diagnosing "
+             "prior-to-component mismatch — read this first.",
     )
     parser.add_argument(
         "--block-emissions", action="store_true",
@@ -828,7 +836,7 @@ def main(argv: list[str] | None = None) -> None:
                 "probs": args.probs,
                 "per_hap_T": args.per_hap_T,
                 "n_T_buckets": args.n_T_buckets,
-                "priors_sha256": WorkDir.hash_priors_file(args.priors),
+                "priors_fingerprint": WorkDir.hash_priors_bundle(args.priors),
             },
             restart_stage=args.restart_stage,
         )
@@ -878,12 +886,12 @@ def main(argv: list[str] | None = None) -> None:
 
         priors_obj = None
         if args.priors is not None:
-            from .priors import load_priors
+            from .prior_spec import load_priors
             priors_obj = load_priors(args.priors)
             log.info(
-                "Loaded priors from %s: %d component priors, morgans_per_step=%g, "
+                "Loaded priors from %s: %d priors, morgans_per_step=%g, "
                 "fingerprint=%s…",
-                args.priors, len(priors_obj.components),
+                args.priors, len(priors_obj.priors),
                 priors_obj.morgans_per_step, priors_obj.fingerprint[:12],
             )
 
@@ -910,6 +918,7 @@ def main(argv: list[str] | None = None) -> None:
             seeding_mask=seeding_mask,
             work_dir=work_dir,
             priors=priors_obj,
+            priors_dump_path=args.priors_dump_assignments,
         )
 
     t_compute = time.perf_counter() - t0
