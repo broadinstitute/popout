@@ -135,6 +135,12 @@ def build(
     write_panel(panel_path, selected, pop)
     log.info("wrote panel to %s", panel_path)
 
+    # Build log: selected markers + a near-miss tier (top ~40 below
+    # the cut), plus summary counts. Logging every pruned candidate
+    # produces 100k+ row dumps that duplicate the candidates file
+    # already in build/ — the audit signal is in the top-of-rank
+    # tail.
+    NEAR_MISS_DEPTH = 40
     log_entries: list[BuildLogEntry] = []
     for c in selected:
         log_entries.append(BuildLogEntry(
@@ -144,15 +150,39 @@ def build(
             separation=c.separation, stage="selected",
             reason="top-N by separation, post-pruning",
         ))
-    log_entries.extend(prune_log)
-    # Track candidates that survived pruning but weren't in top N.
-    for c in pruned[target_size:]:
+    for c in pruned[target_size:target_size + NEAR_MISS_DEPTH]:
         log_entries.append(BuildLogEntry(
             chrom=c.chrom, pos=c.pos, ref=c.ref, alt=c.alt,
             target_pop=pop, expected_freq=c.expected_freq,
             others_max_freq=c.others_max_freq,
-            separation=c.separation, stage="below_top_n",
-            reason="passed pruning but ranked below target_size",
+            separation=c.separation, stage="near_miss",
+            reason="passed pruning but ranked just below target_size",
+        ))
+    # The full pruned and below-cut populations are summarized as
+    # one synthetic row each (avoids gigantic dumps; the candidates
+    # TSV already has the per-row detail).
+    if prune_log:
+        first_pruned = prune_log[0]
+        log_entries.append(BuildLogEntry(
+            chrom="-", pos=0, ref="-", alt="-",
+            target_pop=pop, expected_freq=0.0, others_max_freq=0.0,
+            separation=0.0, stage="summary_pruned",
+            reason=(
+                f"linkage-pruned {len(prune_log)} candidates within "
+                f"{min_sep_bp} bp of stronger neighbors (sample stage: "
+                f"{first_pruned.chrom}:{first_pruned.pos})"
+            ),
+        ))
+    n_below = max(0, len(pruned) - target_size - NEAR_MISS_DEPTH)
+    if n_below:
+        log_entries.append(BuildLogEntry(
+            chrom="-", pos=0, ref="-", alt="-",
+            target_pop=pop, expected_freq=0.0, others_max_freq=0.0,
+            separation=0.0, stage="summary_below",
+            reason=(
+                f"{n_below} additional candidates ranked below "
+                f"top {target_size + NEAR_MISS_DEPTH}"
+            ),
         ))
 
     log_path = build_log_dir / f"{pop.lower()}.tsv"
