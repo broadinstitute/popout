@@ -3,3 +3,5 @@ cloud
 build/
 popout/_version.py
 *.egg-info
+# Local 1KG reference TSV (large; resolved via ~/.popout/ref/ symlink).
+built_ref.tsv.gz

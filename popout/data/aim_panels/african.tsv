@@ -1,0 +1,11 @@
+chrom	pos_bp	ref	alt	expected_freq	weight	source	locus	rationale
+chr1	159204893	T	C	0.9637	1.00	1KG_Phase3		data-driven from 1KG separation
+chr8	144414297	C	G	0.0855	1.00	1KG_Phase3		data-driven from 1KG separation
+chr5	179199608	G	C	0.9228	1.00	1KG_Phase3		data-driven from 1KG separation
+chr9	133904766	G	A	0.0991	1.00	1KG_Phase3		data-driven from 1KG separation
+chr17	31023751	T	G	0.9039	1.00	1KG_Phase3		data-driven from 1KG separation
+chr15	29135197	T	C	0.9032	1.00	1KG_Phase3		data-driven from 1KG separation
+chr4	3664767	C	G	0.9274	1.00	1KG_Phase3		data-driven from 1KG separation
+chr7	146308840	C	G	0.9349	1.00	1KG_Phase3		data-driven from 1KG separation
+chr2	72141061	C	G	0.9569	1.00	1KG_Phase3		data-driven from 1KG separation
+chr1	116344833	C	A	0.9478	1.00	1KG_Phase3		data-driven from 1KG separation

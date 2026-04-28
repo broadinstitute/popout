@@ -1,0 +1,11 @@
+chrom	pos_bp	ref	alt	expected_freq	weight	source	locus	rationale
+chr16	31087679	C	T	0.2705	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
+chr2	96363430	G	A	0.4738	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
+chr12	54992285	C	T	0.4375	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
+chr16	36236378	G	A	0.2122	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
+chr4	37079058	G	T	0.4779	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
+chr14	49361649	C	A	0.6236	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
+chr15	64232781	G	A	0.4430	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
+chr8	41851552	G	A	0.4283	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
+chr16	34102164	G	A	0.2024	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
+chr16	46812751	T	C	0.2987	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage

@@ -1,0 +1,20 @@
+chrom	pos_bp	ref	alt	target_pop	expected_freq	others_max_freq	separation	stage	reason
+chr5	33951588	C	G	EUR	0.9384	0.4640	0.4744	selected	top-N by separation, post-pruning
+chr15	28165345	C	T	EUR	0.6541	0.2104	0.4437	selected	top-N by separation, post-pruning
+chr4	38762373	G	C	EUR	0.0974	0.5029	0.4055	selected	top-N by separation, post-pruning
+chr5	33954775	G	A	EUR	0.9563	0.4928	0.4635	linkage_pruned	within 1000000 bp of stronger candidate on chr5
+chr5	33958854	C	A	EUR	0.9563	0.4928	0.4635	linkage_pruned	within 1000000 bp of stronger candidate on chr5
+chr5	33952707	T	C	EUR	0.9523	0.4899	0.4624	linkage_pruned	within 1000000 bp of stronger candidate on chr5
+chr5	33964105	T	G	EUR	0.9533	0.4928	0.4605	linkage_pruned	within 1000000 bp of stronger candidate on chr5
+chr5	33948484	T	C	EUR	0.9563	0.5014	0.4549	linkage_pruned	within 1000000 bp of stronger candidate on chr5
+chr5	33951011	G	T	EUR	0.9195	0.4654	0.4541	linkage_pruned	within 1000000 bp of stronger candidate on chr5
+chr5	33952001	C	T	EUR	0.9563	0.5058	0.4505	linkage_pruned	within 1000000 bp of stronger candidate on chr5
+chr5	33946466	A	G	EUR	0.9573	0.5101	0.4472	linkage_pruned	within 1000000 bp of stronger candidate on chr5
+chr15	28288419	G	C	EUR	0.6541	0.2161	0.4380	linkage_pruned	within 1000000 bp of stronger candidate on chr15
+chr15	28120472	A	G	EUR	0.6362	0.2017	0.4345	linkage_pruned	within 1000000 bp of stronger candidate on chr15
+chr15	28111713	C	T	EUR	0.6352	0.2032	0.4320	linkage_pruned	within 1000000 bp of stronger candidate on chr15
+chr15	28250810	A	G	EUR	0.6431	0.2118	0.4313	linkage_pruned	within 1000000 bp of stronger candidate on chr15
+chr5	33962665	G	A	EUR	0.9612	0.5562	0.4050	linkage_pruned	within 1000000 bp of stronger candidate on chr5
+chr5	33964833	C	T	EUR	0.9612	0.5576	0.4036	linkage_pruned	within 1000000 bp of stronger candidate on chr5
+chr5	33967040	C	G	EUR	0.9612	0.5576	0.4036	linkage_pruned	within 1000000 bp of stronger candidate on chr5
+chr5	33965152	G	T	EUR	0.9473	0.5461	0.4012	linkage_pruned	within 1000000 bp of stronger candidate on chr5
