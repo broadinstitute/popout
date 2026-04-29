@@ -28,3 +28,6 @@ popout = "popout.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["popout*"]
+
+[tool.setuptools.package-data]
+"popout.configs" = ["*.json"]

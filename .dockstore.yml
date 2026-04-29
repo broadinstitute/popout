@@ -36,4 +36,8 @@ workflows:
   - name: popout-label
     subclass: WDL
     primaryDescriptorPath: /wdl/popout_label.wdl
-    topic: Label inferred ancestries using 1KG superpopulation reference
+    topic: Label popout ancestries against a pre-built population panel
+  - name: popout-build-panel
+    subclass: WDL
+    primaryDescriptorPath: /wdl/popout_build_panel.wdl
+    topic: Build per-population allele-frequency panel TSV from 1KG or gnomAD VCFs

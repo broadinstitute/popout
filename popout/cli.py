@@ -282,8 +282,12 @@ def main(argv: list[str] | None = None) -> None:
         from .fetch_ref import fetch_ref_main
         fetch_ref_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "build-panel":
+        from .build_panel import build_panel_main
+        build_panel_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "build-ref":
-        from .build_ref import build_ref_main
+        from .build_panel import build_ref_main
         build_ref_main(raw_args[1:])
         return
     if raw_args and raw_args[0] == "convert":

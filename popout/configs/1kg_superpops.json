@@ -1,0 +1,10 @@
+{
+  "output_order": ["EUR", "EAS", "AMR", "AFR", "SAS"],
+  "rules": {
+    "EUR": ["CEU", "TSI", "FIN", "GBR", "IBS"],
+    "EAS": ["CHB", "JPT", "CHS", "CDX", "KHV"],
+    "AMR": ["MXL", "PUR", "CLM", "PEL"],
+    "AFR": ["YRI", "LWK", "GWD", "MSL", "ESN", "ACB", "ASW"],
+    "SAS": ["GIH", "PJL", "BEB", "STU", "ITU"]
+  }
+}
