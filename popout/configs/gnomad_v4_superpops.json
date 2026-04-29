@@ -1,0 +1,13 @@
+{
+  "output_order": ["EUR", "EAS", "AMR", "AFR", "SAS", "MID", "ASJ", "AMI"],
+  "rules": {
+    "EUR": ["nfe", "fin"],
+    "EAS": ["eas"],
+    "AMR": ["amr"],
+    "AFR": ["afr"],
+    "SAS": ["sas"],
+    "MID": ["mid"],
+    "ASJ": ["asj"],
+    "AMI": ["ami"]
+  }
+}

@@ -19,7 +19,30 @@ Usage::
     popout build-panel --source 1kg --download --out 1kg_superpop_freq.tsv.gz
     popout build-panel --source gnomad --vcf gnomad.chr22.vcf.bgz --out chr22.tsv.gz
     popout build-panel --source gnomad --vcf gnomad.chr22.vcf.bgz \\
-        --pop-config configs/gnomad_5pop.json --out chr22.tsv.gz
+        --pop-config popout/configs/gnomad_v4_superpops.json --out chr22.tsv.gz
+
+Shipped pop-configs under ``popout/configs/``:
+
+- ``1kg_superpops.json`` — default for ``--source 1kg``. Collapses the
+  26 1KG Phase 3 sub-pops into the canonical 5 super-pops
+  (EUR/EAS/AMR/AFR/SAS).
+- ``gnomad_v4_superpops.json`` — recommended starting point for
+  ``--source gnomad``. Eight columns: EUR (nfe+fin), EAS, AMR, AFR,
+  SAS, MID, ASJ, AMI. ASJ and AMI are kept as their own columns
+  rather than folded into EUR because they are genuine founder
+  populations with distinct allele frequencies; folding them into
+  EUR would dilute the EUR signal and lose resolution for cohorts
+  (e.g. AoU) that contain meaningful numbers of either group.
+  Sub-pops not in this config (``remaining``, plus any unlisted
+  groups) are dropped — gnomAD's ``remaining`` is a non-genetic-
+  ancestry catch-all and is not appropriate as a reference column.
+  Caveat: gnomAD v4.1 has only ~450 ``ami`` samples vs ~5k ``asj``
+  and ~34k ``nfe``, so AMI allele-frequency estimates are noisier.
+  Expect lower correlation scores in ``labels.json`` for any AMI
+  cluster popout discovers.
+
+To pass through every gnomAD pop in the VCF header (no collapsing,
+no exclusions), omit ``--pop-config`` entirely.
 """
 
 from __future__ import annotations
