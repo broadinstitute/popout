@@ -79,10 +79,6 @@ task build_panel_vcf_task {
   command <<<
     set -euo pipefail
 
-    # If an index was localized separately, symlink it next to the data
-    # file so htslib/bcftools find it via the canonical <vcf>.tbi path.
-    ~{if defined(vcf_index) then 'ln -sf ~{vcf_index} ~{vcf_file}.tbi' else 'true'}
-
     popout build-panel \
       --source ~{source} \
       --vcf ~{vcf_file} \
