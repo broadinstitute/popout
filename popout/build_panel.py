@@ -6,7 +6,9 @@ two source kinds via pluggable extractors:
 - **genotype** — per-sample VCFs (e.g. 1000 Genomes Phase 3). Aggregates
   AC/AN across the samples that map to each output population.
 - **info_af**  — sites-only VCFs with per-population ``AC_<pop>`` /
-  ``AN_<pop>`` INFO fields (e.g. gnomAD v4).
+  ``AN_<pop>`` INFO fields (e.g. gnomAD v4). Streams via
+  ``bcftools view ... | bcftools query`` since gnomAD is INFO-heavy
+  and per-record pysam iteration is Python-overhead-bound.
 
 Output (gzipped TSV):
     #chrom  pos  ref  alt  POP1  POP2  ...
@@ -309,22 +311,38 @@ def extract_info_af(
 ) -> Iterator[Row]:
     """Sites-only AC/AN INFO-field extractor (gnomAD-style).
 
+    Streams ``bcftools view [-f PASS] -m2 -M2 -v snps <vcf> | bcftools
+    query -f ...`` so per-record extraction runs in C. Iterating gnomAD
+    record-by-record through pysam is ~50-100x slower because each
+    record involves dozens of Python-level INFO lookups; bcftools writes
+    one TSV line per record at native speed.
+
     For each output pop P with source pops s1..sk:
         AF_P = (sum AC_si) / (sum AN_si)
 
     Records with any missing AC_<sp> / AN_<sp> field, or where the summed
-    AN is zero, are skipped (no per-record data to compute frequency).
-    Multiallelic records (len(alts) != 1) are skipped, matching the
-    genotype extractor.
+    AN for some output pop is zero, are skipped. Multiallelic records
+    and indels are filtered out by ``bcftools view -m2 -M2 -v snps``.
     """
+    import shutil
+    import subprocess
+
+    if shutil.which("bcftools") is None:
+        raise RuntimeError(
+            "bcftools binary not found on PATH; required for --source gnomad. "
+            "Install via your distro's package manager (e.g. "
+            "`apt-get install bcftools`)."
+        )
+
+    # Validate the VCF header advertises every required AC_<sp>/AN_<sp>
+    # before launching the streaming pipeline. pysam header read is fast
+    # (header bytes only) and gives a clear error before bcftools runs.
     import pysam
 
     vcf = pysam.VariantFile(str(vcf_path))
-
-    # Validate header has every required AC_<sp> / AN_<sp>.
-    src_pops = pop_config.source_pops()
+    src_pops_sorted = sorted(pop_config.source_pops())
     missing: list[str] = []
-    for sp in src_pops:
+    for sp in src_pops_sorted:
         if f"AC_{sp}" not in vcf.header.info:
             missing.append(f"AC_{sp}")
         if f"AN_{sp}" not in vcf.header.info:
@@ -337,57 +355,114 @@ def extract_info_af(
             f"aggregation: {missing}. Discovered AF_<pop> in header: "
             f"{available}"
         )
+    vcf.close()
+
+    fmt_parts = ["%CHROM", "%POS", "%REF", "%ALT"]
+    for sp in src_pops_sorted:
+        fmt_parts.append(f"%INFO/AC_{sp}")
+        fmt_parts.append(f"%INFO/AN_{sp}")
+    fmt = "\t".join(fmt_parts) + "\n"
+
+    view_cmd = ["bcftools", "view"]
+    if pass_only:
+        view_cmd += ["-f", "PASS"]
+    view_cmd += ["-m2", "-M2", "-v", "snps", str(vcf_path)]
+    query_cmd = ["bcftools", "query", "-f", fmt]
+
+    log.info("bcftools pipeline: %s | %s",
+             " ".join(view_cmd), " ".join(query_cmd))
+
+    view_proc = subprocess.Popen(
+        view_cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    query_proc = subprocess.Popen(
+        query_cmd,
+        stdin=view_proc.stdout,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    # Allow `view` to receive SIGPIPE if `query` exits early.
+    view_proc.stdout.close()
+
+    n_meta = 4
+    n_per_pop = 2
+    n_expected = n_meta + n_per_pop * len(src_pops_sorted)
 
     try:
-        for rec in vcf:
-            if len(rec.alts) != 1:
+        for line in query_proc.stdout:
+            parts = line.rstrip("\n").split("\t")
+            if len(parts) != n_expected:
+                raise ValueError(
+                    f"Unexpected column count from bcftools query "
+                    f"({len(parts)} != {n_expected}): {line!r}"
+                )
+
+            chrom, pos_s, ref, alt = parts[:n_meta]
+
+            # Parse per-source-pop AC/AN; missing data → skip the site.
+            sp_ac: dict[str, int] = {}
+            sp_an: dict[str, int] = {}
+            skip_record = False
+            for i, sp in enumerate(src_pops_sorted):
+                ac_s = parts[n_meta + 2 * i]
+                an_s = parts[n_meta + 2 * i + 1]
+                if ac_s == "." or an_s == ".":
+                    skip_record = True
+                    break
+                # AC is Number=A; biallelic input means a single value, but
+                # bcftools may still emit comma-separated for safety.
+                if "," in ac_s:
+                    ac_s = ac_s.split(",", 1)[0]
+                sp_ac[sp] = int(ac_s)
+                sp_an[sp] = int(an_s)
+            if skip_record:
                 continue
-            if len(rec.ref) != 1 or len(rec.alts[0]) != 1:
-                continue
-            if pass_only:
-                fset = set(rec.filter.keys())
-                if fset and fset != {"PASS"}:
-                    continue
 
             freqs: list[float] = []
             total_ac, total_an = 0, 0
-            skip = False
+            zero_an = False
             for op in pop_config.output_order:
-                ac_sum, an_sum = 0, 0
-                for sp in pop_config.rules[op]:
-                    ac_val = rec.info.get(f"AC_{sp}")
-                    an_val = rec.info.get(f"AN_{sp}")
-                    if ac_val is None or an_val is None:
-                        skip = True
-                        break
-                    # AC is Number=A -> tuple of length 1 (we filtered to biallelic).
-                    ac = ac_val[0] if isinstance(ac_val, tuple) else ac_val
-                    # AN is Number=1 -> scalar.
-                    an = an_val
-                    if ac is None or an is None:
-                        skip = True
-                        break
-                    ac_sum += int(ac)
-                    an_sum += int(an)
-                if skip:
-                    break
+                ac_sum = sum(sp_ac[sp] for sp in pop_config.rules[op])
+                an_sum = sum(sp_an[sp] for sp in pop_config.rules[op])
                 if an_sum == 0:
-                    skip = True
+                    zero_an = True
                     break
                 freqs.append(ac_sum / an_sum)
                 total_ac += ac_sum
                 total_an += an_sum
-
-            if skip or total_an == 0:
+            if zero_an or total_an == 0:
                 continue
+
             global_af = total_ac / total_an
             global_maf = min(global_af, 1.0 - global_af)
             if global_maf < min_global_maf:
                 continue
 
-            yield (rec.chrom, rec.pos, rec.ref, rec.alts[0], freqs)
+            yield (chrom, int(pos_s), ref, alt, freqs)
     finally:
-        vcf.close()
+        if query_proc.stdout is not None:
+            query_proc.stdout.close()
+        view_proc.wait()
+        query_proc.wait()
+        if view_proc.returncode != 0:
+            err = (
+                view_proc.stderr.read().decode(errors="replace")
+                if view_proc.stderr else ""
+            )
+            raise RuntimeError(
+                f"bcftools view failed (rc={view_proc.returncode}): {err}"
+            )
+        if query_proc.returncode != 0:
+            err = (
+                query_proc.stderr.read().decode(errors="replace")
+                if query_proc.stderr else ""
+            )
+            raise RuntimeError(
+                f"bcftools query failed (rc={query_proc.returncode}): {err}"
+            )
 
 
 # ---------------------------------------------------------------------------

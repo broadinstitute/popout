@@ -66,6 +66,7 @@ task build_panel_vcf_task {
   input {
     String source
     File   vcf_file
+    File?  vcf_index
     File?  kg_panel
     File?  pop_config
     Float  min_maf      = 0.01
@@ -77,6 +78,11 @@ task build_panel_vcf_task {
 
   command <<<
     set -euo pipefail
+
+    # If an index was localized separately, symlink it next to the data
+    # file so htslib/bcftools find it via the canonical <vcf>.tbi path.
+    ~{if defined(vcf_index) then 'ln -sf ~{vcf_index} ~{vcf_file}.tbi' else 'true'}
+
     popout build-panel \
       --source ~{source} \
       --vcf ~{vcf_file} \
@@ -142,6 +148,7 @@ workflow popout_build_panel {
   input {
     String       source        = "1kg"
     Array[File]  vcfs          = []
+    Array[File]  vcf_indexes   = []
     String       genome        = "GRCh38"
     Array[String] chromosomes  = [
       "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8",  "9",  "10",
@@ -158,6 +165,7 @@ workflow popout_build_panel {
   }
 
   Boolean use_download = source == "1kg" && length(vcfs) == 0
+  Boolean have_indexes = length(vcf_indexes) > 0
 
   if (use_download) {
     scatter (chrom in chromosomes) {
@@ -180,11 +188,15 @@ workflow popout_build_panel {
   }
 
   if (!use_download) {
-    scatter (vcf in vcfs) {
+    scatter (i in range(length(vcfs))) {
+      if (have_indexes) {
+        File this_idx = vcf_indexes[i]
+      }
       call build_panel_vcf_task {
         input:
           source       = source,
-          vcf_file     = vcf,
+          vcf_file     = vcfs[i],
+          vcf_index    = this_idx,
           kg_panel     = kg_panel,
           pop_config   = pop_config,
           min_maf      = min_maf,
