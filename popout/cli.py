@@ -286,6 +286,10 @@ def main(argv: list[str] | None = None) -> None:
         from .build_superpop_freqs import build_superpop_freqs_main
         build_superpop_freqs_main(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "aim-panel-bed":
+        from .aim_panel_bed import main as aim_panel_bed_main
+        aim_panel_bed_main(raw_args[1:])
+        return
     if raw_args and raw_args[0] == "convert":
         _cmd_convert(raw_args[1:])
         return
@@ -707,6 +711,31 @@ def main(argv: list[str] | None = None) -> None:
         gmap = load_genetic_map(map_path)
     log.info("Loaded genetic map: %d chromosomes", len(gmap))
 
+    # --- Load priors early so AIM panel positions can protect sites
+    # from cohort-shape filtering (cM thinning + MAF/MAC). Loaded once
+    # here, reused by run_em_genome below.
+    priors_obj = None
+    protect_positions = None
+    if args.priors is not None:
+        from .prior_spec import load_priors, panel_protect_positions
+        priors_obj = load_priors(
+            args.priors, superpop_freqs=args.superpop_freqs,
+        )
+        log.info(
+            "Loaded priors from %s: %d priors, morgans_per_step=%g, "
+            "fingerprint=%s…",
+            args.priors, len(priors_obj.priors),
+            priors_obj.morgans_per_step, priors_obj.fingerprint[:12],
+        )
+        protect_positions = panel_protect_positions(priors_obj)
+        if protect_positions:
+            n_total = sum(len(v) for v in protect_positions.values())
+            log.info(
+                "AIM panel protection: %d positions across %d chromosomes "
+                "will bypass cM thinning and MAF/MAC filters",
+                n_total, len(protect_positions),
+            )
+
     # --- Set up input reader (format-aware) ---
     if args.vcf:
         import pysam
@@ -744,6 +773,7 @@ def main(argv: list[str] | None = None) -> None:
             chromosomes=args.chromosomes,
             thin_cm=args.thin_cm,
             stats=stats,
+            protect_positions=protect_positions,
         )
 
     n_samples = len(sample_names)
@@ -893,18 +923,8 @@ def main(argv: list[str] | None = None) -> None:
 
         write_dense_decode = args.probs or args.write_dense_decode
 
-        priors_obj = None
-        if args.priors is not None:
-            from .prior_spec import load_priors
-            priors_obj = load_priors(
-                args.priors, superpop_freqs=args.superpop_freqs,
-            )
-            log.info(
-                "Loaded priors from %s: %d priors, morgans_per_step=%g, "
-                "fingerprint=%s…",
-                args.priors, len(priors_obj.priors),
-                priors_obj.morgans_per_step, priors_obj.fingerprint[:12],
-            )
+        # priors_obj was loaded earlier (before chrom_iter construction)
+        # so AIM panel positions could be plumbed into protect_positions.
 
         results = run_em_genome(
             chrom_iter_with_save(),

@@ -65,6 +65,7 @@ from .identity import (
     AIMSignature,
     FSTReferenceSignature,
     IdentitySignature,
+    _normalize_chrom,
 )
 
 
@@ -542,3 +543,36 @@ def _compute_fingerprint(
         h.update(b"superpop_freqs:")
         h.update(hashlib.sha256(sp.read_bytes()).digest())
     return h.hexdigest()
+
+
+# ---------------------------------------------------------------------------
+# AIM panel position protection
+# ---------------------------------------------------------------------------
+
+
+def panel_protect_positions(priors: Priors) -> dict[str, np.ndarray]:
+    """Aggregate every AIM panel position across the bundle.
+
+    Returns ``{normalized_chrom: sorted unique pos_bp int64 array}``.
+    The chrom key is normalized via :func:`_normalize_chrom` (no
+    leading ``chr``) so callers can match against either ``"1"`` or
+    ``"chr1"`` PGEN naming after normalizing their query.
+
+    Used by :func:`popout.pgen_io.iter_chromosomes` to build a
+    must-keep mask that exempts these positions from cM thinning and
+    MAF/MAC filtering. Returns an empty dict when no
+    :class:`AIMSignature` is present anywhere in the bundle.
+    """
+    by_chrom: dict[str, set[int]] = {}
+    for prior in priors.priors:
+        for sig in prior.identity_signatures:
+            if not isinstance(sig, AIMSignature):
+                continue
+            panel = sig.panel
+            for c, p in zip(panel.chrom, panel.pos_bp):
+                key = _normalize_chrom(str(c))
+                by_chrom.setdefault(key, set()).add(int(p))
+    return {
+        chrom: np.array(sorted(positions), dtype=np.int64)
+        for chrom, positions in by_chrom.items()
+    }

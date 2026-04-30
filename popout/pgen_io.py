@@ -273,10 +273,19 @@ def _apply_maf_mac_filter(
     n_samples: int,
     min_maf: float,
     min_mac: int,
+    must_keep_idxs: set[int] | None = None,
 ) -> np.ndarray:
     """Filter variant indices by MAF and MAC using pgenlib.count().
 
-    Returns the subset of variant_idxs that pass both filters.
+    ``must_keep_idxs`` (e.g. AIM panel positions) bypass the MAF/MAC
+    threshold: those indices are always retained when present in
+    ``variant_idxs``, even at cohort MAF below ``min_maf``. Used to
+    protect AIM panel sites whose target-population frequencies are
+    by design extreme in *some* superpops (so cohort MAF can be
+    near-zero for non-target ancestries).
+
+    Returns the subset of variant_idxs that pass both filters
+    (or are in ``must_keep_idxs``).
     """
     n_haps = 2 * n_samples
     passing = []
@@ -285,7 +294,11 @@ def _apply_maf_mac_filter(
     for i in range(0, len(variant_idxs), _COUNT_CHUNK):
         chunk = variant_idxs[i:i + _COUNT_CHUNK]
         for vidx in chunk:
-            reader.count(int(vidx), cnt_buf)
+            v_int = int(vidx)
+            if must_keep_idxs is not None and v_int in must_keep_idxs:
+                passing.append(v_int)
+                continue
+            reader.count(v_int, cnt_buf)
             hom_ref, het, hom_alt, missing = cnt_buf
             n_called = int(hom_ref + het + hom_alt)
             if n_called == 0:
@@ -295,15 +308,24 @@ def _apply_maf_mac_filter(
             mac = min(ac, total_alleles - ac)
             maf = mac / total_alleles
             if maf >= min_maf and mac >= min_mac:
-                passing.append(int(vidx))
+                passing.append(v_int)
 
     return np.array(passing, dtype=np.uint32)
 
 
-def _thin_sites(pos_cm: np.ndarray, min_spacing_cm: float) -> np.ndarray:
+def _thin_sites(
+    pos_cm: np.ndarray,
+    min_spacing_cm: float,
+    must_keep_mask: np.ndarray | None = None,
+) -> np.ndarray:
     """Return boolean mask keeping sites spaced >= min_spacing_cm apart.
 
     Uses a greedy forward pass.  Always keeps the first and last site.
+
+    ``must_keep_mask`` (e.g. AIM panel positions) overrides spacing:
+    those sites are kept regardless of how close they are to other
+    kept sites. They still update ``last_cm`` so subsequent sites
+    measure spacing from the most recently kept site.
     """
     n = len(pos_cm)
     if n <= 2:
@@ -312,9 +334,13 @@ def _thin_sites(pos_cm: np.ndarray, min_spacing_cm: float) -> np.ndarray:
     keep = np.zeros(n, dtype=bool)
     keep[0] = True
     last_cm = pos_cm[0]
+    if must_keep_mask is not None and must_keep_mask[0]:
+        # First site is already kept; nothing extra to do.
+        pass
 
     for i in range(1, n):
-        if pos_cm[i] - last_cm >= min_spacing_cm:
+        forced = must_keep_mask is not None and bool(must_keep_mask[i])
+        if forced or pos_cm[i] - last_cm >= min_spacing_cm:
             keep[i] = True
             last_cm = pos_cm[i]
 
@@ -394,6 +420,7 @@ def iter_chromosomes(
     chromosomes: Optional[list[str]] = None,
     thin_cm: Optional[float] = None,
     stats=None,
+    protect_positions: Optional[dict[str, np.ndarray]] = None,
 ) -> Iterator[ChromData]:
     """Stream phased haplotype data one chromosome at a time from PGEN files.
 
@@ -406,6 +433,11 @@ def iter_chromosomes(
     min_mac : minimum minor allele count filter (default 0 = skip)
     chromosomes : restrict to these chromosomes (default: autosomes 1-22)
     thin_cm : if set, thin sites to this minimum cM spacing (e.g. 0.02 for WGS)
+    protect_positions : optional ``{normalized_chrom: sorted pos_bp int64
+        array}`` (e.g. from
+        :func:`popout.prior_spec.panel_protect_positions`).  Listed
+        positions bypass cM thinning and the MAF/MAC filter so AIM
+        panel markers survive cohort-shape filtering.
 
     Yields
     ------
@@ -454,6 +486,10 @@ def iter_chromosomes(
         if stats is not None:
             stats.timer_start(f"io/chr{chrom}")
 
+        chrom_protect = (
+            protect_positions.get(normalise_chrom(chrom))
+            if protect_positions is not None else None
+        )
         cd = _read_one_chromosome(
             pgen_path=pgen_path,
             pvar_path=pvar_path,
@@ -465,6 +501,7 @@ def iter_chromosomes(
             min_mac=min_mac,
             thin_cm=thin_cm,
             stats=stats,
+            protect_positions=chrom_protect,
         )
 
         if stats is not None:
@@ -487,6 +524,7 @@ def _read_one_chromosome(
     min_mac: int,
     thin_cm: Optional[float],
     stats=None,
+    protect_positions: Optional[np.ndarray] = None,
 ) -> Optional[ChromData]:
     """Read and filter one chromosome from a PGEN file set.
 
@@ -511,9 +549,19 @@ def _read_one_chromosome(
     # Interpolate genetic positions
     pos_cm = gmap.interpolate(pvar.pos_bp)
 
+    # AIM-panel protection mask (aligned to pvar.pos_bp before thinning).
+    must_keep_mask = (
+        np.isin(pvar.pos_bp, protect_positions)
+        if protect_positions is not None and len(protect_positions) > 0
+        else None
+    )
+    if must_keep_mask is not None:
+        n_protect = int(must_keep_mask.sum())
+        log.info("  AIM panel protection: %d/%d sites flagged", n_protect, n_candidates)
+
     # Site thinning (before MAF filter to reduce count() calls)
     if thin_cm is not None:
-        keep = _thin_sites(pos_cm, thin_cm)
+        keep = _thin_sites(pos_cm, thin_cm, must_keep_mask=must_keep_mask)
         n_thinned = int(keep.sum())
         log.info("  After thinning (%.3f cM): %d → %d sites", thin_cm, n_candidates, n_thinned)
         if stats is not None:
@@ -526,6 +574,8 @@ def _read_one_chromosome(
             alt=[a for a, k in zip(pvar.alt, keep) if k],
         )
         pos_cm = pos_cm[keep]
+        if must_keep_mask is not None:
+            must_keep_mask = must_keep_mask[keep]
 
     # --- Pass 1b: MAF/MAC filtering ---
     try:
@@ -551,8 +601,13 @@ def _read_one_chromosome(
         )
 
     if min_maf > 0 or min_mac > 0:
+        must_keep_idxs = (
+            {int(v) for v in pvar.variant_idx[must_keep_mask]}
+            if must_keep_mask is not None else None
+        )
         passing_idxs = _apply_maf_mac_filter(
             reader, pvar.variant_idx, n_samples, min_maf, min_mac,
+            must_keep_idxs=must_keep_idxs,
         )
         n_passing = len(passing_idxs)
         log.info("  After MAF/MAC filter: %d sites", n_passing)

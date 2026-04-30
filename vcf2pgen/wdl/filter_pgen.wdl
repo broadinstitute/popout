@@ -42,6 +42,12 @@ task filter_pgen_task {
     File?        keep                           # --keep <sample list>
     Array[File]  exclude_range_beds = []        # BED files concatenated into --exclude range
 
+    # ---- AIM panel protection ----
+    File?        aim_panel_bed                  # 0-based half-open BED of AIM panel
+                                                # positions to retain regardless of
+                                                # cohort filters (MAF/HWE/palindromic/etc).
+                                                # Generate via `popout aim-panel-bed`.
+
     # ---- Escape hatch ----
     String extra_args = ""
 
@@ -120,13 +126,56 @@ task filter_pgen_task {
       ARGS+=(--exclude range combined_exclude_ranges.bed)
     fi
 
-    plink2 \
-      --pfile "${INPUT_PREFIX}" \
-      --make-pgen \
-      --out ~{output_prefix} \
-      --threads ~{cpu} \
-      "${ARGS[@]}" \
-      ~{extra_args}
+    AIM_BED="~{default='' aim_panel_bed}"
+    if [ -n "$AIM_BED" ]; then
+      # Three-pass: apply user filters → snplist; extract AIM BED → snplist;
+      # merge → final --extract list, ensuring AIM panel positions survive
+      # cohort-shape filters (MAF/HWE/palindromic/etc) without bypassing
+      # popout's biallelic+SNP requirement.
+      echo "=== Pass A: cohort filter snplist ==="
+      plink2 \
+        --pfile "${INPUT_PREFIX}" \
+        --write-snplist \
+        --out filtered_snps \
+        --threads ~{cpu} \
+        "${ARGS[@]}" \
+        ~{extra_args}
+
+      echo "=== Pass B: AIM panel snplist (biallelic SNPs only) ==="
+      plink2 \
+        --pfile "${INPUT_PREFIX}" \
+        --extract bed0 "$AIM_BED" \
+        --max-alleles 2 \
+        --snps-only just-acgt \
+        --write-snplist \
+        --out aim_snps \
+        --threads ~{cpu}
+
+      echo "=== Combining survivors with AIM panel positions ==="
+      sort -u filtered_snps.snplist aim_snps.snplist > combined.snplist
+      n_filtered=$(wc -l < filtered_snps.snplist)
+      n_aim=$(wc -l < aim_snps.snplist)
+      n_combined=$(wc -l < combined.snplist)
+      echo "  filtered: $n_filtered   aim: $n_aim   union: $n_combined"
+
+      echo "=== Pass C: emit final PGEN ==="
+      plink2 \
+        --pfile "${INPUT_PREFIX}" \
+        --extract combined.snplist \
+        --max-alleles 2 \
+        --snps-only just-acgt \
+        --make-pgen \
+        --out ~{output_prefix} \
+        --threads ~{cpu}
+    else
+      plink2 \
+        --pfile "${INPUT_PREFIX}" \
+        --make-pgen \
+        --out ~{output_prefix} \
+        --threads ~{cpu} \
+        "${ARGS[@]}" \
+        ~{extra_args}
+    fi
 
     ls -lh ~{output_prefix}.{pgen,pvar,psam}
     grep -E '(variants loaded|remaining after)' ~{output_prefix}.log || true
@@ -179,6 +228,9 @@ workflow filter_pgen {
     File?        keep
     Array[File]  exclude_range_beds = []
 
+    # AIM panel protection (popout priors)
+    File?        aim_panel_bed
+
     String  extra_args = ""
 
     # Resources
@@ -210,6 +262,7 @@ workflow filter_pgen {
       remove                    = remove,
       keep                      = keep,
       exclude_range_beds        = exclude_range_beds,
+      aim_panel_bed             = aim_panel_bed,
       extra_args                = extra_args,
       cpu_override              = cpu_override,
       memory_override           = memory_override,
