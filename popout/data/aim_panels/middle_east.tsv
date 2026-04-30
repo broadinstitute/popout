@@ -1,11 +1,17 @@
 chrom	pos_bp	ref	alt	expected_freq	weight	source	locus	rationale
-chr16	31087679	C	T	0.2705	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
-chr2	96363430	G	A	0.4738	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
-chr12	54992285	C	T	0.4375	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
-chr16	36236378	G	A	0.2122	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
-chr4	37079058	G	T	0.4779	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
-chr14	49361649	C	A	0.6236	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
-chr15	64232781	G	A	0.4430	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
-chr8	41851552	G	A	0.4283	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
-chr16	34102164	G	A	0.2024	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
-chr16	46812751	T	C	0.2987	0.40	1KG_Phase3		synthetic MID proxy: midpoint(EUR, SAS); Levantine proxy without 1KG MID coverage
+chr1	244281587	C	A	0.9600	1.00	gnomAD_v4.1_MID_data_driven	chr1:244281587	sep=0.933; n_sources=1
+chr3	66631880	T	G	0.9626	1.00	gnomAD_v4.1_MID_data_driven	chr3:66631880	sep=0.926; n_sources=1
+chr4	145794593	T	G	0.9589	1.00	gnomAD_v4.1_MID_data_driven	chr4:145794593	sep=0.933; n_sources=1
+chr5	56148840	T	G	0.9694	1.00	gnomAD_v4.1_MID_data_driven	chr5:56148840	sep=0.943; n_sources=1
+chr6	97845482	G	T	0.9660	1.00	gnomAD_v4.1_MID_data_driven	chr6:97845482	sep=0.921; n_sources=1
+chr7	148174420	G	T	0.9524	1.00	gnomAD_v4.1_MID_data_driven	chr7:148174420	sep=0.914; n_sources=1
+chr8	4470694	G	C	0.9558	1.00	gnomAD_v4.1_MID_data_driven	chr8:4470694	sep=0.918; n_sources=1
+chr8	5337419	T	C	0.0306	1.00	gnomAD_v4.1_MID_data_driven	chr8:5337419	sep=0.913; n_sources=1
+chr8	12475791	G	C	0.9623	1.00	gnomAD_v4.1_MID_data_driven	chr8:12475791	sep=0.930; n_sources=1
+chr14	105441749	C	A	0.0272	1.00	gnomAD_v4.1_MID_data_driven	chr14:105441749	sep=0.927; n_sources=1
+chr16	82851570	A	T	0.9796	1.00	gnomAD_v4.1_MID_data_driven	chr16:82851570	sep=0.940; n_sources=1
+chr17	11995499	G	T	0.9660	1.00	gnomAD_v4.1_MID_data_driven	chr17:11995499	sep=0.925; n_sources=1
+chr17	46908192	G	C	0.9441	1.00	gnomAD_v4.1_MID_data_driven	chr17:46908192	sep=0.928; n_sources=1
+chr19	3338721	T	G	0.9626	1.00	gnomAD_v4.1_MID_data_driven	chr19:3338721	sep=0.941; n_sources=1
+chr19	46459845	C	T	0.9626	1.00	gnomAD_v4.1_MID_data_driven	chr19:46459845	sep=0.924; n_sources=1
+chr22	32825130	G	T	0.9422	1.00	gnomAD_v4.1_MID_data_driven	chr22:32825130	sep=0.919; n_sources=1

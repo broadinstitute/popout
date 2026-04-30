@@ -1,7 +1,13 @@
 chrom	pos_bp	ref	alt	expected_freq	weight	source	locus	rationale
-chr16	31087679	C	T	0.5389	0.65	1KG_Phase3		data-driven from 1KG separation
-chr2	96363430	G	A	0.6892	0.65	1KG_Phase3		data-driven from 1KG separation
-chr16	36236378	G	A	0.4243	0.65	1KG_Phase3		data-driven from 1KG separation
-chr4	37079058	G	T	0.2679	0.65	1KG_Phase3		data-driven from 1KG separation
-chr16	34102164	G	A	0.4049	0.65	1KG_Phase3		data-driven from 1KG separation
-chr16	46812751	T	C	0.5010	0.65	1KG_Phase3		data-driven from 1KG separation
+chr3	65776577	C	T	0.3016	0.40	10.1016/j.fsigen.2013.02.010;10.3390/genes12081284	rs984038	sep=0.249; n_sources=2
+chr5	33985752	T	T	0.3395	0.40	10.29220/CSAM.2019.26.1.001	rs6867641	sep=0.284; n_sources=1
+chr6	170280901	G	A	0.4039	0.40	10.1016/j.fsigen.2020.102336;10.3390/genes12081284	rs2180052	sep=0.209; n_sources=2
+chr12	111774029	T	C	0.6902	0.40	10.1016/j.fsigen.2014.01.002;10.3390/genes12081284;10.3390/genes15040510	rs2238151	sep=0.241; n_sources=3
+chr14	68992512	A	C	0.6207	0.40	10.1051/bioconf/202411507003	rs242105	sep=0.213; n_sources=1
+chr16	13821950	T	C	0.5225	0.40	10.3390/genes12081284	rs9934011	sep=0.241; n_sources=1
+chr16	48187860	T	A	0.3620	0.40	10.1016/j.fsigen.2023.102853	rs367953206	sep=0.361; n_sources=1
+chr16	48341866	A	G	0.5184	0.40	10.1016/J.FSIGEN.2019.06.022	rs6500380	sep=0.315; n_sources=1
+chr17	3715521	C	T	0.5153	0.40	10.1016/j.fsigen.2023.102853	rs2737126	sep=0.217; n_sources=1
+chr17	19307760	C	G	0.2843	0.40	10.1016/j.fsigen.2023.102853;10.3390/genes12081284	rs8072587	sep=0.222; n_sources=2
+chr19	50938551	T	C	0.4908	0.40	10.3390/genes12081284	rs8104441	sep=0.283; n_sources=1
+chr20	63528151	T	C	0.4070	0.40	10.1007/s00414-024-03335-8;10.1016/j.fsigen.2014.01.002;10.1186/2041-2223-4-13;10.3390/genes12081284;10.3390/genes15040510	rs310644	sep=0.282; n_sources=5

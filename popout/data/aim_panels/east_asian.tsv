@@ -1,11 +1,11 @@
 chrom	pos_bp	ref	alt	expected_freq	weight	source	locus	rationale
-chr15	64619001	C	T	0.8065	0.85	1KG_Phase3		data-driven from 1KG separation
-chr4	99221623	G	A	0.6706	0.85	1KG_Phase3		data-driven from 1KG separation
-chr15	27963588	A	G	0.8323	0.85	1KG_Phase3		data-driven from 1KG separation
-chr19	14471656	G	A	0.8234	0.85	1KG_Phase3		data-driven from 1KG separation
-chr12	112523643	T	G	0.8313	0.85	1KG_Phase3		data-driven from 1KG separation
-chr2	26073220	A	G	0.8601	0.85	1KG_Phase3		data-driven from 1KG separation
-chr1	75376622	G	C	0.8194	0.85	1KG_Phase3		data-driven from 1KG separation
-chr8	125916698	A	G	0.9206	0.85	1KG_Phase3		data-driven from 1KG separation
-chr20	20974452	C	T	0.8274	0.85	1KG_Phase3		data-driven from 1KG separation
-chr6	155420503	T	C	0.8075	0.85	1KG_Phase3		data-driven from 1KG separation
+chr2	17181301	G	A	0.7738	0.65	10.1016/j.fsigen.2014.01.002;10.1016/j.fsigen.2020.102391;10.1080/00450618.2021.2005144	rs1876482	sep=0.543; n_sources=3
+chr2	108927427	C	T	0.9127	0.65	10.1016/J.FSIGEN.2019.05.001	rs922452	sep=0.505; n_sources=1
+chr3	140566273	T	C	0.1349	0.85	10.1080/00450618.2021.2005144	rs4683510	sep=0.552; n_sources=1
+chr4	99318162	T	C	0.3026	0.85	10.1016/j.fsigen.2014.01.002;10.1016/j.fsigen.2018.03.010;10.1016/j.fsigen.2023.102853;10.3390/genes12081284;10.3390/genes15040510	rs1229984	sep=0.640; n_sources=5
+chr4	99323162	G	A	0.5040	0.65	10.1016/j.fsigen.2014.01.002;10.1080/00450618.2021.2005144;10.3390/genes15040510	rs3811801	sep=0.504; n_sources=3
+chr5	76526649	C	T	0.8829	0.65	10.1080/00450618.2021.2005144	rs4704322	sep=0.507; n_sources=1
+chr15	27942626	A	T	0.8810	0.85	10.1016/j.fsigen.2023.102853;10.1080/00450618.2021.2005144	rs1545397	sep=0.580; n_sources=2
+chr15	27951891	G	A	0.5962	0.85	10.1016/j.fsigen.2014.01.002;10.1016/j.fsigen.2016.04.010;10.3390/biom15040548;10.3390/genes12081284	rs1800414	sep=0.592; n_sources=4
+chr15	27954896	C	T	0.8552	0.85	10.1016/J.SCIJUS.2019.01.006	rs728404	sep=0.646; n_sources=1
+chr15	28037595	G	T	0.8819	0.65	10.1080/00450618.2021.2005144	rs1448485	sep=0.523; n_sources=1

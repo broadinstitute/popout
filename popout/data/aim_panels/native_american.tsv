@@ -1,11 +1,31 @@
 chrom	pos_bp	ref	alt	expected_freq	weight	source	locus	rationale
-chr5	15378897	C	G	0.3732	0.40	1KG_Phase3		data-driven from 1KG separation
-chr22	41067621	A	T	0.3588	0.40	1KG_Phase3		data-driven from 1KG separation
-chr14	46350676	C	G	0.5331	0.40	1KG_Phase3		data-driven from 1KG separation
-chr14	21172560	G	T	0.3818	0.40	1KG_Phase3		data-driven from 1KG separation
-chr16	80091614	T	G	0.3112	0.40	1KG_Phase3		data-driven from 1KG separation
-chr3	31865586	G	A	0.4020	0.40	1KG_Phase3		data-driven from 1KG separation
-chr6	52008181	C	T	0.3127	0.40	1KG_Phase3		data-driven from 1KG separation
-chr14	32147814	C	T	0.4813	0.40	1KG_Phase3		data-driven from 1KG separation
-chr3	21253999	A	G	0.4409	0.40	1KG_Phase3		data-driven from 1KG separation
-chr16	63006330	G	A	0.2997	0.40	1KG_Phase3		data-driven from 1KG separation
+chr1	35191063	G	A	0.3991	0.40	10.1371/journal.pgen.1002554	rs11264115	sep=0.231; n_sources=1
+chr1	204814077	A	G	0.5014	0.40	10.1371/journal.pgen.1002554	rs2025236	sep=0.207; n_sources=1
+chr2	67888895	A	A	0.5994	0.40	10.1101/2023.01.16.23284609	rs7595509	sep=0.204; n_sources=1
+chr2	108897145	A	G	0.3919	0.45	10.1016/j.fsigen.2014.01.002;10.1016/j.fsigen.2019.102200;10.1016/j.fsigen.2023.102853;10.1186/s12863-016-0402-5;10.3390/genes12081284;Fujimoto_2008_HumMolGen	rs3827760	anchor; sep=0.379; n_sources=6
+chr2	108946039	C	T	0.5274	0.40	10.1080/00450618.2021.2005144	rs260714	sep=0.263; n_sources=1
+chr3	50254353	G	A	0.4438	0.40	10.1371/journal.pgen.1002554	rs2282751	sep=0.241; n_sources=1
+chr5	15915052	T	G	0.6383	0.40	10.1371/journal.pgen.1002554	rs10042283	sep=0.230; n_sources=1
+chr5	33951588	C	G	0.4640	0.65	10.1016/j.fsigen.2014.01.002;10.1016/j.fsigen.2020.102336;10.1016/j.fsigen.2023.102853;10.3390/genes12081284	rs16891982	sep=0.405; n_sources=4
+chr5	33958854	C	A	0.4928	0.40	10.1080/00450618.2021.2005144	rs28777	sep=0.270; n_sources=1
+chr5	113214550	G	A	0.5317	0.40	10.1371/journal.pgen.1002554	rs509237	sep=0.213; n_sources=1
+chr6	134466123	T	C	0.6427	0.40	10.1371/journal.pgen.1002554	rs9321456	sep=0.207; n_sources=1
+chr7	32779147	G	A	0.4092	0.40	10.1371/journal.pgen.1002554	rs17170516	sep=0.214; n_sources=1
+chr8	9453001	G	A	0.4193	0.40	10.1371/journal.pgen.1002554	rs17150066	sep=0.206; n_sources=1
+chr8	15761620	A	G	0.4755	0.40	10.1371/journal.pgen.1002554	rs3810776	sep=0.205; n_sources=1
+chr9	18280145	G	A	0.4957	0.40	10.1371/journal.pgen.1002554	rs10810942	sep=0.221; n_sources=1
+chr10	117990902	C	T	0.5893	0.40	10.1016/j.fsigen.2020.102336;10.3390/genes12081284	rs7084970	sep=0.204; n_sources=2
+chr11	120262785	A	G	0.6081	0.40	10.1016/j.fsigen.2023.102853;10.3390/genes12081284	rs2715883	sep=0.223; n_sources=2
+chr12	51969002	G	A	0.5620	0.40	10.1371/journal.pgen.1002554	rs10783486	sep=0.256; n_sources=1
+chr12	116544917	A	G	0.4337	0.40	10.1371/journal.pgen.1002554	rs10774871	sep=0.218; n_sources=1
+chr13	32995696	A	G	0.3242	0.40	10.1371/journal.pgen.1002554	rs394307	sep=0.233; n_sources=1
+chr13	111174820	T	C	0.4337	0.40	10.1016/j.fsigen.2014.01.002;10.1016/j.fsigen.2023.102853;10.3390/genes12081284	rs9522149	sep=0.227; n_sources=3
+chr14	21203118	G	T	0.4841	0.40	10.1371/journal.pgen.1002554;10.3390/genes12081284	rs10483251	sep=0.238; n_sources=2
+chr14	94680973	C	T	0.4352	0.40	10.1371/journal.pgen.1002554	rs9323913	sep=0.244; n_sources=1
+chr15	37006157	T	C	0.5159	0.40	10.1371/journal.pgen.1002554	rs8041147	sep=0.205; n_sources=1
+chr16	7510978	T	A	0.4380	0.40	10.1371/journal.pgen.1002554	rs4787040	sep=0.239; n_sources=1
+chr16	65893899	T	G	0.4092	0.40	10.1016/j.fsigen.2023.102853	rs556365	sep=0.209; n_sources=1
+chr17	19307760	C	G	0.5159	0.40	10.1016/j.fsigen.2023.102853;10.3390/genes12081284	rs8072587	sep=0.232; n_sources=2
+chr21	42000446	A	C	0.4409	0.40	10.1371/journal.pgen.1002554	rs2187239	sep=0.203; n_sources=1
+chr22	38910075	C	T	0.4179	0.40	10.1016/j.fsigen.2020.102336;10.1371/journal.pgen.1002554;10.3390/genes12081284	rs5757362	sep=0.206; n_sources=3
+chr22	46694346	C	G	0.5216	0.40	10.1371/journal.pgen.1002554	rs801712	sep=0.227; n_sources=1

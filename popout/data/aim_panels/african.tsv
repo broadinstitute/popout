@@ -1,11 +1,17 @@
 chrom	pos_bp	ref	alt	expected_freq	weight	source	locus	rationale
-chr1	159204893	T	C	0.9637	1.00	1KG_Phase3		data-driven from 1KG separation
-chr8	144414297	C	G	0.0855	1.00	1KG_Phase3		data-driven from 1KG separation
-chr5	179199608	G	C	0.9228	1.00	1KG_Phase3		data-driven from 1KG separation
-chr9	133904766	G	A	0.0991	1.00	1KG_Phase3		data-driven from 1KG separation
-chr17	31023751	T	G	0.9039	1.00	1KG_Phase3		data-driven from 1KG separation
-chr15	29135197	T	C	0.9032	1.00	1KG_Phase3		data-driven from 1KG separation
-chr4	3664767	C	G	0.9274	1.00	1KG_Phase3		data-driven from 1KG separation
-chr7	146308840	C	G	0.9349	1.00	1KG_Phase3		data-driven from 1KG separation
-chr2	72141061	C	G	0.9569	1.00	1KG_Phase3		data-driven from 1KG separation
-chr1	116344833	C	A	0.9478	1.00	1KG_Phase3		data-driven from 1KG separation
+chr1	151150013	C	T	0.0303	0.85	10.1016/j.fsigen.2014.01.002	rs7554936	sep=0.636; n_sources=1
+chr1	159204893	T	C	0.9637	1.00	10.1016/j.fsigen.2014.01.002;Howes_2011_PLoSMed	rs2814778	anchor; sep=0.886; n_sources=2
+chr2	7828144	G	A	0.0598	0.85	10.1016/j.fsigen.2014.01.002	rs798443	sep=0.573; n_sources=1
+chr2	157810705	T	C	0.0779	1.00	10.1016/j.fsigen.2014.01.002	rs10497191	sep=0.736; n_sources=1
+chr4	104454266	T	G	0.7943	0.85	10.1016/j.fsigen.2014.01.002	rs7657799	sep=0.631; n_sources=1
+chr6	136161589	A	G	0.8548	0.85	10.1016/j.fsigen.2014.01.002	rs3823159	sep=0.591; n_sources=1
+chr8	32039076	T	C	0.2655	0.85	10.1016/j.fsigen.2014.01.002	rs1462906	sep=0.674; n_sources=1
+chr8	144414297	C	G	0.0855	1.00	10.1016/j.fsigen.2014.01.002	rs1871534	sep=0.841; n_sources=1
+chr9	124505410	A	G	0.8328	0.65	10.1016/j.fsigen.2014.01.002	rs3814134	sep=0.520; n_sources=1
+chr13	48496376	G	C	0.7973	0.85	10.1016/j.fsigen.2014.01.002	rs7326934	sep=0.699; n_sources=1
+chr15	44860173	T	C	0.9486	0.65	10.1016/j.fsigen.2014.01.002	rs735480	sep=0.535; n_sources=1
+chr17	42904228	A	G	0.9478	0.85	10.1016/j.fsigen.2014.01.002	rs2593595	sep=0.638; n_sources=1
+chr17	64991033	C	T	0.0582	0.85	10.1016/j.fsigen.2014.01.002	rs11652805	sep=0.679; n_sources=1
+chr18	69911695	T	C	0.1490	1.00	10.1016/j.fsigen.2014.01.002	rs3916235	sep=0.760; n_sources=1
+chr19	4077098	A	C	0.8903	0.85	10.1016/j.fsigen.2014.01.002	rs7251928	sep=0.658; n_sources=1
+chr20	63528151	T	C	0.9062	0.65	10.1016/j.fsigen.2014.01.002	rs310644	sep=0.499; n_sources=1
