@@ -1405,7 +1405,9 @@ def forward_backward_blocks_em(
 
     if batch_size is None:
         from .em import _auto_batch_size_blocks
-        batch_size = _auto_batch_size_blocks(bd.n_blocks, n_anc, H_total)
+        batch_size = _auto_batch_size_blocks(
+            bd.n_blocks, n_anc, H_total, T_sites,
+        )
 
     b_starts = _np.array(bd.block_starts, dtype=_np.int64)
     b_ends = _np.array(bd.block_ends, dtype=_np.int64)

@@ -281,6 +281,59 @@ def test_bucketed_blocks_decode_matches_unbucketed_when_B_eq_1(tmp_path):
     )
 
 
+def test_auto_batch_size_blocks_bounds_per_batch_memory_at_biobank_scale():
+    """At biobank-shape inputs (T=14k, n_blocks=218, A=8, H=1M), the
+    auto-tuner must pick a batch_size whose total per-batch transient
+    device memory (geno_chunk float32 upload + gamma_block + ~3×
+    working state) stays under the 1 GB target.
+
+    Regression for an OOM where the previous formula ignored T*4 in
+    the per-hap accounting and overshot by ~8× on chr1 AoU.
+    """
+    from popout.em import _auto_batch_size_blocks
+
+    T = 13916
+    n_blocks = 218
+    A = 8
+    H = 1_071_384
+    target = 1 * 1024**3
+
+    batch = _auto_batch_size_blocks(n_blocks, A, H, T)
+
+    # Total transient ~= geno_chunk + 4× output (matches the formula).
+    bytes_per_hap = T * 4 + 4 * n_blocks * A * 4
+    actual = batch * bytes_per_hap
+    assert actual <= target, (
+        f"auto-tuned batch={batch} → {actual / 1e9:.2f} GB exceeds "
+        f"target {target / 1e9:.2f} GB at biobank shape"
+    )
+
+    # Sanity: not pathologically small.
+    assert batch >= 1000
+
+
+def test_auto_batch_size_blocks_floors_at_1000():
+    """Formula floor preserves a useful minimum batch even when memory
+    pressure pushes the calculation below 1000 haps."""
+    from popout.em import _auto_batch_size_blocks
+
+    # Tiny target_bytes forces the floor.
+    batch = _auto_batch_size_blocks(
+        n_blocks=200, A=8, H=10_000, T=20_000, target_bytes=1024,
+    )
+    assert batch == 1000
+
+
+def test_auto_batch_size_blocks_caps_at_H():
+    """Don't exceed the cohort size."""
+    from popout.em import _auto_batch_size_blocks
+
+    batch = _auto_batch_size_blocks(
+        n_blocks=10, A=2, H=500, T=100, target_bytes=10 * 1024**3,
+    )
+    assert batch == 500
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

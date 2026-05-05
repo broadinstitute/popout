@@ -67,16 +67,28 @@ def _auto_batch_size(
 
 
 def _auto_batch_size_blocks(
-    n_blocks: int, A: int, H: int,
+    n_blocks: int, A: int, H: int, T: int,
     target_bytes: int = 1 * 1024**3,
 ) -> int:
     """Pick batch size for block-emissions forward-backward.
 
-    Peak memory per haplotype is approximately n_blocks × A × 4 bytes
-    for the emission tensor. Working memory during forward-backward is
-    2-3× the output, so target 1 GB output → 2-4 GB working peak.
+    Per-haplotype transient device memory during block E-step:
+
+    * ``T * 4`` bytes for ``geno_chunk = jnp.asarray(geno_np, dtype=
+      jnp.float32)`` (hmm.py:1455). At biobank scale this dominates —
+      T can be 10k–100k+ sites, while n_blocks × A is typically a few
+      thousand. Ignoring T in the formula auto-tunes to a batch that
+      OOMs on the geno upload alone.
+    * ``n_blocks * A * 4`` bytes for the gamma_block output.
+    * Working memory inside forward_backward_blocks (emissions,
+      forward/backward carries, scatter intermediates) is roughly
+      2–3× the output, accounted for here as 4× n_blocks*A*4 to be
+      conservative.
+
+    Targets ``target_bytes`` (1 GB by default) for the total per-batch
+    transient device memory.
     """
-    bytes_per_hap = n_blocks * A * 4
+    bytes_per_hap = T * 4 + 4 * n_blocks * A * 4
     batch = max(1000, target_bytes // max(bytes_per_hap, 1))
     return int(min(batch, H))
 
@@ -767,10 +779,11 @@ def run_em(
         _pf_counts = None   # accumulated pattern-freq counts for M-step
         if bd is not None and model.pattern_freq is not None:
             block_batch = _auto_batch_size_blocks(
-                bd.n_blocks, n_anc, chrom_data.n_haps,
+                bd.n_blocks, n_anc, chrom_data.n_haps, chrom_data.n_sites,
             )
-            log.info("  Block E-step: batch_size=%d (n_blocks=%d, A=%d, H=%d)",
-                     block_batch, bd.n_blocks, n_anc, chrom_data.n_haps)
+            log.info("  Block E-step: batch_size=%d (n_blocks=%d, A=%d, H=%d, T=%d)",
+                     block_batch, bd.n_blocks, n_anc, chrom_data.n_haps,
+                     chrom_data.n_sites)
             em_stats, _pf_counts = forward_backward_blocks_em(
                 geno, model, bd, batch_size=block_batch,
             )
@@ -1071,7 +1084,7 @@ def decode_chromosome(
         # Block emissions: block-level decode
         from .blocks import BlockData
         block_batch = _auto_batch_size_blocks(
-            bd.n_blocks, n_anc, chrom_data.n_haps,
+            bd.n_blocks, n_anc, chrom_data.n_haps, chrom_data.n_sites,
         )
 
         site_to_block = np.empty(chrom_data.n_sites, dtype=np.int32)
