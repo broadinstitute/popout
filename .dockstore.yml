@@ -9,6 +9,10 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /vcf2pgen/wdl/filter_pgen.wdl
     topic: Filter PGEN files with configurable plink2 QC profiles
+  - name: pgen-to-vcf
+    subclass: WDL
+    primaryDescriptorPath: /vcf2pgen/wdl/pgen_to_vcf.wdl
+    topic: Export PGEN files to VCF with optional sample subsetting
   - name: kinship-matrix
     subclass: WDL
     primaryDescriptorPath: /vcf2pgen/wdl/kinship_matrix.wdl
