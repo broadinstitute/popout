@@ -908,20 +908,40 @@ def _run_k2_em_split(
     from ._device import fits_on_device
 
     sub_geno = _sub_geno(geno, indices)
-    if geno_j is not None:
-        if len(indices) == geno_j.shape[0]:
-            sub_geno_j = geno_j  # root node — no copy needed
-        else:
-            sub_geno_j = geno_j[jnp.asarray(indices)]
-    elif fits_on_device(sub_geno.nbytes * 2):
+    # Decide where sub_geno_j lives:
+    #   1. Full root + parent already on device → reuse (zero copy)
+    #   2. Subset that fits alongside the parent's residency → upload/slice
+    #   3. Otherwise → host-resident, upload per-batch in fbw_em's loop
+    #
+    # The crucial bit is including geno_j.nbytes in the fits_on_device
+    # sum — _cached_budget snapshots free memory at first call and does
+    # not track current residency, so checking only sub_geno.nbytes is
+    # optimistic when the parent is already eating most of the budget.
+    # Without this, fancy-indexing geno_j on device adds a contiguous
+    # subset copy on top of the resident parent and OOMs at biobank
+    # scale (BIOBANK_SCALE.md trap #2).
+    if geno_j is not None and len(indices) == geno_j.shape[0]:
+        sub_geno_j = geno_j  # root node — no copy needed
+    elif fits_on_device(
+        (geno_j.nbytes if geno_j is not None else 0)
+        + sub_geno.nbytes * 2
+    ):
         # 2× headroom: geno + forward_backward working state (emissions,
         # forward/backward arrays, intermediates) is roughly equal to geno.
-        sub_geno_j = jnp.asarray(sub_geno)
+        if geno_j is not None:
+            sub_geno_j = geno_j[jnp.asarray(indices)]
+        else:
+            sub_geno_j = jnp.asarray(sub_geno)
     else:
         sub_geno_j = sub_geno  # keep on host; downstream batches upload
+        parent_str = (
+            f" + parent {geno_j.nbytes / 1e9:.1f} GB"
+            if geno_j is not None else ""
+        )
         log.info(
-            "_run_k2_em_split: sub_geno %.1f GB → host-resident, "
-            "batched device transfers", sub_geno.nbytes / 1e9,
+            "_run_k2_em_split: sub_geno %.1f GB%s exceeds device budget "
+            "→ host-resident batched transfers",
+            sub_geno.nbytes / 1e9, parent_str,
         )
     H_sub, T = sub_geno_j.shape
 
