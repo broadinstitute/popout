@@ -132,10 +132,19 @@ task filter_pgen_task {
       # merge → final --extract list, ensuring AIM panel positions survive
       # cohort-shape filters (MAF/HWE/palindromic/etc) without bypassing
       # popout's biallelic+SNP requirement.
+      #
+      # The `--write-snplist allow-dups` modifier on passes A and B is
+      # required because plink2 errors out by default when emitting a
+      # snplist over duplicate variant IDs. The user's --rm-dup setting
+      # (if any) and our --set-all-var-ids may not have fully run by the
+      # time --write-snplist evaluates, and we deduplicate the union via
+      # `sort -u` after the merge anyway, so allowing dupes here is
+      # safe and avoids the spurious error. (Pass C does not use
+      # --write-snplist; it consumes the already-deduplicated snplist.)
       echo "=== Pass A: cohort filter snplist ==="
       plink2 \
         --pfile "${INPUT_PREFIX}" \
-        --write-snplist \
+        --write-snplist allow-dups \
         --out filtered_snps \
         --threads ~{cpu} \
         "${ARGS[@]}" \
@@ -147,7 +156,7 @@ task filter_pgen_task {
         --extract bed0 "$AIM_BED" \
         --max-alleles 2 \
         --snps-only just-acgt \
-        --write-snplist \
+        --write-snplist allow-dups \
         --out aim_snps \
         --threads ~{cpu}
 
