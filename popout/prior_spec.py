@@ -310,6 +310,7 @@ def load_priors(
     path: str | Path,
     *,
     superpop_freqs: str | Path | None = None,
+    skip_fst: bool = False,
 ) -> Priors:
     """Load and validate a v2 priors YAML; build identity signatures and
     Beta parameters; return a :class:`Priors` container with a content-
@@ -325,6 +326,12 @@ def load_priors(
         Used by the WDL/Terra pipeline where the cache is not pre-
         populated; users can localize the TSV via Terra and pass its
         container path here.
+    skip_fst : when True, skip loading any ``fst_reference`` blocks.
+        Used by utilities (like ``popout aim-panel-bed``) that only
+        need the AIM panels and shouldn't require the (possibly
+        absent) superpop_freqs TSV. Resulting :class:`Priors` will
+        have no :class:`FSTReferenceSignature` instances and thus
+        cannot be used for runtime EM scoring.
     """
     p = Path(path)
     if not p.exists():
@@ -425,7 +432,7 @@ def load_priors(
                 )
             )
 
-        if "fst_reference" in identity_raw:
+        if "fst_reference" in identity_raw and not skip_fst:
             fst_block = identity_raw["fst_reference"]
             if not isinstance(fst_block, dict):
                 raise ValueError(
@@ -453,12 +460,20 @@ def load_priors(
             chrom_arr, pos_arr, freq_arr = _load_superpop_freqs(
                 superpop_freqs_path, str(superpop),
             )
+            # Derive the source tag from the filename stem rather than
+            # hardcoding "1KG" — the file may be 1KG, gnomAD, Galanter,
+            # etc. Drop trailing .tsv.gz / .tsv suffixes for a clean tag.
+            src_stem = superpop_freqs_path.name
+            for suffix in (".tsv.gz", ".tsv", ".gz"):
+                if src_stem.endswith(suffix):
+                    src_stem = src_stem[:-len(suffix)]
+                    break
             signatures.append(
                 FSTReferenceSignature(
                     ref_freq=freq_arr,
                     ref_pos_bp=pos_arr,
                     ref_chrom=chrom_arr,
-                    ref_name=f"1KG_{superpop}",
+                    ref_name=f"{src_stem}:{superpop}",
                     weight=float(fst_block.get("weight", 1.0)),
                 )
             )

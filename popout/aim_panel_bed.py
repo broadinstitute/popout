@@ -43,7 +43,10 @@ def emit_bed(priors_path: str | Path, out: object) -> int:
     from .prior_spec import load_priors
     from .identity import AIMSignature
 
-    priors = load_priors(priors_path)
+    # skip_fst=True: this utility only needs AIM panel paths to emit
+    # the BED; the FST signature would require loading a (possibly
+    # absent) superpop_freqs TSV which adds nothing here.
+    priors = load_priors(priors_path, skip_fst=True)
 
     # Aggregate (chrom, pos_bp) preserving panel-supplied chrom strings;
     # the BED feeds plink2 and chrom-name format must match the cohort

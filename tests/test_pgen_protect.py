@@ -32,6 +32,22 @@ from popout.prior_spec import load_priors, panel_protect_positions
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PRIORS_YAML = _REPO_ROOT / "configs" / "priors_v2.yaml"
+_GNOMAD_FREQS = (
+    Path.home() / ".popout/superpop_freqs/GRCh38/gnomad_superpop_freq.tsv.gz"
+)
+
+
+def _superpop_freqs_for_priors_v2() -> Path:
+    """priors_v2.yaml's MID prior needs gnomAD's MID column — 1KG
+    doesn't have one. Tests that load priors_v2 use this helper to
+    resolve the right freqs file (and skip cleanly if gnomAD isn't
+    cached locally)."""
+    if not _GNOMAD_FREQS.is_file():
+        pytest.skip(
+            f"gnomAD superpop freqs not cached at {_GNOMAD_FREQS}; "
+            f"priors_v2.yaml requires gnomAD for the MID FST signature."
+        )
+    return _GNOMAD_FREQS
 
 
 # ---------------------------------------------------------------------------
@@ -45,7 +61,8 @@ def test_panel_protect_positions_aggregates_six_panels():
     all_panels.bed artifact)."""
     if not _PRIORS_YAML.exists():
         pytest.skip(f"{_PRIORS_YAML} is local-only and not present")
-    priors = load_priors(_PRIORS_YAML)
+    freqs = _superpop_freqs_for_priors_v2()
+    priors = load_priors(_PRIORS_YAML, superpop_freqs=freqs)
     protect = panel_protect_positions(priors)
     assert len(protect) > 0, "expected at least one chrom with protected positions"
     n_total = sum(len(v) for v in protect.values())
@@ -186,8 +203,10 @@ def test_emit_bed_round_trips_panel_positions(tmp_path):
         # 0-based half-open invariant: end == start + 1 for single-base sites
         assert e == s + 1, f"non-single-base BED row: {chrom} {start}-{end}"
 
-    # Cross-check: BED row count matches panel_protect_positions total
-    priors = load_priors(_PRIORS_YAML)
+    # Cross-check: BED row count matches panel_protect_positions total.
+    # Use skip_fst=True so this assertion doesn't depend on the
+    # superpop_freqs TSV being present (emit_bed itself uses skip_fst).
+    priors = load_priors(_PRIORS_YAML, skip_fst=True)
     protect = panel_protect_positions(priors)
     n_protect = sum(len(v) for v in protect.values())
     assert n == n_protect, (
