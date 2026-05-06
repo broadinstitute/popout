@@ -48,12 +48,17 @@ task extract_panel_pgen_task {
     ln -sf "~{pvar}" "${INPUT_PREFIX}.pvar"
     ln -sf "~{psam}" "${INPUT_PREFIX}.psam"
 
-    echo "=== Extract AIM panel positions (no cohort filtering) ==="
+    echo "=== Extract AIM panel positions (no cohort filtering, no allele filtering) ==="
+    # NOTE: NO --max-alleles 2, NO --snps-only.  This was the cause of
+    # AIM-protect appearing to "drop" positions during filter_pgen runs
+    # — when an AIM position was called as multi-allelic in the cohort
+    # PGEN, --max-alleles 2 stripped it.  extract_panel_geno must
+    # extract every BED position that exists in the input PGEN, period.
+    # Downstream consumers (popout option H) handle allele alignment
+    # against the panel TSV's expected (ref, alt).
     plink2 \
       --pfile "${INPUT_PREFIX}" \
       --extract bed0 "~{aim_panel_bed}" \
-      --max-alleles 2 \
-      --snps-only just-acgt \
       --make-pgen \
       --threads ~{cpu} \
       --out "~{output_prefix}"

@@ -5,3 +5,6 @@ popout/_version.py
 *.egg-info
 # Local 1KG reference TSV (large; resolved via ~/.popout/ref/ symlink).
 built_ref.tsv.gz
+# Workspace-specific validation scripts (run locally, not part of the
+# public repo).
+scripts/validate_*.sh
