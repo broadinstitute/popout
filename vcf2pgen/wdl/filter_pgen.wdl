@@ -133,14 +133,28 @@ task filter_pgen_task {
       # cohort-shape filters (MAF/HWE/palindromic/etc) without bypassing
       # popout's biallelic+SNP requirement.
       #
+      # CRITICAL: every pass that touches IDs must apply the SAME
+      # --set-all-var-ids template, otherwise the snplist from Pass A
+      # carries rewritten IDs while Pass B / Pass C see the original
+      # (often '.') IDs.  The cross-pass mismatch causes Pass C's
+      # --extract combined.snplist to fall back to wildcard matching
+      # — every biallelic site survives, defeating the cohort filter
+      # and producing a "filtered" PGEN that's effectively unfiltered.
+      # We require --set-all-var-ids to be set when --aim_panel_bed is
+      # provided.
+      ID_TEMPLATE='~{default="" set_all_var_ids}'
+      if [ -z "$ID_TEMPLATE" ]; then
+        echo "ERROR: filter_pgen with aim_panel_bed requires set_all_var_ids" >&2
+        echo "       (e.g. '@:#:\$r:\$a').  Without it, the three passes use" >&2
+        echo "       inconsistent variant IDs and the final --extract becomes" >&2
+        echo "       a no-op." >&2
+        exit 1
+      fi
+
       # The `--write-snplist allow-dups` modifier on passes A and B is
       # required because plink2 errors out by default when emitting a
-      # snplist over duplicate variant IDs. The user's --rm-dup setting
-      # (if any) and our --set-all-var-ids may not have fully run by the
-      # time --write-snplist evaluates, and we deduplicate the union via
-      # `sort -u` after the merge anyway, so allowing dupes here is
-      # safe and avoids the spurious error. (Pass C does not use
-      # --write-snplist; it consumes the already-deduplicated snplist.)
+      # snplist over duplicate variant IDs. We deduplicate the union via
+      # `sort -u` after the merge anyway, so allowing dupes here is safe.
       echo "=== Pass A: cohort filter snplist ==="
       plink2 \
         --pfile "${INPUT_PREFIX}" \
@@ -154,6 +168,7 @@ task filter_pgen_task {
       plink2 \
         --pfile "${INPUT_PREFIX}" \
         --extract bed0 "$AIM_BED" \
+        --set-all-var-ids "$ID_TEMPLATE" \
         --max-alleles 2 \
         --snps-only just-acgt \
         --write-snplist allow-dups \
@@ -170,6 +185,7 @@ task filter_pgen_task {
       echo "=== Pass C: emit final PGEN ==="
       plink2 \
         --pfile "${INPUT_PREFIX}" \
+        --set-all-var-ids "$ID_TEMPLATE" \
         --extract combined.snplist \
         --max-alleles 2 \
         --snps-only just-acgt \
