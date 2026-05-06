@@ -9,6 +9,10 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /vcf2pgen/wdl/filter_pgen.wdl
     topic: Filter PGEN files with configurable plink2 QC profiles
+  - name: extract-panel-geno
+    subclass: WDL
+    primaryDescriptorPath: /vcf2pgen/wdl/extract_panel_geno.wdl
+    topic: Build a combined panel-only PGEN spanning all chromosomes' AIM positions
   - name: kinship-matrix
     subclass: WDL
     primaryDescriptorPath: /vcf2pgen/wdl/kinship_matrix.wdl
