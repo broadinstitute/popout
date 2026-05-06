@@ -35,9 +35,25 @@ task extract_panel_pgen_task {
   }
 
   Float pgen_gb = size(pgen, "GB")
-  Int   cpu    = select_first([cpu_override, 2])
-  String memory = select_first([memory_override, "8G"])
-  Int   disk_size_gb = ceil(pgen_gb * 2 + 10)
+
+  # Auto-scale machine to PGEN size, mirroring vcf2pgen/wdl/filter_pgen.wdl.
+  # plink2 --extract bed0 still loads pvar/pgen indexes and per-variant
+  # state into memory; raw AoU per-chrom PGENs run 30-100 GB and need
+  # tens-to-hundreds of GB of RAM.  The 8 GB default OOM'd biobank-scale
+  # shards.
+  Int auto_cpu = if pgen_gb > 60.0 then 64
+                 else if pgen_gb > 30.0 then 32
+                 else if pgen_gb > 10.0 then 16
+                 else 8
+
+  String auto_memory = if pgen_gb > 60.0 then "256 GB"
+                       else if pgen_gb > 30.0 then "128 GB"
+                       else if pgen_gb > 10.0 then "64 GB"
+                       else "32 GB"
+
+  Int    cpu         = select_first([cpu_override, auto_cpu])
+  String memory      = select_first([memory_override, auto_memory])
+  Int    disk_size_gb = ceil(pgen_gb * 3) + 100
 
   command <<<
     set -euo pipefail
