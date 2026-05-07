@@ -82,14 +82,33 @@ task extract_panel_pgen_task {
     # SNPs) crash popout's pgenlib reader: phased + multi-allelic is
     # not a supported combination.
 
+    # Some chroms have AIM panel positions that AoU's site set simply
+    # doesn't include (e.g. chr7's two AMR/MID markers, chr21's one
+    # AMR marker). plink2's --extract bed0 errors with "No variants
+    # remaining" when the per-chrom intersection is empty. We'd
+    # rather emit empty placeholder outputs and let the gather skip
+    # this chrom than fail the whole 22-shard scatter.
     echo "=== Step 1/3: extract panel region to VCF (keeps multi-allelic) ==="
-    plink2 \
-      --pfile "${INPUT_PREFIX}" \
-      --extract bed0 "~{aim_panel_bed}" \
-      --snps-only just-acgt \
-      --recode vcf bgz \
-      --threads ~{cpu} \
-      --out "~{output_prefix}.raw"
+    if ! plink2 \
+        --pfile "${INPUT_PREFIX}" \
+        --extract bed0 "~{aim_panel_bed}" \
+        --snps-only just-acgt \
+        --recode vcf bgz \
+        --threads ~{cpu} \
+        --out "~{output_prefix}.raw" 2>step1.err; then
+      cat step1.err >&2
+      if grep -qE 'No variants remaining|0 variants remaining' step1.err; then
+        echo "=== EMPTY: this chromosome has 0 panel positions in the cohort PGEN. ===" >&2
+        echo "Emitting zero-byte placeholder outputs; the gather task will skip this shard." >&2
+        : > "~{output_prefix}.pgen"
+        : > "~{output_prefix}.pvar"
+        : > "~{output_prefix}.psam"
+        : > "~{output_prefix}.log"
+        exit 0
+      fi
+      echo "ERROR: Step 1 plink2 failed for a reason other than empty extract." >&2
+      exit 1
+    fi
 
     echo "=== Step 2/3: bcftools norm -m -any (split multi-allelic) ==="
     bcftools norm -m -any \
@@ -141,19 +160,38 @@ task gather_panel_pgens_task {
     set -euo pipefail
 
     # ---- Localize each per-chrom triplet under a unique prefix ----
+    # Skip zero-byte placeholder shards: chromosomes whose AIM-panel
+    # positions don't exist in the cohort's site set produce empty
+    # outputs from extract_panel_pgen_task by design. plink2 --pmerge
+    # would error on an empty PGEN; we filter them out here so the
+    # gather succeeds across whatever subset of chromosomes had
+    # extractable panel rows.
     pgens=(~{sep=' ' panel_pgens})
     pvars=(~{sep=' ' panel_pvars})
     psams=(~{sep=' ' panel_psams})
 
     PMERGE_LIST=panel_merge_list.txt
     : > "${PMERGE_LIST}"
+    SKIPPED=0
+    KEPT=0
     for i in "${!pgens[@]}"; do
+      if [ ! -s "${pgens[$i]}" ]; then
+        echo "Skipping shard $i: zero-byte placeholder (no panel positions in chrom)"
+        SKIPPED=$((SKIPPED + 1))
+        continue
+      fi
       P="chunk_${i}"
       ln -sf "${pgens[$i]}" "${P}.pgen"
       ln -sf "${pvars[$i]}" "${P}.pvar"
       ln -sf "${psams[$i]}" "${P}.psam"
       echo "${P}" >> "${PMERGE_LIST}"
+      KEPT=$((KEPT + 1))
     done
+    echo "Gather: kept ${KEPT} shards, skipped ${SKIPPED}"
+    if [ "${KEPT}" -eq 0 ]; then
+      echo "ERROR: no per-chrom shards had any panel positions; gather has nothing to merge." >&2
+      exit 1
+    fi
 
     echo "=== Merge list ==="
     cat "${PMERGE_LIST}"
