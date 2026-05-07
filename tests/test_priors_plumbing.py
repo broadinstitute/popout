@@ -115,18 +115,20 @@ def test_compute_panel_freqs_per_comp_matches_expected_weighted_average():
         geno=geno,
         chrom=np.array(["1", "2", "3"], dtype=object),
         pos_bp=np.array([100, 200, 300], dtype=np.int64),
+        ref=np.array(["A", "A", "A"], dtype=object),
+        alt=np.array(["G", "G", "G"], dtype=object),
     )
 
     out = compute_panel_freqs_per_comp(mu_per_hap_sum, n_sites_chrom=10, panel_geno=panel)
 
     # Component 0: weighted-average geno over haps 0,1 → (1, 0.5, 1).
-    assert out[0][("1", 100)] == pytest.approx(1.0)
-    assert out[0][("2", 200)] == pytest.approx(0.5)
-    assert out[0][("3", 300)] == pytest.approx(1.0)
+    assert out[0][("1", 100, "A", "G")] == pytest.approx(1.0)
+    assert out[0][("2", 200, "A", "G")] == pytest.approx(0.5)
+    assert out[0][("3", 300, "A", "G")] == pytest.approx(1.0)
     # Component 1: weighted-average geno over haps 2,3 → (0, 0.5, 0).
-    assert out[1][("1", 100)] == pytest.approx(0.0)
-    assert out[1][("2", 200)] == pytest.approx(0.5)
-    assert out[1][("3", 300)] == pytest.approx(0.0)
+    assert out[1][("1", 100, "A", "G")] == pytest.approx(0.0)
+    assert out[1][("2", 200, "A", "G")] == pytest.approx(0.5)
+    assert out[1][("3", 300, "A", "G")] == pytest.approx(0.0)
 
 
 def test_compute_panel_freqs_per_comp_rejects_hap_count_mismatch():
@@ -141,6 +143,8 @@ def test_compute_panel_freqs_per_comp_rejects_hap_count_mismatch():
         geno=np.zeros((6, 3), dtype=np.uint8),  # H=6 ≠ 4
         chrom=np.array(["1", "1", "1"], dtype=object),
         pos_bp=np.array([1, 2, 3], dtype=np.int64),
+        ref=np.array(["A", "A", "A"], dtype=object),
+        alt=np.array(["G", "G", "G"], dtype=object),
     )
     with pytest.raises(ValueError, match="hap count"):
         compute_panel_freqs_per_comp(mu_per_hap_sum, n_sites_chrom=10, panel_geno=panel)
@@ -168,6 +172,8 @@ def test_run_em_panel_geno_changes_priors_assignment(sim_chrom):
     panel_a = AIMPanel(
         chrom=np.array(["99", "99", "99", "99"], dtype=object),
         pos_bp=np.array([1000, 2000, 3000, 4000], dtype=np.int64),
+        ref=np.array(["A"] * 4, dtype=object),
+        alt=np.array(["G"] * 4, dtype=object),
         expected_freq=np.array([0.9, 0.9, 0.1, 0.1]),
         marker_weight=np.array([1.0, 1.0, 1.0, 1.0]),
         source="test_a",
@@ -175,6 +181,8 @@ def test_run_em_panel_geno_changes_priors_assignment(sim_chrom):
     panel_b = AIMPanel(
         chrom=np.array(["99", "99", "99", "99"], dtype=object),
         pos_bp=np.array([1000, 2000, 3000, 4000], dtype=np.int64),
+        ref=np.array(["A"] * 4, dtype=object),
+        alt=np.array(["G"] * 4, dtype=object),
         expected_freq=np.array([0.1, 0.1, 0.9, 0.9]),
         marker_weight=np.array([1.0, 1.0, 1.0, 1.0]),
         source="test_b",
@@ -222,6 +230,8 @@ def test_run_em_panel_geno_changes_priors_assignment(sim_chrom):
         geno=sidecar_geno,
         chrom=np.array(["99"] * 4, dtype=object),
         pos_bp=np.array([1000, 2000, 3000, 4000], dtype=np.int64),
+        ref=np.array(["A"] * 4, dtype=object),
+        alt=np.array(["G"] * 4, dtype=object),
     )
 
     res_with_panel = run_em(
@@ -270,6 +280,8 @@ def test_run_em_panel_geno_requires_priors(sim_chrom):
         geno=sim_chrom.geno[:, :2].astype(np.uint8),
         chrom=np.array(["99", "99"], dtype=object),
         pos_bp=np.array([1, 2], dtype=np.int64),
+        ref=np.array(["A", "A"], dtype=object),
+        alt=np.array(["G", "G"], dtype=object),
     )
 
     # No priors: panel_geno is silently ignored. Run completes normally.

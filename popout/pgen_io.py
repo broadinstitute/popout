@@ -677,6 +677,12 @@ class PanelGeno:
     AIM panel positions × every cohort haplotype, then merged into a
     single multi-chromosome PGEN. ``read_panel_geno`` loads it whole.
 
+    Multi-allelic positions in the cohort PGEN are split into per-alt
+    biallelic rows by ``bcftools norm -m -any`` upstream, so a single
+    ``(chrom, pos)`` may appear in multiple rows here, each with a
+    different alt allele. The ref/alt arrays let the consumer resolve
+    rows by matching the panel TSV's expected ``(ref, alt)``.
+
     Attributes
     ----------
     geno : (H, M_panel) uint8
@@ -684,11 +690,15 @@ class PanelGeno:
         matches the seed chromosome's PGEN psam (asserted at load).
     chrom : (M_panel,) object — str per locus (normalized, no "chr" prefix)
     pos_bp : (M_panel,) int64
+    ref : (M_panel,) object — single-character ref allele
+    alt : (M_panel,) object — single-character alt allele
     """
 
     geno: np.ndarray
     chrom: np.ndarray
     pos_bp: np.ndarray
+    ref: np.ndarray
+    alt: np.ndarray
 
 
 def read_panel_geno(
@@ -792,15 +802,23 @@ def read_panel_geno(
     all_var_idx: list[int] = []
     all_chrom: list[str] = []
     all_pos: list[int] = []
+    all_ref: list[str] = []
+    all_alt: list[str] = []
     for chrom_norm, rec in pvar_data.items():
-        for vi, p in zip(rec.variant_idx.tolist(), rec.pos_bp.tolist()):
+        for vi, p, r, a in zip(
+            rec.variant_idx.tolist(), rec.pos_bp.tolist(), rec.ref, rec.alt,
+        ):
             all_var_idx.append(int(vi))
             all_chrom.append(chrom_norm)
             all_pos.append(int(p))
+            all_ref.append(str(r))
+            all_alt.append(str(a))
     order = np.argsort(np.array(all_var_idx, dtype=np.uint32))
     var_idx_arr = np.array([all_var_idx[i] for i in order], dtype=np.uint32)
     chrom_arr = np.array([all_chrom[i] for i in order], dtype=object)
     pos_arr = np.array([all_pos[i] for i in order], dtype=np.int64)
+    ref_arr = np.array([all_ref[i] for i in order], dtype=object)
+    alt_arr = np.array([all_alt[i] for i in order], dtype=object)
     n_panel = len(var_idx_arr)
     log.info(
         "Loaded panel PGEN %s: %d biallelic panel positions across %d chroms",
@@ -837,6 +855,8 @@ def read_panel_geno(
     if not bool(site_ok.all()):
         chrom_arr = chrom_arr[site_ok]
         pos_arr = pos_arr[site_ok]
+        ref_arr = ref_arr[site_ok]
+        alt_arr = alt_arr[site_ok]
         log.info(
             "Panel PGEN: dropped %d sites with missing genotypes; %d remain",
             int((~site_ok).sum()), len(chrom_arr),
@@ -852,4 +872,7 @@ def read_panel_geno(
         "Panel PGEN ready: %d haps × %d sites (sample order matches cohort)",
         n_haps, len(chrom_arr),
     )
-    return PanelGeno(geno=geno, chrom=chrom_arr, pos_bp=pos_arr)
+    return PanelGeno(
+        geno=geno, chrom=chrom_arr, pos_bp=pos_arr,
+        ref=ref_arr, alt=alt_arr,
+    )

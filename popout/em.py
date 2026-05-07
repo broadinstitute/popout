@@ -333,15 +333,21 @@ def compute_panel_freqs_per_comp(
     mu_per_hap_sum: np.ndarray,
     n_sites_chrom: int,
     panel_geno,  # PanelGeno
-) -> list[dict[tuple[str, int], float]]:
+) -> list[dict[tuple[str, int, str, str], float]]:
     """μ-weight the sidecar panel genotypes by per-haplotype component
-    responsibility, returning one (chrom, pos) → freq dict per component.
+    responsibility, returning one ``(chrom, pos, ref, alt) → freq`` dict
+    per component.
 
     ``mu_per_hap_sum[h, a] = Σ_t γ[h,t,a]`` over the seed chromosome's
     sites; dividing by ``n_sites_chrom`` would give the haplotype-level
     mean responsibility γ̄. We don't need that division explicitly —
     the (γ̄.T @ G) / γ̄.sum and (Σγ.T @ G) / Σγ.sum produce the same
     weighted-average freq. Use the unnormalized sum directly.
+
+    The dict key is the full ``(chrom, pos, ref, alt)`` tuple so that
+    multi-allelic positions split into per-alt biallelic rows by the
+    sidecar build's ``bcftools norm -m -any`` step are scored against
+    the correct alt by the AIM panel TSV's expected ``(ref, alt)``.
 
     Parameters
     ----------
@@ -352,8 +358,9 @@ def compute_panel_freqs_per_comp(
 
     Returns
     -------
-    list of K dicts. Each dict maps (str(chrom), int(pos_bp)) → float
-    freq for THAT component.
+    list of K dicts. Each dict maps
+    ``(str(chrom), int(pos_bp), str(ref), str(alt))`` → float freq for
+    THAT component.
     """
     H, A = mu_per_hap_sum.shape
     if panel_geno.geno.shape[0] != H:
@@ -367,15 +374,18 @@ def compute_panel_freqs_per_comp(
         mu_per_hap_sum.T.astype(np.float64) @ panel_geno.geno.astype(np.float64)
     ) / weights_sum[:, None]
 
-    out: list[dict[tuple[str, int], float]] = []
+    out: list[dict[tuple[str, int, str, str], float]] = []
     chrom_arr = panel_geno.chrom
     pos_arr = panel_geno.pos_bp
+    ref_arr = panel_geno.ref
+    alt_arr = panel_geno.alt
     for k in range(A):
-        d: dict[tuple[str, int], float] = {}
+        d: dict[tuple[str, int, str, str], float] = {}
         for m in range(panel_freq_per_comp.shape[1]):
-            d[(str(chrom_arr[m]), int(pos_arr[m]))] = float(
-                panel_freq_per_comp[k, m]
-            )
+            d[(
+                str(chrom_arr[m]), int(pos_arr[m]),
+                str(ref_arr[m]), str(alt_arr[m]),
+            )] = float(panel_freq_per_comp[k, m])
         out.append(d)
     return out
 

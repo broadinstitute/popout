@@ -40,11 +40,15 @@ def _aim_panel(
     chrom: str = "1",
     pos_start: int = 1000,
     weight: float = 1.0,
+    ref: str = "A",
+    alt: str = "G",
 ) -> AIMPanel:
     n = len(expected)
     return AIMPanel(
         chrom=np.array([chrom] * n, dtype=object),
         pos_bp=np.arange(pos_start, pos_start + n, dtype=np.int64),
+        ref=np.array([ref] * n, dtype=object),
+        alt=np.array([alt] * n, dtype=object),
         expected_freq=np.asarray(expected, dtype=np.float64),
         marker_weight=np.full(n, weight, dtype=np.float64),
         source="test",
@@ -231,6 +235,8 @@ def test_compose_scores_combines_two_signatures():
     panel = AIMPanel(
         chrom=np.array(["1"] * n_aim, dtype=object),
         pos_bp=pos[:n_aim].copy(),
+        ref=np.array(["A"] * n_aim, dtype=object),
+        alt=np.array(["G"] * n_aim, dtype=object),
         expected_freq=truth_aim,
         marker_weight=np.ones(n_aim),
         source="test",
@@ -345,9 +351,27 @@ def test_aim_panel_rejects_duplicates():
         AIMPanel(
             chrom=np.array(["1", "1"], dtype=object),
             pos_bp=np.array([10, 10], dtype=np.int64),
+            ref=np.array(["A", "A"], dtype=object),
+            alt=np.array(["G", "G"], dtype=object),
             expected_freq=np.array([0.5, 0.5]),
             marker_weight=np.array([1.0, 1.0]),
         )
+
+
+def test_aim_panel_allows_same_pos_different_alt():
+    """After bcftools-norm splits a multi-allelic into per-alt rows,
+    the same (chrom, pos) can legitimately appear with different alt
+    alleles — uniqueness is on (chrom, pos, ref, alt), not (chrom, pos).
+    """
+    panel = AIMPanel(
+        chrom=np.array(["1", "1"], dtype=object),
+        pos_bp=np.array([100, 100], dtype=np.int64),
+        ref=np.array(["A", "A"], dtype=object),
+        alt=np.array(["G", "T"], dtype=object),  # different alts
+        expected_freq=np.array([0.5, 0.3]),
+        marker_weight=np.array([1.0, 1.0]),
+    )
+    assert len(panel.chrom) == 2
 
 
 def test_aim_panel_rejects_missing_columns(tmp_path):
@@ -365,14 +389,23 @@ def test_aim_panel_rejects_missing_columns(tmp_path):
 def _aim_panel_multi_chrom(
     rows: list[tuple[str, int, float]],
     weight: float = 1.0,
+    ref: str = "A",
+    alt: str = "G",
 ) -> AIMPanel:
-    """Build a panel from explicit (chrom, pos, expected_freq) rows."""
+    """Build a panel from explicit (chrom, pos, expected_freq) rows.
+    All rows share the same (ref, alt) for test simplicity unless
+    over-ridden via the optional kwargs.
+    """
+    n = len(rows)
     chrom = np.array([r[0] for r in rows], dtype=object)
     pos = np.array([r[1] for r in rows], dtype=np.int64)
     exp = np.array([r[2] for r in rows], dtype=np.float64)
-    w = np.full(len(rows), weight, dtype=np.float64)
+    w = np.full(n, weight, dtype=np.float64)
     return AIMPanel(
-        chrom=chrom, pos_bp=pos, expected_freq=exp, marker_weight=w,
+        chrom=chrom, pos_bp=pos,
+        ref=np.array([ref] * n, dtype=object),
+        alt=np.array([alt] * n, dtype=object),
+        expected_freq=exp, marker_weight=w,
         source="test",
     )
 
@@ -380,7 +413,7 @@ def _aim_panel_multi_chrom(
 def test_aim_signature_uses_panel_freqs_by_pos_for_all_rows():
     """When ComponentState carries panel_freqs_by_pos, AIMSignature scores
     every panel row (including off-chrom) against that dict instead of
-    the on-chrom freq array."""
+    the on-chrom freq array. Key is (chrom, pos, ref, alt)."""
     panel = _aim_panel_multi_chrom([
         ("1", 1000, 0.90),  # on-chrom
         ("2", 2000, 0.10),  # off-chrom
@@ -388,19 +421,25 @@ def test_aim_signature_uses_panel_freqs_by_pos_for_all_rows():
     ])
     sig = AIMSignature(panel=panel)
 
-    # Component looks like AFR everywhere — panel freqs match expected.
-    pf = {("1", 1000): 0.90, ("2", 2000): 0.10, ("3", 3000): 0.50}
+    pf = {
+        ("1", 1000, "A", "G"): 0.90,
+        ("2", 2000, "A", "G"): 0.10,
+        ("3", 3000, "A", "G"): 0.50,
+    }
     cs = ComponentState(
-        freq=np.array([0.0]),  # bogus on-chrom freq; should be ignored
+        freq=np.array([0.0]),
         mu=0.25,
-        pos_bp=np.array([9999], dtype=np.int64),  # also irrelevant
+        pos_bp=np.array([9999], dtype=np.int64),
         chrom="1",
         panel_freqs_by_pos=pf,
     )
     score_match = sig.score(cs)
 
-    # Component looks NOTHING like the panel.
-    pf_off = {("1", 1000): 0.10, ("2", 2000): 0.90, ("3", 3000): 0.05}
+    pf_off = {
+        ("1", 1000, "A", "G"): 0.10,
+        ("2", 2000, "A", "G"): 0.90,
+        ("3", 3000, "A", "G"): 0.05,
+    }
     cs_off = ComponentState(
         freq=np.array([0.0]), mu=0.25,
         pos_bp=np.array([9999], dtype=np.int64), chrom="1",
@@ -408,33 +447,35 @@ def test_aim_signature_uses_panel_freqs_by_pos_for_all_rows():
     )
     score_mismatch = sig.score(cs_off)
 
-    assert score_match == 0.0  # exact match → loss is 0 → score is 0
+    assert score_match == 0.0
     assert score_mismatch < score_match
 
 
 def test_aim_signature_skips_panel_rows_missing_from_dict():
-    """Panel rows whose (chrom, pos) is absent from panel_freqs_by_pos
-    contribute nothing to the score (sidecar didn't carry that locus)."""
+    """Panel rows whose (chrom, pos, ref, alt) is absent from
+    panel_freqs_by_pos contribute nothing to the score (sidecar didn't
+    carry that locus, or didn't carry the matching alt)."""
     panel = _aim_panel_multi_chrom([
         ("1", 1000, 0.90),
         ("2", 2000, 0.10),
-        ("3", 3000, 0.50),  # this one will be missing from the dict
+        ("3", 3000, 0.50),  # missing from the partial dict
     ])
     sig = AIMSignature(panel=panel)
 
-    pf_partial = {("1", 1000): 0.90, ("2", 2000): 0.10}  # row 3 omitted
+    pf_partial = {
+        ("1", 1000, "A", "G"): 0.90,
+        ("2", 2000, "A", "G"): 0.10,
+    }
     cs = ComponentState(
         freq=np.array([0.0]), mu=0.25,
         pos_bp=np.array([9999], dtype=np.int64), chrom="1",
         panel_freqs_by_pos=pf_partial,
     )
     score = sig.score(cs)
-    # Two rows, both perfect match → score = 0 (not negative).
-    assert score == 0.0
+    assert score == 0.0  # two perfect matches, no penalty
 
-    # Same panel, full match for all three: also 0 (still perfect).
     pf_full = dict(pf_partial)
-    pf_full[("3", 3000)] = 0.50
+    pf_full[("3", 3000, "A", "G")] = 0.50
     cs_full = ComponentState(
         freq=np.array([0.0]), mu=0.25,
         pos_bp=np.array([9999], dtype=np.int64), chrom="1",
@@ -442,19 +483,25 @@ def test_aim_signature_skips_panel_rows_missing_from_dict():
     )
     assert sig.score(cs_full) == 0.0
 
-    # Now make the missing row's freq mismatch — cs_partial still says 0
-    # (it's missing). cs_full would penalize. Confirms the missing row
-    # contributes 0, not a default.
+    # Different alt for the row 3 → still missing as a (..., A, G) key,
+    # contributes zero — confirms alt-mismatch is treated as "missing".
+    pf_wrong_alt = dict(pf_partial)
+    pf_wrong_alt[("3", 3000, "A", "T")] = 0.0
+    cs_wrong_alt = ComponentState(
+        freq=np.array([0.0]), mu=0.25,
+        pos_bp=np.array([9999], dtype=np.int64), chrom="1",
+        panel_freqs_by_pos=pf_wrong_alt,
+    )
+    assert sig.score(cs_wrong_alt) == 0.0  # row 3 (A,G) absent → no penalty
+
     pf_full_mismatch = dict(pf_partial)
-    pf_full_mismatch[("3", 3000)] = 0.0  # 0 vs expected 0.5 → penalty
+    pf_full_mismatch[("3", 3000, "A", "G")] = 0.0  # mismatch → penalty
     cs_full_mismatch = ComponentState(
         freq=np.array([0.0]), mu=0.25,
         pos_bp=np.array([9999], dtype=np.int64), chrom="1",
         panel_freqs_by_pos=pf_full_mismatch,
     )
-    score_full_mismatch = sig.score(cs_full_mismatch)
-    assert score_full_mismatch < 0.0  # full set with a mismatch is worse
-    assert score == 0.0  # partial set without that row has no penalty
+    assert sig.score(cs_full_mismatch) < 0.0
 
 
 def test_aim_signature_panel_freqs_normalizes_chrom_prefix():
@@ -463,8 +510,8 @@ def test_aim_signature_panel_freqs_normalizes_chrom_prefix():
     panel = _aim_panel_multi_chrom([("chr1", 1000, 0.9)])
     sig = AIMSignature(panel=panel)
 
-    pf_with_chr = {("chr1", 1000): 0.9}
-    pf_no_chr = {("1", 1000): 0.9}
+    pf_with_chr = {("chr1", 1000, "A", "G"): 0.9}
+    pf_no_chr = {("1", 1000, "A", "G"): 0.9}
     for pf in (pf_with_chr, pf_no_chr):
         cs = ComponentState(
             freq=np.array([0.0]), mu=0.25,
@@ -472,6 +519,45 @@ def test_aim_signature_panel_freqs_normalizes_chrom_prefix():
             chrom="1",
             panel_freqs_by_pos=pf,
         )
-        # Both formats should resolve and give zero loss against the
-        # exact-match expected freq.
         assert sig.score(cs) == 0.0
+
+
+def test_aim_signature_resolves_split_multiallelic_rows():
+    """Two panel rows at the same (chrom, pos) with different alt
+    alleles — bcftools-norm-style — must each score against the
+    correctly-keyed sidecar row."""
+    panel = AIMPanel(
+        chrom=np.array(["1", "1"], dtype=object),
+        pos_bp=np.array([1000, 1000], dtype=np.int64),
+        ref=np.array(["A", "A"], dtype=object),
+        alt=np.array(["G", "T"], dtype=object),
+        expected_freq=np.array([0.9, 0.1]),
+        marker_weight=np.array([1.0, 1.0]),
+        source="test_multiallelic",
+    )
+    sig = AIMSignature(panel=panel)
+
+    # Sidecar carries both biallelic rows (cohort had this position
+    # multi-allelic; bcftools split into A→G and A→T).
+    pf = {
+        ("1", 1000, "A", "G"): 0.9,  # exact match for the G alt
+        ("1", 1000, "A", "T"): 0.1,  # exact match for the T alt
+    }
+    cs = ComponentState(
+        freq=np.array([0.0]), mu=0.25,
+        pos_bp=np.array([9999], dtype=np.int64), chrom="1",
+        panel_freqs_by_pos=pf,
+    )
+    assert sig.score(cs) == 0.0  # both rows perfect-match
+
+    # Now flip them: cohort's G freq is wrong; T is correct.
+    pf_partial_match = {
+        ("1", 1000, "A", "G"): 0.1,
+        ("1", 1000, "A", "T"): 0.1,
+    }
+    cs_partial = ComponentState(
+        freq=np.array([0.0]), mu=0.25,
+        pos_bp=np.array([9999], dtype=np.int64), chrom="1",
+        panel_freqs_by_pos=pf_partial_match,
+    )
+    assert sig.score(cs_partial) < 0.0  # G row penalized, T row matches

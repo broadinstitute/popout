@@ -38,6 +38,8 @@ def _trivial_panel() -> AIMPanel:
     return AIMPanel(
         chrom=np.array(["1"], dtype=object),
         pos_bp=np.array([100], dtype=np.int64),
+        ref=np.array(["A"], dtype=object),
+        alt=np.array(["G"], dtype=object),
         expected_freq=np.array([0.5]),
         marker_weight=np.array([1.0]),
     )

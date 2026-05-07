@@ -64,29 +64,52 @@ task extract_panel_pgen_task {
     ln -sf "~{pvar}" "${INPUT_PREFIX}.pvar"
     ln -sf "~{psam}" "${INPUT_PREFIX}.psam"
 
-    echo "=== Extract AIM panel positions (biallelic SNPs only) ==="
-    # --max-alleles 2 + --snps-only just-acgt are required: the
-    # downstream consumer (popout's pgenlib reader at Phase 2) cannot
-    # read multiallelic variants in phased PGENs.  Panel positions
-    # that AoU calls as multi-allelic (additional rare alts at sites
-    # the panel BED expected as biallelic SNPs) are dropped here.
-    # The trade-off: those positions are lost to the sidecar even
-    # though they're "in" the cohort — but they're unrecoverable for
-    # popout regardless of what we do at extract time.
+    # Three-step extract to recover multi-allelic AIM panel positions:
+    #
+    #   1. plink2 → VCF: extract panel positions, KEEP multi-allelic
+    #      (the BED region selects the locus regardless of allele count).
+    #   2. bcftools norm -m -any: split each multi-allelic site into
+    #      one biallelic row per alt allele. After this every row is
+    #      (chrom, pos, ref, single_alt) — uniquely keyed by the
+    #      tuple, so popout's panel-freq lookup can pick the alt
+    #      matching the panel TSV's expected (ref, alt).
+    #   3. plink2 ← VCF: re-encode to PGEN with --max-alleles 2 (a
+    #      defensive no-op after norm; rejects anything bcftools
+    #      didn't fully split).
+    #
+    # Without this, multi-allelic panel positions (additional rare
+    # alts AoU calls at sites the panel BED expected as biallelic
+    # SNPs) crash popout's pgenlib reader: phased + multi-allelic is
+    # not a supported combination.
+
+    echo "=== Step 1/3: extract panel region to VCF (keeps multi-allelic) ==="
     plink2 \
       --pfile "${INPUT_PREFIX}" \
       --extract bed0 "~{aim_panel_bed}" \
-      --max-alleles 2 \
       --snps-only just-acgt \
+      --recode vcf bgz \
+      --threads ~{cpu} \
+      --out "~{output_prefix}.raw"
+
+    echo "=== Step 2/3: bcftools norm -m -any (split multi-allelic) ==="
+    bcftools norm -m -any \
+      -Oz -o "~{output_prefix}.split.vcf.gz" \
+      "~{output_prefix}.raw.vcf.gz"
+    bcftools index -t "~{output_prefix}.split.vcf.gz"
+
+    echo "=== Step 3/3: re-encode biallelic VCF as PGEN ==="
+    plink2 \
+      --vcf "~{output_prefix}.split.vcf.gz" \
+      --max-alleles 2 \
       --make-pgen \
       --threads ~{cpu} \
       --out "~{output_prefix}"
 
-    echo "=== Variant count ==="
-    wc -l "~{output_prefix}.pvar"
+    echo "=== Variant count (post-split) ==="
+    grep -v '^#' "~{output_prefix}.pvar" | wc -l
 
     echo "=== Sample count ==="
-    wc -l "~{output_prefix}.psam"
+    grep -v '^#' "~{output_prefix}.psam" | wc -l
   >>>
 
   output {

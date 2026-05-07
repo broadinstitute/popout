@@ -50,21 +50,22 @@ class ComponentState:
     chrom : str
         Chromosome name. Required so panels and reference vectors can be
         filtered to the right chromosome at score time.
-    panel_freqs_by_pos : dict[(chrom, pos_bp), float] | None
+    panel_freqs_by_pos : dict[(chrom, pos_bp, ref, alt), float] | None
         Optional μ-weighted component allele-frequency estimates at
         AIM-panel positions, supplied by the Phase 2 sidecar-PGEN path
-        (``--panel-geno``). When present, :class:`AIMSignature` scores
-        every panel row against this dict — for both on-chrom and
-        off-chrom positions — instead of falling back to ``freq`` for
-        the on-chrom slice. When None, AIMSignature uses the on-chrom
-        ``freq``-lookup path only.
+        (``--panel-geno``). The key is the full
+        ``(chrom, pos, ref, alt)`` tuple so that multi-allelic positions
+        — split into per-alt biallelic rows by the sidecar build's
+        ``bcftools norm -m -any`` step — resolve to the correct row
+        keyed by the panel TSV's expected ``(ref, alt)``. When None,
+        AIMSignature uses the on-chrom ``freq``-lookup path only.
     """
 
     freq: np.ndarray
     mu: float
     pos_bp: np.ndarray
     chrom: str
-    panel_freqs_by_pos: dict[tuple[str, int], float] | None = None
+    panel_freqs_by_pos: dict[tuple[str, int, str, str], float] | None = None
 
 
 @runtime_checkable
@@ -103,6 +104,8 @@ class AIMPanel:
 
     chrom: np.ndarray         # (M,) str
     pos_bp: np.ndarray        # (M,) int64
+    ref: np.ndarray           # (M,) str — reference allele
+    alt: np.ndarray           # (M,) str — alt allele the expected_freq applies to
     expected_freq: np.ndarray # (M,) float64 — alt-allele freq in the target population
     marker_weight: np.ndarray # (M,) float64 — per-marker reliability in [0, 1]
     source: str = "<panel>"
@@ -111,6 +114,8 @@ class AIMPanel:
         n = len(self.chrom)
         for name, arr in (
             ("pos_bp", self.pos_bp),
+            ("ref", self.ref),
+            ("alt", self.alt),
             ("expected_freq", self.expected_freq),
             ("marker_weight", self.marker_weight),
         ):
@@ -121,19 +126,30 @@ class AIMPanel:
                 )
         if n == 0:
             raise ValueError("AIMPanel must have at least one marker")
-        # check (chrom, pos) uniqueness
-        keys = list(zip([str(c) for c in self.chrom], self.pos_bp.tolist()))
+        # Uniqueness on (chrom, pos, ref, alt) — multi-allelic positions
+        # in the panel TSV legitimately share (chrom, pos) for different
+        # alt alleles after bcftools norm -m splitting.
+        keys = list(zip(
+            [str(c) for c in self.chrom],
+            self.pos_bp.tolist(),
+            [str(r) for r in self.ref],
+            [str(a) for a in self.alt],
+        ))
         if len(set(keys)) != n:
-            raise ValueError("AIMPanel has duplicate (chrom, pos_bp) entries")
+            raise ValueError(
+                "AIMPanel has duplicate (chrom, pos, ref, alt) entries"
+            )
 
     @classmethod
     def from_tsv(cls, path: str | Path, source: str | None = None) -> "AIMPanel":
         """Load a panel from a TSV with header columns
-        ``chrom, pos_bp, expected_freq, weight`` (extra columns ignored).
+        ``chrom, pos_bp, ref, alt, expected_freq, weight`` (extras ignored).
         """
         path = Path(path)
         chrom_l: list[str] = []
         pos_l: list[int] = []
+        ref_l: list[str] = []
+        alt_l: list[str] = []
         exp_l: list[float] = []
         w_l: list[float] = []
         with open(path) as f:
@@ -141,7 +157,7 @@ class AIMPanel:
             if not header_line:
                 raise ValueError(f"AIM panel {path} is empty")
             header = header_line.rstrip("\n").split("\t")
-            need = {"chrom", "pos_bp", "expected_freq", "weight"}
+            need = {"chrom", "pos_bp", "ref", "alt", "expected_freq", "weight"}
             missing = need - set(header)
             if missing:
                 raise ValueError(
@@ -155,6 +171,8 @@ class AIMPanel:
                 row = stripped.split("\t")
                 chrom_l.append(str(row[ci["chrom"]]))
                 pos_l.append(int(row[ci["pos_bp"]]))
+                ref_l.append(str(row[ci["ref"]]))
+                alt_l.append(str(row[ci["alt"]]))
                 exp_l.append(float(row[ci["expected_freq"]]))
                 w_l.append(float(row[ci["weight"]]))
         if not chrom_l:
@@ -162,6 +180,8 @@ class AIMPanel:
         return cls(
             chrom=np.array(chrom_l, dtype=object),
             pos_bp=np.array(pos_l, dtype=np.int64),
+            ref=np.array(ref_l, dtype=object),
+            alt=np.array(alt_l, dtype=object),
             expected_freq=np.array(exp_l, dtype=np.float64),
             marker_weight=np.array(w_l, dtype=np.float64),
             source=source if source is not None else str(path),
@@ -228,10 +248,20 @@ class AIMSignature:
         return float(-contrib.sum())
 
     def _score_from_panel_dict(
-        self, panel_freqs: dict[tuple[str, int], float],
+        self, panel_freqs: dict[tuple[str, int, str, str], float],
     ) -> float:
-        """Score every panel row against the supplied (chrom, pos) →
-        freq dict. Rows whose key is absent from the dict are skipped.
+        """Score every panel row against the supplied
+        ``(chrom, pos, ref, alt) → freq`` dict. Panel rows whose key is
+        absent from the dict are skipped (the sidecar's bcftools-norm
+        split didn't produce a matching biallelic row at that locus).
+
+        Two cohort vs. panel mismatches are tolerated by skipping:
+
+        * Multi-allelic in cohort but the cohort's alt set doesn't
+          include the panel TSV's alt — sidecar has rows for the
+          alts AoU saw, none keyed to the panel's alt.
+        * Position not in cohort site set at all — no rows from this
+          locus in the sidecar.
         """
         freqs: list[float] = []
         exps: list[float] = []
@@ -239,11 +269,14 @@ class AIMSignature:
         for i in range(len(self.panel.chrom)):
             chrom = _normalize_chrom(str(self.panel.chrom[i]))
             pos = int(self.panel.pos_bp[i])
-            f = panel_freqs.get((chrom, pos))
+            ref = str(self.panel.ref[i])
+            alt = str(self.panel.alt[i])
+            f = panel_freqs.get((chrom, pos, ref, alt))
             if f is None:
-                # Try with the un-normalized chrom too, since callers
-                # may have built the dict using "chr1" or "1".
-                f = panel_freqs.get((str(self.panel.chrom[i]), pos))
+                # Tolerate "chr1" vs "1" prefix differences in the dict.
+                f = panel_freqs.get(
+                    (str(self.panel.chrom[i]), pos, ref, alt)
+                )
             if f is None:
                 continue
             freqs.append(float(f))
