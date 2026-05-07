@@ -240,6 +240,25 @@ def test_run_em_panel_geno_changes_priors_assignment(sim_chrom):
     )
 
 
+def test_read_panel_geno_psam_set_mismatch_raises(tmp_path):
+    """Same-count psams with different IIDs raise a clear error
+    (lists the missing samples)."""
+    from popout.pgen_io import read_panel_geno
+    # We can construct just the psam files for this assertion since
+    # read_panel_geno checks the IID set BEFORE opening the PGEN.
+    # But the function also expects pgen/pvar to exist; build empty
+    # placeholders that reach the assertion point.
+    pgen = tmp_path / "p.pgen"
+    pvar = tmp_path / "p.pvar"
+    psam = tmp_path / "p.psam"
+    pgen.write_bytes(b"")
+    pvar.write_text("#CHROM\tPOS\tID\tREF\tALT\n1\t100\t.\tA\tG\n")
+    psam.write_text("#IID\nS1\nS2\nS3\n")
+
+    with pytest.raises(ValueError, match="sample SET does not match"):
+        read_panel_geno(str(tmp_path / "p"), expected_sample_iids=["S1", "S2", "S99"])
+
+
 def test_run_em_panel_geno_requires_priors(sim_chrom):
     """panel_geno without priors is meaningless — the helper that uses
     the sidecar (M-step priors-assignment block) wouldn't run. This is

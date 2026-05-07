@@ -722,29 +722,60 @@ def read_panel_geno(
     if not psam_path.exists():
         raise FileNotFoundError(f"No .psam for panel PGEN prefix {stem}")
 
-    # Hap-order assertion: panel psam must list identical sample IIDs in
-    # identical order. This is a workflow-level invariant — if it fails
-    # the upstream extraction emitted a different cohort than the EM
-    # input — we fail loudly.
+    # Hap-set check + permutation: the panel and cohort psams must
+    # contain the SAME set of sample IIDs. plink2 --pmerge-list
+    # reorders samples by IID, so the panel psam is typically NOT in
+    # cohort order. We build a permutation (panel-row → cohort-row)
+    # and apply it to the geno matrix after read.
     actual_iids = _parse_psam(psam_path)
-    if actual_iids != list(expected_sample_iids):
-        first_diff = next(
-            (i for i, (a, b) in enumerate(zip(actual_iids, expected_sample_iids))
-             if a != b),
-            None,
-        )
+    expected_list = list(expected_sample_iids)
+    panel_set = set(actual_iids)
+    cohort_set = set(expected_list)
+
+    if len(panel_set) != len(actual_iids):
         raise ValueError(
-            f"Panel PGEN sample order does not match cohort PGEN.\n"
+            f"Panel psam {psam_path} contains duplicate IIDs "
+            f"({len(actual_iids)} rows but only {len(panel_set)} unique)."
+        )
+    if len(cohort_set) != len(expected_list):
+        raise ValueError(
+            f"Cohort psam contains duplicate IIDs "
+            f"({len(expected_list)} rows but only {len(cohort_set)} unique)."
+        )
+
+    if panel_set != cohort_set:
+        missing_in_panel = sorted(cohort_set - panel_set)[:5]
+        missing_in_cohort = sorted(panel_set - cohort_set)[:5]
+        raise ValueError(
+            f"Panel PGEN sample SET does not match cohort PGEN.\n"
             f"  panel psam: {psam_path}  ({len(actual_iids)} samples)\n"
-            f"  cohort psam: {len(expected_sample_iids)} samples\n"
-            f"  first difference at index {first_diff}: "
-            f"panel={actual_iids[first_diff] if first_diff is not None else 'N/A'} "
-            f"cohort={expected_sample_iids[first_diff] if first_diff is not None else 'N/A'}\n"
+            f"  cohort psam: {len(expected_list)} samples\n"
+            f"  in cohort but not panel ({len(cohort_set - panel_set)} total, "
+            f"first 5): {missing_in_panel}\n"
+            f"  in panel but not cohort ({len(panel_set - cohort_set)} total, "
+            f"first 5): {missing_in_cohort}\n"
             f"Re-run extract_panel_geno.wdl against the same cohort."
         )
 
     n_samples = len(actual_iids)
     n_haps = 2 * n_samples
+
+    # Build the haplotype-row permutation: cohort hap row 2*i, 2*i+1
+    # comes from panel hap row 2*j, 2*j+1 where j is panel's index
+    # for cohort_iids[i]. Same-set check above guarantees every iid
+    # is present.
+    panel_iid_to_idx = {iid: j for j, iid in enumerate(actual_iids)}
+    sample_perm = np.array(
+        [panel_iid_to_idx[iid] for iid in expected_list], dtype=np.int64,
+    )
+    if not np.array_equal(sample_perm, np.arange(n_samples)):
+        log.info(
+            "Panel psam in different order than cohort psam; building "
+            "haplotype permutation (panel → cohort).",
+        )
+    hap_perm = np.empty(n_haps, dtype=np.int64)
+    hap_perm[0::2] = 2 * sample_perm
+    hap_perm[1::2] = 2 * sample_perm + 1
 
     # Parse the pvar — multi-chrom panel is supported (all chroms'
     # AIM positions live in one file).
@@ -810,6 +841,12 @@ def read_panel_geno(
             "Panel PGEN: dropped %d sites with missing genotypes; %d remain",
             int((~site_ok).sum()), len(chrom_arr),
         )
+
+    # Apply the panel→cohort hap permutation. fancy-indexing copies
+    # contiguously; at biobank scale (~1M haps × ~80 panel sites × 1
+    # byte) this is ~80 MB and runs in a fraction of a second.
+    if not np.array_equal(hap_perm, np.arange(n_haps)):
+        geno = geno[hap_perm, :]
 
     log.info(
         "Panel PGEN ready: %d haps × %d sites (sample order matches cohort)",
