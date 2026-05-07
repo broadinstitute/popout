@@ -15,12 +15,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# plink2 (static AVX2 binary)
-RUN curl -fsSL https://s3.amazonaws.com/plink2-assets/plink2_linux_avx2_20260311.zip \
+# plink2 (static AVX2 binary).
+#
+# Same robustness story as vcf2pgen/docker/Dockerfile: pin the alpha
+# series subdirectory + build date; the bare /plink2-assets/ path is
+# a dev-snapshot that rotates and breaks rebuilds.  Bump PLINK2_SERIES
+# and PLINK2_BUILD together to update.
+ARG PLINK2_SERIES=alpha7
+ARG PLINK2_BUILD=20260504
+RUN curl -fsSL "https://s3.amazonaws.com/plink2-assets/${PLINK2_SERIES}/plink2_linux_avx2_${PLINK2_BUILD}.zip" \
         -o /tmp/plink2.zip \
     && python3 -c "import zipfile; zipfile.ZipFile('/tmp/plink2.zip').extractall('/usr/local/bin')" \
     && chmod +x /usr/local/bin/plink2 \
-    && rm /tmp/plink2.zip
+    && rm /tmp/plink2.zip \
+    && /usr/local/bin/plink2 --version
 
 # Python venv
 RUN python3 -m venv /opt/popout
