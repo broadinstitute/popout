@@ -626,6 +626,11 @@ def _streaming_em_checkpointed(
     soft_switches   : (B,) float32
     switches_per_comp : (A,) float32 — Σ_{h,n} (γ[h,n,a] − ξ_diag[h,n,a])
     d_weighted_occupancy : (A,) float32 — Σ_{h,n} d_n · γ[h,n,a]
+    mu_per_hap      : (B, A) float32 — Σ_n γ[h,n,a]; per-hap component
+                      responsibility sum used by Phase 2's μ-weighted
+                      panel-freq compute. Divide by n_sites to get
+                      γ̄_h_a (the mean responsibility for component a
+                      on this chromosome for haplotype h).
     """
     B = geno_j.shape[0]
     T = geno_j.shape[1] - emit_pad
@@ -665,7 +670,7 @@ def _streaming_em_checkpointed(
     gamma_idx_rev = jnp.flip(gamma_site_idx, axis=0)
 
     def _bwd_segment(carry, xs):
-        beta_right, soft_sw, wc, tw, sw_pc, occ_pc = carry
+        beta_right, soft_sw, wc, tw, sw_pc, occ_pc, mu_per_hap = carry
         st, ds, ckpt, e_sites, g_sites = xs
 
         se = _emit_batch(e_sites)
@@ -717,6 +722,12 @@ def _streaming_em_checkpointed(
         wc = wc.at[:, g_sites].add(wc_seg)
         tw = tw.at[:, g_sites].add(tw_seg)
 
+        # Per-hap component-responsibility accumulator: sum gamma over
+        # this segment's C sites, axis=0 → (B, A). Add into the running
+        # (B, A) carry. After the full scan this is Σ_n γ[h,n,a] across
+        # the chromosome, the (B, A) sum we need for μ-weighting.
+        seg_mu_per_hap = gamma_seg.sum(axis=0)  # (B, A)
+
         return (
             beta_left,
             soft_sw + seg_soft,
@@ -724,6 +735,7 @@ def _streaming_em_checkpointed(
             tw,
             sw_pc + seg_sw_pc,
             occ_pc + seg_occ_pc,
+            mu_per_hap + seg_mu_per_hap,
         ), None
 
     init_carry = (
@@ -733,8 +745,9 @@ def _streaming_em_checkpointed(
         jnp.zeros((A, n_fwd_steps), jnp.float32),
         jnp.zeros((A,), jnp.float32),
         jnp.zeros((A,), jnp.float32),
+        jnp.zeros((B, A), jnp.float32),
     )
-    (_, soft_switches, wc_pad, tw_pad, switches_per_comp, d_weighted_occupancy), _ = jax.lax.scan(
+    (_, soft_switches, wc_pad, tw_pad, switches_per_comp, d_weighted_occupancy, mu_per_hap), _ = jax.lax.scan(
         _bwd_segment, init_carry,
         (seg_trans_rev, seg_d_rev, ckpt_rev, site_idx_rev, gamma_idx_rev),
     )
@@ -745,7 +758,7 @@ def _streaming_em_checkpointed(
 
     return (
         weighted_counts, total_weights, mu_sum, soft_switches,
-        switches_per_comp, d_weighted_occupancy,
+        switches_per_comp, d_weighted_occupancy, mu_per_hap,
     )
 
 
@@ -1339,6 +1352,10 @@ def forward_backward_em(
     soft_switches_per_hap = _np.zeros(H, dtype=_np.float32)
     switches_per_comp = _np.zeros(A, dtype=_np.float64)
     d_weighted_occupancy = _np.zeros(A, dtype=_np.float64)
+    # Per-hap component responsibility sum (Phase 2: μ-weighted panel
+    # freq compute). Accumulate from each batch's (B, A) slice into the
+    # full (H, A) host array.
+    mu_per_hap_sum = _np.zeros((H, A), dtype=_np.float32)
 
     for start in range(0, H, batch_size):
         end = min(start + batch_size, H)
@@ -1348,7 +1365,7 @@ def forward_backward_em(
                 [batch_geno, jnp.zeros((end - start, emit_pad), dtype=batch_geno.dtype)],
                 axis=1,
             )
-        wc_b, tw_b, mu_b, sw_b, sw_pc_b, occ_pc_b = _streaming_em_checkpointed(
+        wc_b, tw_b, mu_b, sw_b, sw_pc_b, occ_pc_b, mu_per_hap_b = _streaming_em_checkpointed(
             batch_geno, pc["log_f0"], pc["log_odds"], pc["seg_trans"], pc["seg_d"],
             pc["site_idx"], pc["gamma_site_idx"], pc["log_prior"],
             C=pc["C"], S=pc["S"], n_fwd_steps=pc["n_fwd_steps"],
@@ -1360,6 +1377,7 @@ def forward_backward_em(
         soft_switches_per_hap[start:end] = _np.array(sw_b)
         switches_per_comp += _np.asarray(sw_pc_b, dtype=_np.float64)
         d_weighted_occupancy += _np.asarray(occ_pc_b, dtype=_np.float64)
+        mu_per_hap_sum[start:end] = _np.asarray(mu_per_hap_b)
 
     return EMStats(
         weighted_counts=weighted_counts,
@@ -1372,6 +1390,7 @@ def forward_backward_em(
         n_sites=T,
         switches_per_comp=switches_per_comp,
         d_weighted_occupancy=d_weighted_occupancy,
+        mu_per_hap_sum=mu_per_hap_sum,
     )
 
 
@@ -1422,6 +1441,10 @@ def forward_backward_blocks_em(
     hard_switches_per_hap = _np.zeros(H_total, dtype=_np.int32)
     switches_per_comp = _np.zeros(n_anc, dtype=_np.float64)
     d_weighted_occupancy = _np.zeros(n_anc, dtype=_np.float64)
+    # Per-hap component-responsibility sum (Phase 2). gb_chunk is
+    # per-block gamma (chunk, n_blocks, A); the per-hap site sum is
+    # einsum('hba,b->ha') with the same block_widths used by mu_sum.
+    mu_per_hap_sum = _np.zeros((H_total, n_anc), dtype=_np.float32)
     _pf_counts = jnp.zeros((bd.n_blocks, bd.max_patterns, n_anc), dtype=jnp.float32)
 
     T_padded = bd.n_blocks * bd.block_size
@@ -1480,6 +1503,12 @@ def forward_backward_blocks_em(
         # mu_sum[a] = sum_h sum_b gamma_block[h,b,a] * width[b]
         mu_sum = mu_sum + jnp.einsum('hba,b->a', gb_chunk, block_widths_j)
 
+        # mu_per_hap_sum[h, a] = sum_b gamma_block[h,b,a] * width[b]
+        # (same formula as mu_sum but drop the h-axis reduction). Pulls
+        # to host so it composes with the (H_total, A) accumulator.
+        mu_per_hap_chunk = jnp.einsum('hba,b->ha', gb_chunk, block_widths_j)
+        mu_per_hap_sum[batch_idx] = _np.asarray(mu_per_hap_chunk)
+
         # Soft switches: density-invariant per-haplotype counts
         # consumed by update_generations_per_hap_from_stats.
         soft_switches_per_hap[batch_idx] = _np.asarray(sw_chunk)
@@ -1527,6 +1556,7 @@ def forward_backward_blocks_em(
         n_sites=T_sites,
         switches_per_comp=switches_per_comp,
         d_weighted_occupancy=d_weighted_occupancy,
+        mu_per_hap_sum=mu_per_hap_sum,
     )
     return em_stats, _pf_counts
 
@@ -1569,7 +1599,7 @@ def forward_backward_bucketed_em(
                 [batch_geno, jnp.zeros((n, b_emit_pad), dtype=batch_geno.dtype)],
                 axis=1,
             )
-        wc_b, tw_b, mu_b, sw_b, sw_pc_b, occ_pc_b = _streaming_em_checkpointed(
+        wc_b, tw_b, mu_b, sw_b, sw_pc_b, occ_pc_b, _mu_per_hap_b = _streaming_em_checkpointed(
             batch_geno, b_pc["log_f0"], b_pc["log_odds"], b_pc["seg_trans"], b_pc["seg_d"],
             b_pc["site_idx"], b_pc["gamma_site_idx"], b_pc["log_prior"],
             C=b_pc["C"], S=b_pc["S"], n_fwd_steps=b_pc["n_fwd_steps"],
@@ -1581,8 +1611,13 @@ def forward_backward_bucketed_em(
         soft_switches_per_hap[batch_idx] = _np.array(sw_b)
         switches_per_comp += _np.asarray(sw_pc_b, dtype=_np.float64)
         d_weighted_occupancy += _np.asarray(occ_pc_b, dtype=_np.float64)
+        # _mu_per_hap_b is intentionally discarded here:
+        # forward_backward_bucketed_em is the --per-hap-T path, mutex
+        # with --priors (the only consumer of mu_per_hap_sum). Wiring
+        # it through buckets would require extra plumbing for no
+        # current consumer.
         weighted_counts.block_until_ready()
-        del batch_geno, wc_b, tw_b, mu_b, sw_b, sw_pc_b, occ_pc_b
+        del batch_geno, wc_b, tw_b, mu_b, sw_b, sw_pc_b, occ_pc_b, _mu_per_hap_b
 
     return EMStats(
         weighted_counts=weighted_counts,

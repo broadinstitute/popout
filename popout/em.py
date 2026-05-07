@@ -283,6 +283,7 @@ def build_component_states(
     allele_freq: jnp.ndarray,
     mu: jnp.ndarray,
     chrom_data,
+    panel_freqs_by_pos: list | None = None,
 ) -> list:
     """Build one :class:`popout.identity.ComponentState` per ancestry
     from the most recent M-step allele frequencies.
@@ -292,6 +293,18 @@ def build_component_states(
     Aggregating across chromosomes is an additive future change (see
     ``docs/PRIORS.md``); the per-chromosome view is acceptable because
     a component's ancestry is visible from any one chromosome's freqs.
+
+    Parameters
+    ----------
+    allele_freq : (A, T) — per-component per-site freqs from EM.
+    mu : (A,) — global ancestry proportions from EM.
+    chrom_data : current chromosome's ChromData (provides pos_bp + chrom).
+    panel_freqs_by_pos : optional list of K dicts, one per component,
+        mapping (chrom, pos_bp) → μ-weighted freq for AIM panel positions
+        across the genome. Supplied by the Phase 2 sidecar-PGEN path
+        (``--panel-geno``); when present, ComponentState exposes it to
+        :class:`AIMSignature` so panel scoring uses these freqs for
+        every panel row, not just the on-chrom slice.
     """
     from .identity import ComponentState
 
@@ -299,10 +312,72 @@ def build_component_states(
     mu_np = np.asarray(mu)
     pos_bp = np.asarray(chrom_data.pos_bp)
     chrom = str(chrom_data.chrom)
-    return [
-        ComponentState(freq=af[k], mu=float(mu_np[k]), pos_bp=pos_bp, chrom=chrom)
-        for k in range(af.shape[0])
-    ]
+    K = af.shape[0]
+    states = []
+    for k in range(K):
+        pf = (
+            panel_freqs_by_pos[k]
+            if panel_freqs_by_pos is not None
+            else None
+        )
+        states.append(
+            ComponentState(
+                freq=af[k], mu=float(mu_np[k]), pos_bp=pos_bp, chrom=chrom,
+                panel_freqs_by_pos=pf,
+            )
+        )
+    return states
+
+
+def compute_panel_freqs_per_comp(
+    mu_per_hap_sum: np.ndarray,
+    n_sites_chrom: int,
+    panel_geno,  # PanelGeno
+) -> list[dict[tuple[str, int], float]]:
+    """μ-weight the sidecar panel genotypes by per-haplotype component
+    responsibility, returning one (chrom, pos) → freq dict per component.
+
+    ``mu_per_hap_sum[h, a] = Σ_t γ[h,t,a]`` over the seed chromosome's
+    sites; dividing by ``n_sites_chrom`` would give the haplotype-level
+    mean responsibility γ̄. We don't need that division explicitly —
+    the (γ̄.T @ G) / γ̄.sum and (Σγ.T @ G) / Σγ.sum produce the same
+    weighted-average freq. Use the unnormalized sum directly.
+
+    Parameters
+    ----------
+    mu_per_hap_sum : (H, A) — from :class:`EMStats`.
+    n_sites_chrom : seed chromosome's site count (kept for documentation;
+        cancels out of the weighted-average freq).
+    panel_geno : :class:`popout.pgen_io.PanelGeno`.
+
+    Returns
+    -------
+    list of K dicts. Each dict maps (str(chrom), int(pos_bp)) → float
+    freq for THAT component.
+    """
+    H, A = mu_per_hap_sum.shape
+    if panel_geno.geno.shape[0] != H:
+        raise ValueError(
+            f"panel_geno hap count {panel_geno.geno.shape[0]} != EM "
+            f"haplotype count {H}; sidecar / cohort PGEN mismatch."
+        )
+    # (A, M_panel) = (A, H) @ (H, M_panel)
+    weights_sum = mu_per_hap_sum.sum(axis=0)  # (A,)
+    panel_freq_per_comp = (
+        mu_per_hap_sum.T.astype(np.float64) @ panel_geno.geno.astype(np.float64)
+    ) / weights_sum[:, None]
+
+    out: list[dict[tuple[str, int], float]] = []
+    chrom_arr = panel_geno.chrom
+    pos_arr = panel_geno.pos_bp
+    for k in range(A):
+        d: dict[tuple[str, int], float] = {}
+        for m in range(panel_freq_per_comp.shape[1]):
+            d[(str(chrom_arr[m]), int(pos_arr[m]))] = float(
+                panel_freq_per_comp[k, m]
+            )
+        out.append(d)
+    return out
 
 
 def write_priors_assignment_dump(
@@ -668,6 +743,7 @@ def run_em(
     priors=None,  # popout.prior_spec.Priors | None
     priors_dump_path: Optional[str] = None,
     superpop_freqs: Optional[str] = None,
+    panel_geno=None,  # popout.pgen_io.PanelGeno | None — Phase 2 sidecar
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -842,8 +918,34 @@ def run_em(
                 if model.gen_per_comp is not None
                 else jnp.full((n_anc,), model.gen_since_admix, dtype=jnp.float32)
             )
+
+            # Phase 2: when a sidecar PGEN was provided, μ-weight its
+            # genotypes by the per-haplotype component-responsibility
+            # sum from this iteration's forward-backward stats. The
+            # resulting (chrom, pos) → freq dicts (one per component)
+            # supersede the on-chrom freq lookup inside AIMSignature
+            # and bring all 87 panel positions into the score, not
+            # just the seed chrom's slice.
+            panel_freqs_by_pos = None
+            if panel_geno is not None:
+                if em_stats.mu_per_hap_sum is None:
+                    raise RuntimeError(
+                        "panel_geno is set but the FB variant in use did "
+                        "not populate EMStats.mu_per_hap_sum. Phase 2 "
+                        "requires forward_backward_em or "
+                        "forward_backward_blocks_em (which both write "
+                        "the per-hap stat); --per-hap-T is mutex with "
+                        "--priors and not supported here."
+                    )
+                panel_freqs_by_pos = compute_panel_freqs_per_comp(
+                    np.asarray(em_stats.mu_per_hap_sum),
+                    chrom_data.n_sites,
+                    panel_geno,
+                )
+
             component_states = build_component_states(
                 new_freq, new_mu, chrom_data,
+                panel_freqs_by_pos=panel_freqs_by_pos,
             )
             assignment = assign_priors_to_components(
                 priors, component_states, iteration,
@@ -1445,6 +1547,7 @@ def run_em_genome(
     priors=None,  # popout.prior_spec.Priors | None
     priors_dump_path: Optional[str] = None,
     superpop_freqs: Optional[str] = None,
+    panel_geno=None,  # popout.pgen_io.PanelGeno | None — Phase 2 sidecar
 ) -> list[AncestryResult] | None:
     """Run self-bootstrapping LAI across all chromosomes.
 
@@ -1629,6 +1732,7 @@ def run_em_genome(
                     priors=priors,
                     priors_dump_path=priors_dump_path,
                     superpop_freqs=superpop_freqs,
+                    panel_geno=panel_geno,
                 )
                 fitted_model = result.model
 

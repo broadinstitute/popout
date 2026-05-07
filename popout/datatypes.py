@@ -288,6 +288,12 @@ class EMStats:
     # MAP T update; consumers must check for None and fall back.
     switches_per_comp: Optional[np.ndarray] = None       # (A,) Σ_{h,n} (γ[h,n,a] − ξ_diag[h,n,a])
     d_weighted_occupancy: Optional[np.ndarray] = None    # (A,) Σ_{h,n} d_n · γ[h,n,a]
+    # Per-haplotype component-responsibility sum, used by Phase 2's
+    # μ-weighted off-chrom AIM panel-freq compute. None when the FB
+    # variant in use didn't accumulate it. Divide by n_sites to get
+    # γ̄_h_a — the haplotype-level mean responsibility for component a
+    # on this chromosome.
+    mu_per_hap_sum: Optional[np.ndarray] = None          # (H, A) float32 — Σ_t γ[h,t,a]
 
 
 @dataclass

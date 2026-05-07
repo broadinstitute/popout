@@ -37,6 +37,15 @@ task popout_task {
     File?   priors_yaml         # per-component T priors (mutex with --per-hap-T)
     File?   superpop_freqs      # 1KG superpop allele-frequency TSV (1kg_superpop_freq.tsv.gz)
 
+    # --- Phase 2: consolidated AIM-panel-only PGEN sidecar
+    # Triplet built by vcf2pgen/wdl/extract_panel_geno.wdl: every AIM
+    # panel position × every cohort haplotype, in cohort sample order.
+    # When all three are supplied, popout enables off-chrom μ-weighted
+    # AIM scoring during seed-chrom EM.
+    File?   panel_geno_pgen
+    File?   panel_geno_pvar
+    File?   panel_geno_psam
+
     # Recursive seeding (--seed-method recursive)
     String  seed_method              = "gmm"
     Int     freeze_anchors_iters     = 0
@@ -103,8 +112,27 @@ task popout_task {
       ln -sf "${psams[$i]}" "pgen_dir/${base}.psam"
     done
 
+    # ---- Phase 2: localize the consolidated AIM-panel sidecar PGEN ----
+    # Symlink the panel triplet into a SEPARATE directory so it doesn't
+    # get picked up by popout's chrom_iter (which scans pgen_dir/ for
+    # per-chrom inputs and would treat panel_geno as another chrom).
+    PANEL_GENO_PREFIX=""
+    ~{if defined(panel_geno_pgen) then
+      'mkdir -p panel_geno_dir && ln -sf "~{panel_geno_pgen}" panel_geno_dir/panel_geno.pgen && PANEL_GENO_PREFIX="panel_geno_dir/panel_geno"'
+      else ''}
+    ~{if defined(panel_geno_pvar) then
+      'ln -sf "~{panel_geno_pvar}" panel_geno_dir/panel_geno.pvar'
+      else ''}
+    ~{if defined(panel_geno_psam) then
+      'ln -sf "~{panel_geno_psam}" panel_geno_dir/panel_geno.psam'
+      else ''}
+
     echo "=== Localized PGEN files ==="
     ls -lh pgen_dir/
+    if [ -n "$PANEL_GENO_PREFIX" ]; then
+      echo "=== Panel-geno sidecar ==="
+      ls -lh panel_geno_dir/
+    fi
 
     # ---- GPU check ----
     nvidia-smi || echo "WARNING: nvidia-smi failed"
@@ -164,6 +192,9 @@ task popout_task {
     ~{if defined(priors_yaml) then 'CMD="$CMD --priors ~{priors_yaml}"' else ''}
     ~{if defined(priors_yaml) then 'CMD="$CMD --priors-dump-assignments ~{output_prefix}.priors_assignments.tsv"' else ''}
     ~{if defined(superpop_freqs) then 'CMD="$CMD --superpop-freqs ~{superpop_freqs}"' else ''}
+    if [ -n "$PANEL_GENO_PREFIX" ]; then
+      CMD="$CMD --panel-geno $PANEL_GENO_PREFIX"
+    fi
 
     CMD="$CMD --seed-method ~{seed_method}"
     CMD="$CMD --reproducible ~{reproducible}"
@@ -276,6 +307,12 @@ workflow popout {
     File?   priors_yaml
     File?   superpop_freqs
 
+    # Phase 2: consolidated AIM-panel-only PGEN sidecar (built by
+    # vcf2pgen/wdl/extract_panel_geno.wdl).
+    File?   panel_geno_pgen
+    File?   panel_geno_pvar
+    File?   panel_geno_psam
+
     # Recursive seeding
     String  seed_method              = "gmm"
     Int     freeze_anchors_iters     = 0
@@ -325,6 +362,9 @@ workflow popout {
       ancestry_names     = ancestry_names,
       priors_yaml        = priors_yaml,
       superpop_freqs     = superpop_freqs,
+      panel_geno_pgen    = panel_geno_pgen,
+      panel_geno_pvar    = panel_geno_pvar,
+      panel_geno_psam    = panel_geno_psam,
       seed_method               = seed_method,
       freeze_anchors_iters      = freeze_anchors_iters,
       recursive_merge_hellinger = recursive_merge_hellinger,

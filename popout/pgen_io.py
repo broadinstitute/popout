@@ -662,3 +662,157 @@ def _read_one_chromosome(
         stats.emit("io/sites_final", cd.n_sites, chrom=chrom)
         stats.emit("io/genetic_length_cm", round(cm_span, 2), chrom=chrom)
     return cd
+
+
+# ---------------------------------------------------------------------------
+# AIM panel sidecar PGEN (Phase 2 — option H)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class PanelGeno:
+    """Consolidated AIM-panel-only genotype block.
+
+    Built upstream by ``extract_panel_geno.wdl`` from each chromosome's
+    AIM panel positions × every cohort haplotype, then merged into a
+    single multi-chromosome PGEN. ``read_panel_geno`` loads it whole.
+
+    Attributes
+    ----------
+    geno : (H, M_panel) uint8
+        Alt-allele dosage per (haplotype, panel locus). Haplotype order
+        matches the seed chromosome's PGEN psam (asserted at load).
+    chrom : (M_panel,) object — str per locus (normalized, no "chr" prefix)
+    pos_bp : (M_panel,) int64
+    """
+
+    geno: np.ndarray
+    chrom: np.ndarray
+    pos_bp: np.ndarray
+
+
+def read_panel_geno(
+    pgen_prefix: str | Path,
+    expected_sample_iids: list[str],
+) -> PanelGeno:
+    """Open the consolidated AIM-panel-only PGEN and return a haplotype-
+    aligned :class:`PanelGeno`.
+
+    The panel PGEN must have been built from the same upstream cohort as
+    the seed-chrom PGEN — its psam must list samples in identical order.
+    Mismatch raises :class:`ValueError` immediately; there is no safe
+    way to reorder genotypes after the fact.
+
+    Parameters
+    ----------
+    pgen_prefix : path to the panel ``.pgen`` (with sibling ``.pvar`` and
+        ``.psam``) or its prefix without suffix.
+    expected_sample_iids : sample IIDs from the seed-chrom psam, in
+        cohort order.
+    """
+    p = Path(pgen_prefix)
+    pgen_path = p if p.suffix == ".pgen" else Path(str(p) + ".pgen")
+    if not pgen_path.exists():
+        raise FileNotFoundError(f"Panel PGEN not found: {pgen_path}")
+    stem = str(pgen_path)[: -len(".pgen")]
+    pvar_path = _find_pvar_str(stem)
+    if pvar_path is None:
+        raise FileNotFoundError(f"No .pvar for panel PGEN prefix {stem}")
+    psam_path = Path(stem + ".psam")
+    if not psam_path.exists():
+        raise FileNotFoundError(f"No .psam for panel PGEN prefix {stem}")
+
+    # Hap-order assertion: panel psam must list identical sample IIDs in
+    # identical order. This is a workflow-level invariant — if it fails
+    # the upstream extraction emitted a different cohort than the EM
+    # input — we fail loudly.
+    actual_iids = _parse_psam(psam_path)
+    if actual_iids != list(expected_sample_iids):
+        first_diff = next(
+            (i for i, (a, b) in enumerate(zip(actual_iids, expected_sample_iids))
+             if a != b),
+            None,
+        )
+        raise ValueError(
+            f"Panel PGEN sample order does not match cohort PGEN.\n"
+            f"  panel psam: {psam_path}  ({len(actual_iids)} samples)\n"
+            f"  cohort psam: {len(expected_sample_iids)} samples\n"
+            f"  first difference at index {first_diff}: "
+            f"panel={actual_iids[first_diff] if first_diff is not None else 'N/A'} "
+            f"cohort={expected_sample_iids[first_diff] if first_diff is not None else 'N/A'}\n"
+            f"Re-run extract_panel_geno.wdl against the same cohort."
+        )
+
+    n_samples = len(actual_iids)
+    n_haps = 2 * n_samples
+
+    # Parse the pvar — multi-chrom panel is supported (all chroms'
+    # AIM positions live in one file).
+    pvar_data = _parse_pvar(pvar_path)
+    if not pvar_data:
+        raise ValueError(
+            f"Panel PGEN {pvar_path} has no biallelic SNP variants. "
+            f"Phase 2 cannot proceed without panel positions."
+        )
+
+    # Concatenate per-chrom records into parallel arrays sorted by
+    # variant_idx (= pgen file order). Reading in pgen-file order
+    # avoids any internal sort by pgenlib.
+    all_var_idx: list[int] = []
+    all_chrom: list[str] = []
+    all_pos: list[int] = []
+    for chrom_norm, rec in pvar_data.items():
+        for vi, p in zip(rec.variant_idx.tolist(), rec.pos_bp.tolist()):
+            all_var_idx.append(int(vi))
+            all_chrom.append(chrom_norm)
+            all_pos.append(int(p))
+    order = np.argsort(np.array(all_var_idx, dtype=np.uint32))
+    var_idx_arr = np.array([all_var_idx[i] for i in order], dtype=np.uint32)
+    chrom_arr = np.array([all_chrom[i] for i in order], dtype=object)
+    pos_arr = np.array([all_pos[i] for i in order], dtype=np.int64)
+    n_panel = len(var_idx_arr)
+    log.info(
+        "Loaded panel PGEN %s: %d biallelic panel positions across %d chroms",
+        pgen_path.name, n_panel, len(set(chrom_arr.tolist())),
+    )
+
+    try:
+        reader = pgenlib.PgenReader(bytes(str(pgen_path), encoding="utf-8"))
+    except RuntimeError as e:
+        if "multiallelic" in str(e).lower() or "allele_idx_offsets" in str(e).lower():
+            raise RuntimeError(
+                f"Panel PGEN {pgen_path.name} contains multiallelic variants, "
+                "which pgenlib cannot read with phased data. Re-run "
+                "extract_panel_geno.wdl with --max-alleles 2 in the per-chrom "
+                "extract step (panel positions multi-allelic in the cohort "
+                "are dropped from the sidecar)."
+            ) from e
+        raise
+
+    if not reader.hardcall_phase_present():
+        reader.close()
+        raise ValueError(
+            f"Panel PGEN {pgen_path} does not contain phased genotypes. "
+            "Phase 2 reads alt-dosage per haplotype; unphased panel input "
+            "is not supported."
+        )
+
+    try:
+        geno, site_ok = _read_genotypes(reader, var_idx_arr, n_haps)
+    finally:
+        reader.close()
+
+    # Drop sites with missing data (consistent with cohort read).
+    if not bool(site_ok.all()):
+        chrom_arr = chrom_arr[site_ok]
+        pos_arr = pos_arr[site_ok]
+        log.info(
+            "Panel PGEN: dropped %d sites with missing genotypes; %d remain",
+            int((~site_ok).sum()), len(chrom_arr),
+        )
+
+    log.info(
+        "Panel PGEN ready: %d haps × %d sites (sample order matches cohort)",
+        n_haps, len(chrom_arr),
+    )
+    return PanelGeno(geno=geno, chrom=chrom_arr, pos_bp=pos_arr)

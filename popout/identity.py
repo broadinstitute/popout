@@ -50,12 +50,21 @@ class ComponentState:
     chrom : str
         Chromosome name. Required so panels and reference vectors can be
         filtered to the right chromosome at score time.
+    panel_freqs_by_pos : dict[(chrom, pos_bp), float] | None
+        Optional μ-weighted component allele-frequency estimates at
+        AIM-panel positions, supplied by the Phase 2 sidecar-PGEN path
+        (``--panel-geno``). When present, :class:`AIMSignature` scores
+        every panel row against this dict — for both on-chrom and
+        off-chrom positions — instead of falling back to ``freq`` for
+        the on-chrom slice. When None, AIMSignature uses the on-chrom
+        ``freq``-lookup path only.
     """
 
     freq: np.ndarray
     mu: float
     pos_bp: np.ndarray
     chrom: str
+    panel_freqs_by_pos: dict[tuple[str, int], float] | None = None
 
 
 @runtime_checkable
@@ -180,6 +189,15 @@ class AIMSignature:
     weight: float = 1.0
 
     def score(self, cs: ComponentState) -> float:
+        # Phase 2 path: when the caller has supplied μ-weighted
+        # component freqs at panel positions (via the sidecar PGEN),
+        # use them for *every* panel row regardless of chromosome.
+        # Panel rows whose (chrom, pos) is absent from the sidecar are
+        # skipped (the sidecar didn't carry that locus — typically
+        # because it wasn't present in the cohort PGEN).
+        if cs.panel_freqs_by_pos is not None:
+            return self._score_from_panel_dict(cs.panel_freqs_by_pos)
+
         norm_chrom = _normalize_chrom(cs.chrom)
         norm_panel = np.array(
             [_normalize_chrom(c) for c in self.panel.chrom], dtype=object,
@@ -207,6 +225,42 @@ class AIMSignature:
             (freq - exp) ** 2, nan=0.0, posinf=0.0, neginf=0.0,
         )
         contrib = w * diff_sq / var
+        return float(-contrib.sum())
+
+    def _score_from_panel_dict(
+        self, panel_freqs: dict[tuple[str, int], float],
+    ) -> float:
+        """Score every panel row against the supplied (chrom, pos) →
+        freq dict. Rows whose key is absent from the dict are skipped.
+        """
+        freqs: list[float] = []
+        exps: list[float] = []
+        ws: list[float] = []
+        for i in range(len(self.panel.chrom)):
+            chrom = _normalize_chrom(str(self.panel.chrom[i]))
+            pos = int(self.panel.pos_bp[i])
+            f = panel_freqs.get((chrom, pos))
+            if f is None:
+                # Try with the un-normalized chrom too, since callers
+                # may have built the dict using "chr1" or "1".
+                f = panel_freqs.get((str(self.panel.chrom[i]), pos))
+            if f is None:
+                continue
+            freqs.append(float(f))
+            exps.append(float(self.panel.expected_freq[i]))
+            ws.append(float(self.panel.marker_weight[i]))
+
+        if not freqs:
+            return 0.0
+
+        freq_arr = np.asarray(freqs, dtype=np.float64)
+        exp_arr = np.asarray(exps, dtype=np.float64)
+        w_arr = np.asarray(ws, dtype=np.float64)
+        var = exp_arr * (1.0 - exp_arr) + 1e-9
+        diff_sq = np.nan_to_num(
+            (freq_arr - exp_arr) ** 2, nan=0.0, posinf=0.0, neginf=0.0,
+        )
+        contrib = w_arr * diff_sq / var
         return float(-contrib.sum())
 
 

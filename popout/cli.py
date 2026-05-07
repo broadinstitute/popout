@@ -412,6 +412,17 @@ def main(argv: list[str] | None = None) -> None:
              "WDL/Terra pipeline where the cache is not pre-populated.",
     )
     parser.add_argument(
+        "--panel-geno", type=str, default=None, metavar="PATH",
+        help="PGEN prefix for the consolidated AIM-panel-only PGEN "
+             "(every chrom's panel positions × every cohort haplotype). "
+             "Built upstream by extract_panel_geno.wdl. Enables Phase 2 "
+             "off-chrom AIM scoring during seed-chrom EM: each EM "
+             "iteration μ-weights the sidecar genotypes by per-haplotype "
+             "component responsibility, producing per-component freqs at "
+             "every panel position genome-wide. Mutually exclusive with "
+             "--per-hap-T.",
+    )
+    parser.add_argument(
         "--block-emissions", action="store_true",
         help="Use block-level haplotype pattern emissions instead of single-site Bernoulli",
     )
@@ -649,6 +660,24 @@ def main(argv: list[str] | None = None) -> None:
         )
         sys.exit(1)
 
+    if args.panel_geno is not None and args.per_hap_T:
+        print(
+            "ERROR: --panel-geno and --per-hap-T are mutually exclusive. "
+            "--panel-geno requires the per-hap component-responsibility "
+            "stat written by forward_backward_em / forward_backward_blocks_em; "
+            "the bucketed --per-hap-T path does not populate it.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if args.panel_geno is not None and args.priors is None:
+        print(
+            "ERROR: --panel-geno requires --priors. The sidecar PGEN is "
+            "consumed only by AIMSignature scoring inside the priors "
+            "M-step; without --priors the file would be unused.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     if args.priors is not None and args.method not in ("hmm",):
         print(
             f"ERROR: --priors requires --method hmm; got --method {args.method}. "
@@ -778,6 +807,15 @@ def main(argv: list[str] | None = None) -> None:
 
     n_samples = len(sample_names)
     log.info("Input: %d samples (%d haplotypes)", n_samples, 2 * n_samples)
+
+    # --- Load Phase 2 sidecar PGEN (consolidated AIM-panel-only) ---
+    panel_geno_obj = None
+    if args.panel_geno is not None:
+        from .pgen_io import read_panel_geno
+        log.info("Loading panel-geno sidecar from %s", args.panel_geno)
+        panel_geno_obj = read_panel_geno(
+            args.panel_geno, expected_sample_iids=list(sample_names),
+        )
 
     # --- Seeding exclusion mask ---
     import numpy as np
@@ -951,6 +989,7 @@ def main(argv: list[str] | None = None) -> None:
             priors=priors_obj,
             priors_dump_path=args.priors_dump_assignments,
             superpop_freqs=args.superpop_freqs,
+            panel_geno=panel_geno_obj,
         )
 
     t_compute = time.perf_counter() - t0

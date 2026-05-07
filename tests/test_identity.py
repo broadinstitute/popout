@@ -355,3 +355,123 @@ def test_aim_panel_rejects_missing_columns(tmp_path):
     tsv.write_text("chrom\tpos_bp\texpected_freq\n1\t100\t0.5\n")
     with pytest.raises(ValueError, match="missing columns"):
         AIMPanel.from_tsv(tsv)
+
+
+# --------------------------------------------------------------------------
+# Phase 2: panel_freqs_by_pos override on AIMSignature
+# --------------------------------------------------------------------------
+
+
+def _aim_panel_multi_chrom(
+    rows: list[tuple[str, int, float]],
+    weight: float = 1.0,
+) -> AIMPanel:
+    """Build a panel from explicit (chrom, pos, expected_freq) rows."""
+    chrom = np.array([r[0] for r in rows], dtype=object)
+    pos = np.array([r[1] for r in rows], dtype=np.int64)
+    exp = np.array([r[2] for r in rows], dtype=np.float64)
+    w = np.full(len(rows), weight, dtype=np.float64)
+    return AIMPanel(
+        chrom=chrom, pos_bp=pos, expected_freq=exp, marker_weight=w,
+        source="test",
+    )
+
+
+def test_aim_signature_uses_panel_freqs_by_pos_for_all_rows():
+    """When ComponentState carries panel_freqs_by_pos, AIMSignature scores
+    every panel row (including off-chrom) against that dict instead of
+    the on-chrom freq array."""
+    panel = _aim_panel_multi_chrom([
+        ("1", 1000, 0.90),  # on-chrom
+        ("2", 2000, 0.10),  # off-chrom
+        ("3", 3000, 0.50),  # off-chrom
+    ])
+    sig = AIMSignature(panel=panel)
+
+    # Component looks like AFR everywhere — panel freqs match expected.
+    pf = {("1", 1000): 0.90, ("2", 2000): 0.10, ("3", 3000): 0.50}
+    cs = ComponentState(
+        freq=np.array([0.0]),  # bogus on-chrom freq; should be ignored
+        mu=0.25,
+        pos_bp=np.array([9999], dtype=np.int64),  # also irrelevant
+        chrom="1",
+        panel_freqs_by_pos=pf,
+    )
+    score_match = sig.score(cs)
+
+    # Component looks NOTHING like the panel.
+    pf_off = {("1", 1000): 0.10, ("2", 2000): 0.90, ("3", 3000): 0.05}
+    cs_off = ComponentState(
+        freq=np.array([0.0]), mu=0.25,
+        pos_bp=np.array([9999], dtype=np.int64), chrom="1",
+        panel_freqs_by_pos=pf_off,
+    )
+    score_mismatch = sig.score(cs_off)
+
+    assert score_match == 0.0  # exact match → loss is 0 → score is 0
+    assert score_mismatch < score_match
+
+
+def test_aim_signature_skips_panel_rows_missing_from_dict():
+    """Panel rows whose (chrom, pos) is absent from panel_freqs_by_pos
+    contribute nothing to the score (sidecar didn't carry that locus)."""
+    panel = _aim_panel_multi_chrom([
+        ("1", 1000, 0.90),
+        ("2", 2000, 0.10),
+        ("3", 3000, 0.50),  # this one will be missing from the dict
+    ])
+    sig = AIMSignature(panel=panel)
+
+    pf_partial = {("1", 1000): 0.90, ("2", 2000): 0.10}  # row 3 omitted
+    cs = ComponentState(
+        freq=np.array([0.0]), mu=0.25,
+        pos_bp=np.array([9999], dtype=np.int64), chrom="1",
+        panel_freqs_by_pos=pf_partial,
+    )
+    score = sig.score(cs)
+    # Two rows, both perfect match → score = 0 (not negative).
+    assert score == 0.0
+
+    # Same panel, full match for all three: also 0 (still perfect).
+    pf_full = dict(pf_partial)
+    pf_full[("3", 3000)] = 0.50
+    cs_full = ComponentState(
+        freq=np.array([0.0]), mu=0.25,
+        pos_bp=np.array([9999], dtype=np.int64), chrom="1",
+        panel_freqs_by_pos=pf_full,
+    )
+    assert sig.score(cs_full) == 0.0
+
+    # Now make the missing row's freq mismatch — cs_partial still says 0
+    # (it's missing). cs_full would penalize. Confirms the missing row
+    # contributes 0, not a default.
+    pf_full_mismatch = dict(pf_partial)
+    pf_full_mismatch[("3", 3000)] = 0.0  # 0 vs expected 0.5 → penalty
+    cs_full_mismatch = ComponentState(
+        freq=np.array([0.0]), mu=0.25,
+        pos_bp=np.array([9999], dtype=np.int64), chrom="1",
+        panel_freqs_by_pos=pf_full_mismatch,
+    )
+    score_full_mismatch = sig.score(cs_full_mismatch)
+    assert score_full_mismatch < 0.0  # full set with a mismatch is worse
+    assert score == 0.0  # partial set without that row has no penalty
+
+
+def test_aim_signature_panel_freqs_normalizes_chrom_prefix():
+    """panel_freqs_by_pos lookups should work whether the dict was built
+    with 'chr1' or '1' — the score function normalizes."""
+    panel = _aim_panel_multi_chrom([("chr1", 1000, 0.9)])
+    sig = AIMSignature(panel=panel)
+
+    pf_with_chr = {("chr1", 1000): 0.9}
+    pf_no_chr = {("1", 1000): 0.9}
+    for pf in (pf_with_chr, pf_no_chr):
+        cs = ComponentState(
+            freq=np.array([0.0]), mu=0.25,
+            pos_bp=np.array([9999], dtype=np.int64),
+            chrom="1",
+            panel_freqs_by_pos=pf,
+        )
+        # Both formats should resolve and give zero loss against the
+        # exact-match expected freq.
+        assert sig.score(cs) == 0.0
