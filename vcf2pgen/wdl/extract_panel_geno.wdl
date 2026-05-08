@@ -117,9 +117,17 @@ task extract_panel_pgen_task {
     bcftools index -t "~{output_prefix}.split.vcf.gz"
 
     echo "=== Step 3/3: re-encode biallelic VCF as PGEN ==="
+    # --set-all-var-ids '@:#:$r:$a' is required: bcftools norm leaves
+    # all split rows with ID '.', and plink2 --pmerge in the gather
+    # task refuses to merge same-position rows that share a missing
+    # ID (treats them as components of an unjoined multi-allelic).
+    # Naming each split row by chrom:pos:ref:alt makes them unique
+    # and tells pmerge to keep them as separate biallelic variants —
+    # which is exactly what we want.
     plink2 \
       --vcf "~{output_prefix}.split.vcf.gz" \
       --max-alleles 2 \
+      --set-all-var-ids '@:#:$r:$a' \
       --make-pgen \
       --threads ~{cpu} \
       --out "~{output_prefix}"
