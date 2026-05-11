@@ -16,7 +16,7 @@ version 1.0
 ##
 ## Observability: magicwand (https://github.com/broadinstitute/magicwand)
 ## is wired in for live W&B tracking — per-command resource attribution
-## plus FLARE-specific Tier-1 metrics. Provide `api_key` for an online run
+## plus FLARE-specific Tier-1 metrics. Provide `wandb_api_key` for an online run
 ## with a clickable URL; without it, magicwand runs W&B in offline mode.
 ## The W&B project is the WDL name (flare); the run name is auto-generated
 ## by magicwand.
@@ -52,7 +52,7 @@ task flare_task {
     Int      preemptible   = 0       # FLARE has no checkpointing — keep at 0 for multi-hour runs
 
     # Observability (magicwand -> W&B). Optional API key for online tracking.
-    String?  api_key
+    String?  wandb_api_key
 
     String   docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/flare:latest"
   }
@@ -102,7 +102,7 @@ task flare_task {
     # break the task — install.sh redefines the function on success.
     magicwand() { :; }
 
-    ~{"export WANDB_API_KEY=" + api_key}
+    ~{"export WANDB_API_KEY=" + wandb_api_key}
     export WANDB_PROJECT=flare
     source <(curl -fsSL https://raw.githubusercontent.com/broadinstitute/magicwand/main/install.sh)
     magicwand init
@@ -192,7 +192,7 @@ workflow flare {
     String   disk_type     = "HDD"
     Int      preemptible   = 0
 
-    String?  api_key
+    String?  wandb_api_key
 
     String   docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/flare:latest"
   }
@@ -219,7 +219,7 @@ workflow flare {
       disk_size_gb_override = disk_size_gb_override,
       disk_type             = disk_type,
       preemptible           = preemptible,
-      api_key               = api_key,
+      wandb_api_key         = wandb_api_key,
       docker_image          = docker_image
   }
 

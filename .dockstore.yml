@@ -17,10 +17,18 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /workflows/bcftools/wdl/bcftools_split.wdl
     topic: Split a biobank-scale VCF into per-sample-group sub-VCFs in one bcftools +split pass
+  - name: bcftools-concat
+    subclass: WDL
+    primaryDescriptorPath: /workflows/bcftools/wdl/bcftools_concat.wdl
+    topic: Concatenate per-chromosome VCFs into a whole-genome VCF (bcftools concat --naive option)
   - name: flare
     subclass: WDL
     primaryDescriptorPath: /workflows/flare/wdl/flare.wdl
     topic: FLARE local-ancestry inference on a phased VCF chunk against a reference panel
+  - name: flare-pipeline
+    subclass: WDL
+    primaryDescriptorPath: /workflows/flare/wdl/flare_pipeline.wdl
+    topic: End-to-end FLARE LAI orchestration over biobank-scale chromosome shards and sample clusters
   - name: gpu-probe
     subclass: WDL
     primaryDescriptorPath: /workflows/gpu_probe/wdl/gpu_probe.wdl
