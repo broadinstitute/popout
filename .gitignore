@@ -3,3 +3,10 @@ cloud
 build/
 popout/_version.py
 *.egg-info
+
+data/
+diagnostics/
+notebooks/
+run.sh
+scripts/build_pgen_table.py
+workflows/bcftools/data/
