@@ -38,6 +38,13 @@ task bcftools_concat_task {
 
   Float total_gb = size(vcfs, "GB")
 
+  # Output extension derived from output_type so the output stanza can
+  # declare a typed `File concat_vcf` (not `Array[File]`).
+  String out_ext = if output_type == "z" then "vcf.gz"
+                   else if output_type == "b" then "bcf"
+                   else if output_type == "v" then "vcf"
+                   else "bcf"
+
   # Concat is mostly streaming I/O. CPU helps bgzip the output;
   # memory needs are modest. Disk is input + output ~ 2x total.
   Int auto_cpu = if total_gb > 100.0 then 32
@@ -79,8 +86,7 @@ EOF
       bcftools_concat.cpu="~{cpu}" \
       bcftools_concat.disk_gb="~{disk_size_gb}"
 
-    OUT_EXT=$(case "~{output_type}" in z) echo "vcf.gz" ;; b) echo "bcf" ;; v) echo "vcf" ;; u) echo "bcf" ;; esac)
-    OUT_FILE="~{output_prefix}.${OUT_EXT}"
+    OUT_FILE="~{output_prefix}.~{out_ext}"
 
     bcftools concat \
       ~{if naive then "--naive" else ""} \
@@ -90,24 +96,20 @@ EOF
       --threads ~{cpu}
 
     if [ "~{write_index}" = "true" ]; then
-      if [ "~{output_type}" = "z" ]; then
-        bcftools index --tbi --threads ~{cpu} "$OUT_FILE"
-      else
-        bcftools index --threads ~{cpu} "$OUT_FILE"
-      fi
+      case "~{output_type}" in
+        z) bcftools index --tbi --threads ~{cpu} "$OUT_FILE" ;;
+        b) bcftools index       --threads ~{cpu} "$OUT_FILE" ;;
+      esac
     fi
 
     magicwand log \
       bcftools_concat.output_bytes="$(stat -c %s "$OUT_FILE")"
-
-    # Symlink to a stable name so the WDL output stanza can reference it
-    # without knowing the extension at parse time.
-    ln -sf "$OUT_FILE" output.vcf
   >>>
 
   output {
-    Array[File] concat_vcf     = flatten([glob("~{output_prefix}.vcf.gz"), glob("~{output_prefix}.bcf"), glob("~{output_prefix}.vcf")])
-    Array[File] concat_indices = flatten([glob("~{output_prefix}.vcf.gz.tbi"), glob("~{output_prefix}.bcf.csi"), glob("~{output_prefix}.vcf.gz.csi")])
+    File  concat_vcf       = "~{output_prefix}.~{out_ext}"
+    File? concat_index_tbi = "~{output_prefix}.vcf.gz.tbi"
+    File? concat_index_csi = "~{output_prefix}.bcf.csi"
   }
 
   runtime {
@@ -156,7 +158,9 @@ workflow bcftools_concat {
   }
 
   output {
-    File concat_vcf       = bcftools_concat_task.concat_vcf[0]
-    Array[File] concat_indices = bcftools_concat_task.concat_indices
+    File  concat_vcf   = bcftools_concat_task.concat_vcf
+    File? concat_index = if defined(bcftools_concat_task.concat_index_tbi)
+                         then bcftools_concat_task.concat_index_tbi
+                         else bcftools_concat_task.concat_index_csi
   }
 }

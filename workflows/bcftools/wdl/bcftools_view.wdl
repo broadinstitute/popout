@@ -79,6 +79,13 @@ task bcftools_view_task {
 
   Float vcf_gb = size(vcf, "GB")
 
+  # Output file extension derived from output_type so the output stanza
+  # below can declare a typed `File filtered_vcf` (not `Array[File]`).
+  String out_ext = if output_type == "z" then "vcf.gz"
+                   else if output_type == "b" then "bcf"
+                   else if output_type == "v" then "vcf"
+                   else "bcf"   # "u" — uncompressed BCF
+
   # bcftools view is streaming I/O; threads accelerate bgzip on output.
   # Memory needs are modest because filtering is record-by-record.
   Int auto_cpu = if vcf_gb > 100.0 then 16
@@ -107,8 +114,7 @@ task bcftools_view_task {
     magicwand init
     # -----------------------------------------------------------------
 
-    OUT_EXT=$(case "~{output_type}" in z) echo "vcf.gz" ;; b) echo "bcf" ;; v) echo "vcf" ;; u) echo "bcf" ;; esac)
-    OUT_FILE="~{output_basename}.${OUT_EXT}"
+    OUT_FILE="~{output_basename}.~{out_ext}"
 
     magicwand log \
       bcftools_view.input_bytes="$(stat -c %s ~{vcf})" \
@@ -158,12 +164,12 @@ task bcftools_view_task {
       ~{extra_args} \
       ~{vcf}
 
+    # Index only the bgzipped output types; v/u are uncompressed and not indexable.
     if [ "~{write_index}" = "true" ]; then
-      if [ "~{output_type}" = "z" ]; then
-        bcftools index --tbi --threads ~{cpu} "$OUT_FILE"
-      else
-        bcftools index --threads ~{cpu} "$OUT_FILE"
-      fi
+      case "~{output_type}" in
+        z) bcftools index --tbi --threads ~{cpu} "$OUT_FILE" ;;
+        b) bcftools index       --threads ~{cpu} "$OUT_FILE" ;;
+      esac
     fi
 
     magicwand log \
@@ -171,8 +177,10 @@ task bcftools_view_task {
   >>>
 
   output {
-    Array[File] filtered_vcf     = flatten([glob("~{output_basename}.vcf.gz"), glob("~{output_basename}.bcf"), glob("~{output_basename}.vcf")])
-    Array[File] filtered_indices = flatten([glob("~{output_basename}.vcf.gz.tbi"), glob("~{output_basename}.vcf.gz.csi"), glob("~{output_basename}.bcf.csi")])
+    File  filtered_vcf       = "~{output_basename}.~{out_ext}"
+    # Optional: present only for z (tbi) / b (csi) output types when write_index=true.
+    File? filtered_index_tbi = "~{output_basename}.vcf.gz.tbi"
+    File? filtered_index_csi = "~{output_basename}.bcf.csi"
   }
 
   runtime {
@@ -272,7 +280,9 @@ workflow bcftools_view {
   }
 
   output {
-    File         filtered_vcf     = bcftools_view_task.filtered_vcf[0]
-    Array[File]  filtered_indices = bcftools_view_task.filtered_indices
+    File  filtered_vcf   = bcftools_view_task.filtered_vcf
+    File? filtered_index = if defined(bcftools_view_task.filtered_index_tbi)
+                           then bcftools_view_task.filtered_index_tbi
+                           else bcftools_view_task.filtered_index_csi
   }
 }
