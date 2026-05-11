@@ -33,7 +33,7 @@ FROM ubuntu:24.04
 # (python3>=3.9, pip, curl) so WDL tasks can `source install.sh; magicwand init`.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl \
-        zlib1g libbz2-1.0 liblzma5 libcurl4 libssl3 libgsl28 perl \
+        zlib1g libbz2-1.0 liblzma5 libcurl4 libssl3 libgsl27 libgslcblas0 perl \
         python3 python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
