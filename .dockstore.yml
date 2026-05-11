@@ -21,6 +21,10 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /workflows/bcftools/wdl/bcftools_concat.wdl
     topic: Concatenate per-chromosome VCFs into a whole-genome VCF (bcftools concat --naive option)
+  - name: bcftools-view
+    subclass: WDL
+    primaryDescriptorPath: /workflows/bcftools/wdl/bcftools_view.wdl
+    topic: General-purpose bcftools view wrapper for region/sample/filter subsetting (scatter for per-chrom chunking)
   - name: flare
     subclass: WDL
     primaryDescriptorPath: /workflows/flare/wdl/flare.wdl
