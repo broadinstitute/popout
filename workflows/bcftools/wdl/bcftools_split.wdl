@@ -127,21 +127,21 @@ task bcftools_split_task {
       bcftools_split.output_count="$OUTPUT_COUNT" \
       bcftools_split.total_output_bytes="$TOTAL_OUTPUT_BYTES"
 
-    ~{if write_indices then
-      'for f in "$OUT_DIR"/*.vcf.gz; do
-         [ -e "$f" ] || continue
-         bcftools index --tbi --threads ~{cpu} "$f"
-       done
-       for f in "$OUT_DIR"/*.bcf; do
-         [ -e "$f" ] || continue
-         bcftools index --threads ~{cpu} "$f"
-       done'
-     else ''}
+    if [ "~{write_indices}" = "true" ]; then
+      for f in "$OUT_DIR"/*.vcf.gz; do
+        [ -e "$f" ] || continue
+        bcftools index --tbi --threads ~{cpu} "$f"
+      done
+      for f in "$OUT_DIR"/*.bcf; do
+        [ -e "$f" ] || continue
+        bcftools index --threads ~{cpu} "$f"
+      done
+    fi
   >>>
 
   output {
-    Array[File] subset_vcfs    = glob("out/*.vcf.gz") + glob("out/*.bcf")
-    Array[File] subset_indices = glob("out/*.tbi")    + glob("out/*.csi")
+    Array[File] subset_vcfs    = flatten([glob("out/*.vcf.gz"), glob("out/*.bcf")])
+    Array[File] subset_indices = flatten([glob("out/*.tbi"),    glob("out/*.csi")])
   }
 
   runtime {
