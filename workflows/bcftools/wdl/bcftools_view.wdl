@@ -77,31 +77,21 @@ task bcftools_view_task {
     String   docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/bcftools:latest"
   }
 
-  Float vcf_gb = size(vcf, "GB")
-
   # Output file extension derived from output_type so the output stanza
   # below can declare a typed `File filtered_vcf` (not `Array[File]`).
   String out_ext = if output_type == "z" then "vcf.gz"
                    else if output_type == "b" then "bcf"
                    else if output_type == "v" then "vcf"
-                   else "bcf"   # "u" — uncompressed BCF
+                   else "bcf"
 
-  # bcftools view is streaming I/O; threads accelerate bgzip on output.
-  # Memory needs are modest because filtering is record-by-record.
-  Int auto_cpu = if vcf_gb > 100.0 then 16
-                 else if vcf_gb > 30.0 then 8
-                 else 4
-  String auto_memory = if vcf_gb > 100.0 then "16 GB"
-                       else if vcf_gb > 30.0 then "8 GB"
-                       else "4 GB"
-
-  # Disk: full localized input + output (worst case ~= input for a sample
-  # subset; much smaller for a region subset). 2.5x covers all common cases.
-  Int auto_disk = ceil(vcf_gb * 2.5) + 50
-
-  Int    cpu          = select_first([cpu_override, auto_cpu])
-  String memory       = select_first([memory_override, auto_memory])
-  Int    disk_size_gb = select_first([disk_size_gb_override, auto_disk])
+  # Resources: literal defaults sized for typical chunking/subsetting workloads.
+  # size()-driven auto-scaling was tried here but is fragile in some Cromwell
+  # environments — runtime block can fire before file metadata is available,
+  # breaking select_first's eager evaluation of the auto branch. Override the
+  # *_override inputs for very large inputs.
+  Int    cpu          = select_first([cpu_override, 8])
+  String memory       = select_first([memory_override, "8 GB"])
+  Int    disk_size_gb = select_first([disk_size_gb_override, 200])
 
   command <<<
     set -euo pipefail

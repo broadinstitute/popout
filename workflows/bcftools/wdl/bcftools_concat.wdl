@@ -36,8 +36,6 @@ task bcftools_concat_task {
     String   docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/bcftools:latest"
   }
 
-  Float total_gb = size(vcfs, "GB")
-
   # Output extension derived from output_type so the output stanza can
   # declare a typed `File concat_vcf` (not `Array[File]`).
   String out_ext = if output_type == "z" then "vcf.gz"
@@ -45,19 +43,12 @@ task bcftools_concat_task {
                    else if output_type == "v" then "vcf"
                    else "bcf"
 
-  # Concat is mostly streaming I/O. CPU helps bgzip the output;
-  # memory needs are modest. Disk is input + output ~ 2x total.
-  Int auto_cpu = if total_gb > 100.0 then 32
-                 else if total_gb > 30.0 then 16
-                 else 8
-  String auto_memory = if total_gb > 100.0 then "32 GB"
-                       else if total_gb > 30.0 then "16 GB"
-                       else "8 GB"
-  Int auto_disk = ceil(total_gb * 2.5) + 50
-
-  Int    cpu          = select_first([cpu_override, auto_cpu])
-  String memory       = select_first([memory_override, auto_memory])
-  Int    disk_size_gb = select_first([disk_size_gb_override, auto_disk])
+  # Resources: literal defaults. See bcftools_view.wdl for why size()-driven
+  # auto-scaling is avoided here. Override the *_override inputs for very
+  # large concat jobs (e.g. WGS-scale 22-chrom merge).
+  Int    cpu          = select_first([cpu_override, 16])
+  String memory       = select_first([memory_override, "16 GB"])
+  Int    disk_size_gb = select_first([disk_size_gb_override, 500])
 
   command <<<
     set -euo pipefail
