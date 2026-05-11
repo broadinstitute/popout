@@ -86,7 +86,10 @@ def read_tracts(
                 continue
             if chrom is not None and t_chrom != chrom:
                 continue
-            post = float(parts[7]) if has_posterior and len(parts) > 7 else float("nan")
+            try:
+                post = float(parts[7]) if has_posterior and len(parts) > 7 else float("nan")
+            except ValueError:
+                post = float("nan")
             yield Tract(
                 chrom=t_chrom,
                 start_bp=int(parts[1]),
