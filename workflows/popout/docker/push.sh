@@ -9,10 +9,13 @@
 #   ./push.sh 0.3.2        # also tags as :0.3.2
 set -euxo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel)"
+
 REPO="us-docker.pkg.dev/broad-dsde-methods/popout/popout"
 VERSION="${1:-}"
-GIT_VERSION=$(git describe --tags --always --dirty | sed 's/^v//')
-BRANCH=$(git rev-parse --abbrev-ref HEAD)
+GIT_VERSION=$(git -C "$REPO_ROOT" describe --tags --always --dirty | sed 's/^v//')
+BRANCH=$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD)
 
 # Sanitize branch name for Docker tag (replace non-alphanum with -)
 BRANCH_TAG=$(echo "${BRANCH}" | sed 's/[^a-zA-Z0-9._-]/-/g')
@@ -30,8 +33,9 @@ fi
 echo "Branch: ${BRANCH} → Docker tags: ${TAG_ARGS}"
 
 docker buildx build \
+    -f "$SCRIPT_DIR/Dockerfile" \
     --build-arg GIT_VERSION="${GIT_VERSION}" \
     ${TAG_ARGS} \
     --platform linux/amd64 \
     --push \
-    .
+    "$REPO_ROOT"

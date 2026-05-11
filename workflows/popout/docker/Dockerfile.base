@@ -16,11 +16,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# plink2 (static AVX2 binary). plink2-assets only hosts the floating
-# `latest` alias; dated nightlies are rotated off S3 within weeks of
-# publication. If reproducibility-by-date matters, mirror a known-good
-# zip into a stable bucket and point this URL there.
-RUN curl -fsSL https://s3.amazonaws.com/plink2-assets/plink2_linux_avx2_latest.zip \
+# plink2 AVX2 build, pinned to an upstream GitHub release tag.
+# https://github.com/chrchang/plink-ng/releases
+ARG PLINK2_VERSION
+
+RUN test -n "${PLINK2_VERSION}" \
+    && curl -fsSL "https://github.com/chrchang/plink-ng/releases/download/${PLINK2_VERSION}/plink2_linux_avx2.zip" \
         -o /tmp/plink2.zip \
     && python3 -c "import zipfile; zipfile.ZipFile('/tmp/plink2.zip').extractall('/usr/local/bin')" \
     && chmod +x /usr/local/bin/plink2 \

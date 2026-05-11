@@ -3,45 +3,37 @@ version: 1.2
 workflows:
   - name: vcf-to-pgen
     subclass: WDL
-    primaryDescriptorPath: /vcf2pgen/wdl/vcf_to_pgen.wdl
+    primaryDescriptorPath: /workflows/plink2/wdl/vcf_to_pgen.wdl
     topic: Convert phased VCF files to PGEN format
   - name: filter-pgen
     subclass: WDL
-    primaryDescriptorPath: /vcf2pgen/wdl/filter_pgen.wdl
+    primaryDescriptorPath: /workflows/plink2/wdl/filter_pgen.wdl
     topic: Filter PGEN files with configurable plink2 QC profiles
   - name: pgen-to-vcf
     subclass: WDL
-    primaryDescriptorPath: /vcf2pgen/wdl/pgen_to_vcf.wdl
+    primaryDescriptorPath: /workflows/plink2/wdl/pgen_to_vcf.wdl
     topic: Export PGEN files to VCF with optional sample subsetting
-  - name: kinship-matrix
+  - name: bcftools-split
     subclass: WDL
-    primaryDescriptorPath: /vcf2pgen/wdl/kinship_matrix.wdl
-    topic: Compute KING-robust kinship matrix from PGEN files
-  - name: kinship-prune
-    subclass: WDL
-    primaryDescriptorPath: /vcf2pgen/wdl/kinship_prune.wdl
-    topic: Generate sample exclusion list from KING kinship analysis
-  - name: hap-ibd
-    subclass: WDL
-    primaryDescriptorPath: /plink2/hap_ibd/wdl/hap_ibd.wdl
-    topic: PBWT-based haplotype IBD segment detection via custom plink2 fork
+    primaryDescriptorPath: /workflows/bcftools/wdl/bcftools_split.wdl
+    topic: Split a biobank-scale VCF into per-sample-group sub-VCFs in one bcftools +split pass
   - name: gpu-probe
     subclass: WDL
-    primaryDescriptorPath: /gpu_probe/wdl/gpu_probe.wdl
+    primaryDescriptorPath: /workflows/gpu_probe/wdl/gpu_probe.wdl
     topic: Validate GPU machine types on Terra
   - name: popout
     subclass: WDL
-    primaryDescriptorPath: /wdl/popout.wdl
+    primaryDescriptorPath: /workflows/popout/wdl/popout.wdl
     topic: GPU-accelerated local ancestry inference at biobank scale
   - name: popout-report
     subclass: WDL
-    primaryDescriptorPath: /wdl/popout_report.wdl
+    primaryDescriptorPath: /workflows/popout/wdl/popout_report.wdl
     topic: Generate visualization report from popout LAI results
   - name: popout-label
     subclass: WDL
-    primaryDescriptorPath: /wdl/popout_label.wdl
+    primaryDescriptorPath: /workflows/popout/wdl/popout_label.wdl
     topic: Label popout ancestries against a pre-built population panel
   - name: popout-build-panel
     subclass: WDL
-    primaryDescriptorPath: /wdl/popout_build_panel.wdl
+    primaryDescriptorPath: /workflows/popout/wdl/popout_build_panel.wdl
     topic: Build per-population allele-frequency panel TSV from 1KG or gnomAD VCFs

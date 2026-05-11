@@ -48,7 +48,7 @@ task filter_pgen_task {
     # ---- Resources ----
     Int?    cpu_override
     String? memory_override
-    String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/vcf2pgen:0.1.0"
+    String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/plink2:latest"
   }
 
   Float pgen_gb = size(pgen, "GB")
@@ -184,7 +184,7 @@ workflow filter_pgen {
     # Resources
     Int?    cpu_override
     String? memory_override
-    String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/vcf2pgen:0.1.0"
+    String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/plink2:latest"
   }
 
   call filter_pgen_task {

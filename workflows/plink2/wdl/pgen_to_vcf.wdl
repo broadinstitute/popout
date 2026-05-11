@@ -34,7 +34,7 @@ task pgen_to_vcf_task {
     # Resource overrides — leave unset for auto-scaling by PGEN size
     Int?    cpu_override
     String? memory_override
-    String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/vcf2pgen:0.1.0"
+    String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/plink2:latest"
   }
 
   Float pgen_gb = size(pgen, "GB")
@@ -112,7 +112,7 @@ workflow pgen_to_vcf {
 
     Int?    cpu_override
     String? memory_override
-    String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/vcf2pgen:0.1.0"
+    String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/plink2:latest"
   }
 
   call pgen_to_vcf_task {

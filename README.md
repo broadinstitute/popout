@@ -109,10 +109,10 @@ The image is split in two:
 
 ```bash
 # One-time (and whenever deps change):
-./scripts/push-base.sh
+./workflows/popout/docker/push-base.sh
 
 # On every code change:
-./scripts/push.sh
+./workflows/popout/docker/push.sh
 ```
 
 The installed version is available at runtime via `popout.__version__` and the
