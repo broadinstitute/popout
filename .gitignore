@@ -8,5 +8,5 @@ data/
 diagnostics/
 notebooks/
 run.sh
-scripts/build_pgen_table.py
+scripts/
 workflows/bcftools/data/
