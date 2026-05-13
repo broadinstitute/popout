@@ -9,4 +9,5 @@ diagnostics/
 notebooks/
 run.sh
 scripts/
+!workflows/lai-tools/scripts/
 workflows/bcftools/data/
