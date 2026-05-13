@@ -157,7 +157,8 @@ workflow flare_pipeline {
     # apply slot is set and falls back to train.anc_vcf otherwise (i.e.
     # exactly at the model chromosome position).
     scatter (ci in range(length(chromosomes))) {
-      File chrom_anc_vcf = select_first([apply.anc_vcf[ci], train.anc_vcf])
+      File chrom_anc_vcf   = select_first([apply.anc_vcf[ci],   train.anc_vcf])
+      File chrom_qc_report = select_first([apply.qc_report[ci], train.qc_report])
     }
 
     # ---- Stage D (optional): concat to WGS anc VCF per cluster ----
@@ -182,7 +183,8 @@ workflow flare_pipeline {
 
     # Stage C outputs (per cluster, in chromosome order, model chrom slot
     # carries the stage-B anc VCF — same files as cluster_model_chr_anc_vcfs).
-    Array[Array[File]] cluster_anc_vcfs_per_chrom = chrom_anc_vcf
+    Array[Array[File]] cluster_anc_vcfs_per_chrom    = chrom_anc_vcf
+    Array[Array[File]] cluster_qc_reports_per_chrom  = chrom_qc_report
 
     # Stage D outputs (Array[File?] — None entries when do_concat=false).
     Array[File?] cluster_wgs_anc_vcfs = concat_cluster.concat_vcf

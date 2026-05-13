@@ -89,14 +89,19 @@ task bcftools_split_task {
     OUT_DIR=out
     mkdir -p "$OUT_DIR"
 
-    # Build a single sample->group mapping for `bcftools +split -G`.
-    # Group name = input file basename, last extension stripped.
-    # Blank lines and `#` comments in each group file are ignored.
+    # Build the 3-column mapping `bcftools +split -G` expects:
+    #   sample <TAB> - <TAB> output_basename
+    # Column 2 ("-") keeps sample names unchanged; column 3 names the
+    # output file. Group name = input file basename, last extension
+    # stripped. Blank lines and `#` comments in each group file are ignored.
+    # NB: 2-col `sample\tgroup` is silently accepted by bcftools but
+    # produces one file per sample, not per group — caught by the
+    # synthetic miniwdl smoke test.
     : > groups.tsv
     for f in ~{sep=' ' sample_groups}; do
       group=$(basename "$f")
       group="${group%.*}"
-      awk -v g="$group" 'NF && $1 !~ /^#/ { print $1 "\t" g }' "$f" >> groups.tsv
+      awk -v g="$group" 'NF && $1 !~ /^#/ { print $1 "\t-\t" g }' "$f" >> groups.tsv
     done
 
     NUM_GROUPS=~{length(sample_groups)}

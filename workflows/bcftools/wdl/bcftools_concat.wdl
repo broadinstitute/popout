@@ -67,7 +67,7 @@ task bcftools_concat_task {
 EOF
 
     NUM_INPUTS=$(wc -l < files.txt)
-    TOTAL_INPUT_BYTES=$(awk '{ "stat -c %s " $0 | getline s; sum += s; close("stat -c %s " $0) } END { print sum }' files.txt)
+    TOTAL_INPUT_BYTES=$(xargs -d '\n' -a files.txt stat -c %s | awk '{s+=$1} END {print s+0}')
     echo "concatenating $NUM_INPUTS files, total input $TOTAL_INPUT_BYTES bytes"
 
     magicwand log \
