@@ -21,15 +21,21 @@ version 1.0
 ## rather than hardwires, so they can be overridden per run without
 ## editing the WDL.
 
-import "../../bcftools/wdl/bcftools_split.wdl" as split_wf
+import "../../bcftools/wdl/bcftools_split_streaming.wdl" as split_stream_wf
 import "../../bcftools/wdl/bcftools_concat.wdl" as concat_wf
+import "../../lai-tools/wdl/generate_genomic_partitions.wdl" as partitions_wf
 import "./flare.wdl" as flare_wf
 
 workflow flare_pipeline {
   input {
-    # ---- Per-chromosome arrays (position-aligned, length 22) ---------
+    # ---- Per-chromosome arrays (position-aligned, length N_chroms) ---
+    # AoU phased VCFs are passed as gs:// URLs (NOT File) — Cromwell does
+    # not localize them. htslib streams via libcurl, fetching only the
+    # bytes for each region partition via tabix Range requests.
+    # The .tbi index IS localized (it's tiny, ~300 KB per chrom) because
+    # the partition planner reads it directly.
     Array[String] chromosomes
-    Array[File]   aou_phased_vcfs
+    Array[String] aou_phased_vcf_urls
     Array[File]   aou_phased_vcf_indices
     Array[File]   ref_vcfs
     Array[File]   ref_vcf_indices
@@ -37,8 +43,9 @@ workflow flare_pipeline {
 
     # ---- Per-cluster arrays (position-aligned, length K) -------------
     # cluster_ids must match the basename (extension stripped) of the
-    # corresponding sample-list file so bcftools +split's output naming
-    # round-trips through pair_by_basename below.
+    # corresponding sample-list file — bcftools_split_streaming uses
+    # cluster_ids as output basenames so the per-cluster array is
+    # deterministically ordered.
     Array[String] cluster_ids
     Array[File]   cluster_sample_lists
 
@@ -52,6 +59,11 @@ workflow flare_pipeline {
     Float?  min_maf
     Int?    min_mac
     Int?    gen
+
+    # ---- Streaming-split partitioning knobs --------------------------
+    # Default 10 GB target; partitions larger than 30 GB get subdivided.
+    Int     target_bytes_per_partition = 10737418240   # 10 GB
+    Int     max_bytes_per_partition    = 32212254720   # 30 GB
 
     # ---- Stage D toggle ----------------------------------------------
     Boolean do_concat        = true
@@ -70,39 +82,68 @@ workflow flare_pipeline {
   Int model_chr_idx = find_chrom_index.idx
 
   # =========================================================================
-  # Stage A: chromosome scatter, K cluster sub-VCFs per shard.
+  # Stage A: streaming region scatter, gather per (chrom, cluster).
+  #
+  # For each chrom we (1) plan byte-balanced partitions from its tabix index,
+  # (2) scatter `bcftools +split --regions` across those partitions reading
+  # from gs:// (no localization), (3) gather the per-region per-cluster
+  # sub-VCFs back into one per-chrom per-cluster sub-VCF via naive concat.
+  #
+  # This replaces the prior monolithic per-chrom `bcftools_split` task that
+  # ran ~16 h wallclock at <15% CPU on a localized 366 GB chr1. The redesign
+  # parallelizes the split across ~30 partitions per chrom and never pays
+  # the localization cost.
   # =========================================================================
   scatter (i in range(length(chromosomes))) {
-    call split_wf.bcftools_split as split_chr {
+
+    # A.1 plan partitions for this chromosome (reads only the .tbi).
+    call partitions_wf.generate_genomic_partitions as plan_partitions {
       input:
-        vcf            = aou_phased_vcfs[i],
-        sample_groups  = cluster_sample_lists,
-        output_type    = "z",
-        write_indices  = true,
-        wandb_api_key  = wandb_api_key
+        vcf_index                  = aou_phased_vcf_indices[i],
+        chromosomes                = [chromosomes[i]],
+        target_bytes_per_partition = target_bytes_per_partition,
+        max_bytes_per_partition    = max_bytes_per_partition
     }
 
-    # bcftools +split writes one output per group named <group>.vcf.gz where
-    # <group> is the sample-list basename (last extension stripped). We
-    # collect them with glob() (lexical order) — pair_by_basename re-orders
-    # them to match cluster_ids so downstream indexing by cluster position
-    # is deterministic regardless of glob behavior.
-    call pair_by_basename as pair_vcfs {
-      input:
-        files              = split_chr.subset_vcfs,
-        expected_basenames = cluster_ids
+    # A.2 stream-split each partition. Each task pulls only its region
+    # via tabix Range requests; no Cromwell localization of the VCF.
+    scatter (r in range(length(plan_partitions.regions))) {
+      call split_stream_wf.bcftools_split_streaming as split_region {
+        input:
+          vcf_url       = aou_phased_vcf_urls[i],
+          region        = plan_partitions.regions[r],
+          region_id     = plan_partitions.region_ids[r],
+          sample_groups = cluster_sample_lists,
+          cluster_ids   = cluster_ids,
+          wandb_api_key = wandb_api_key
+      }
     }
-    call pair_by_basename as pair_indices {
-      input:
-        files              = split_chr.subset_indices,
-        expected_basenames = cluster_ids
+
+    # split_region.subset_vcfs has shape [partition][cluster]; transpose
+    # to [cluster][partition] so we can gather each cluster's regions.
+    Array[Array[File]] regions_by_cluster = transpose(split_region.subset_vcfs)
+
+    # A.3 gather: per (chrom, cluster) concat the partition sub-VCFs back
+    # into one per-chrom-per-cluster sub-VCF. naive concat is safe because
+    # every region's output shares the input VCF's header.
+    scatter (c in range(length(cluster_ids))) {
+      call concat_wf.bcftools_concat as gather_regions {
+        input:
+          vcfs          = regions_by_cluster[c],
+          output_prefix = cluster_ids[c] + "." + chromosomes[i],
+          output_type   = "z",
+          write_index   = true,
+          naive         = true,
+          wandb_api_key = wandb_api_key
+      }
     }
   }
 
-  # split_per_chrom is shape [chrom][cluster]; transpose to [cluster][chrom]
-  # so the cluster-scatter stages below can address by_cluster[c][chrom_idx].
-  Array[Array[File]] by_cluster_vcfs    = transpose(pair_vcfs.paired)
-  Array[Array[File]] by_cluster_indices = transpose(pair_indices.paired)
+  # gather_regions.concat_vcf has shape [chrom][cluster]; transpose to
+  # [cluster][chrom] for downstream FLARE consumption (unchanged shape).
+  # FLARE auto-discovers <gt_vcf>.tbi from the localized File, so we don't
+  # need to wire the index array through the pipeline.
+  Array[Array[File]] by_cluster_vcfs = transpose(gather_regions.concat_vcf)
 
   # =========================================================================
   # Stages B + C + D: cluster scatter. Keeping these in one outer scatter
