@@ -147,11 +147,17 @@ def partition_chrom(
             byte_span = linear_index[n - 1] - start_voff
             end_bin = n - 1
 
-        if byte_span > max_bytes:
-            # Density spike — subdivide BP-uniformly so no partition exceeds the cap.
-            n_sub = math.ceil(byte_span / max_bytes)
-            total_bp = (end_bin - start_bin + 1) * TBI_LINEAR_BIN_BP
-            bp_per_sub = max(1, total_bp // n_sub)
+        # Cap subdivision at 1 bin per sub-partition: we can't usefully
+        # subdivide more finely than the tabix index resolution, and a single
+        # huge byte_span across just one bin is almost always an artifact of
+        # a BGZF block boundary (the voff jump represents file structure,
+        # not actual record density). Subdividing through it would create
+        # bogus 1-bp partitions.
+        n_bins_in_span = end_bin - start_bin + 1
+        if byte_span > max_bytes and n_bins_in_span > 1:
+            n_sub = min(n_bins_in_span, math.ceil(byte_span / max_bytes))
+            total_bp = n_bins_in_span * TBI_LINEAR_BIN_BP
+            bp_per_sub = total_bp // n_sub
             for k in range(n_sub):
                 sub_start_bp = start_bin * TBI_LINEAR_BIN_BP + k * bp_per_sub + 1
                 if k < n_sub - 1:

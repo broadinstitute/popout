@@ -85,10 +85,31 @@ def write_phased_vcf(
     pysam.tabix_index(str(path), preset="vcf", force=True)
 
 
+def upload_gt_to_gcs(out_dir: Path, gcs_prefix: str) -> dict[str, str]:
+    """Upload the per-chrom gt.vcf.gz + .tbi to gs:// so the streaming pipeline
+    can read them via libcurl. Returns {chrom: gs_url} for the .vcf.gz."""
+    if not gcs_prefix.endswith("/"):
+        gcs_prefix = gcs_prefix + "/"
+    urls: dict[str, str] = {}
+    paths = []
+    for chrom in CHROMOSOMES:
+        for ext in ("vcf.gz", "vcf.gz.tbi"):
+            local = out_dir / f"{chrom}.gt.{ext}"
+            paths.append(str(local))
+        urls[chrom] = f"{gcs_prefix}{chrom}.gt.vcf.gz"
+    print(f"Uploading {len(paths)} files to {gcs_prefix} …", file=sys.stderr)
+    subprocess.run(["gcloud", "storage", "cp", *paths, gcs_prefix], check=True)
+    return urls
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True, type=Path, help="output directory")
     ap.add_argument("--seed", type=int, default=42, help="RNG seed (default: 42)")
+    ap.add_argument("--gcs-prefix", default=None,
+                    help="if set (e.g. gs://my-bucket/path/), upload the gt VCFs + indices to this "
+                         "prefix and emit inputs.json with gs:// URLs in aou_phased_vcf_urls so "
+                         "miniwdl can exercise the streaming split pipeline end-to-end")
     args = ap.parse_args()
 
     out_dir = args.out.resolve()
@@ -205,9 +226,18 @@ def main() -> int:
 
     # ---- inputs.json ----
     abs = lambda p: str((out_dir / p).resolve())
+    # aou_phased_vcf_urls is Array[String] in the new (streaming) pipeline —
+    # gs:// URLs when --gcs-prefix is set, local file paths otherwise (for
+    # quick offline inspection of the inputs JSON shape).
+    if args.gcs_prefix:
+        gt_urls = upload_gt_to_gcs(out_dir, args.gcs_prefix)
+        aou_phased_vcf_urls = [gt_urls[c] for c in CHROMOSOMES]
+    else:
+        aou_phased_vcf_urls = [abs(f"{c}.gt.vcf.gz") for c in CHROMOSOMES]
+
     inputs = {
         "flare_pipeline.chromosomes":            CHROMOSOMES,
-        "flare_pipeline.aou_phased_vcfs":        [abs(f"{c}.gt.vcf.gz")       for c in CHROMOSOMES],
+        "flare_pipeline.aou_phased_vcf_urls":    aou_phased_vcf_urls,
         "flare_pipeline.aou_phased_vcf_indices": [abs(f"{c}.gt.vcf.gz.tbi")   for c in CHROMOSOMES],
         "flare_pipeline.ref_vcfs":               [abs(f"{c}.ref.vcf.gz")      for c in CHROMOSOMES],
         "flare_pipeline.ref_vcf_indices":        [abs(f"{c}.ref.vcf.gz.tbi")  for c in CHROMOSOMES],
@@ -224,6 +254,13 @@ def main() -> int:
         # thresholds so the variants aren't all filtered out.
         "flare_pipeline.min_mac":                2,
         "flare_pipeline.min_maf":                0.01,
+        # Partition target tuned for the synthetic fixture: each chrom has
+        # ~2 BGZF blocks with very small within-block voff diffs, so the
+        # partitioner emits ~1-2 partitions per chrom — enough to exercise
+        # the parallel scatter path without spinning up hundreds of tasks
+        # on a tiny dataset.
+        "flare_pipeline.target_bytes_per_partition": 100_000_000,
+        "flare_pipeline.max_bytes_per_partition":   1_000_000_000,
     }
     inputs_path = out_dir / "inputs.json"
     with inputs_path.open("w") as f:
