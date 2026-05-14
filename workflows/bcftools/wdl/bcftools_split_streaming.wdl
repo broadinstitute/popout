@@ -123,9 +123,17 @@ task bcftools_split_streaming_task {
 
     # Stream the region directly from gs://. The .tbi is auto-discovered by
     # htslib via the standard <url>.tbi convention.
+    #
+    # --regions-overlap 0: include records strictly by POS-in-region. The
+    # bcftools default (1) also includes records that *overlap* the region
+    # by their REF length, so a multi-bp indel near an internal partition
+    # boundary would land in BOTH the partition containing its POS and the
+    # partition that its REF extends into — duplicated after the gather
+    # concat. POS-only matching gives every record exactly one home.
     bcftools +split \
       "~{vcf_url}" \
       --regions "~{region}" \
+      --regions-overlap 0 \
       --groups-file groups.tsv \
       --output-type z \
       --output "$OUT_DIR" \
