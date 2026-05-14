@@ -258,9 +258,10 @@ def main() -> int:
         # ~2 BGZF blocks with very small within-block voff diffs, so the
         # partitioner emits ~1-2 partitions per chrom — enough to exercise
         # the parallel scatter path without spinning up hundreds of tasks
-        # on a tiny dataset.
-        "flare_pipeline.target_bytes_per_partition": 100_000_000,
-        "flare_pipeline.max_bytes_per_partition":   1_000_000_000,
+        # on a tiny dataset. Pipeline inputs are in MB (WDL Int is 32-bit
+        # in Cromwell/Rawls, can't hold raw byte counts of biobank scale).
+        "flare_pipeline.target_mb_per_partition": 100,    # ~100 MB voff units
+        "flare_pipeline.max_mb_per_partition":    1000,   # ~1 GB voff units
     }
     inputs_path = out_dir / "inputs.json"
     with inputs_path.open("w") as f:

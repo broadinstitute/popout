@@ -61,9 +61,12 @@ workflow flare_pipeline {
     Int?    gen
 
     # ---- Streaming-split partitioning knobs --------------------------
-    # Default 10 GB target; partitions larger than 30 GB get subdivided.
-    Int     target_bytes_per_partition = 10737418240   # 10 GB
-    Int     max_bytes_per_partition    = 32212254720   # 30 GB
+    # Sizes in MB so the literals fit in WDL Int (32-bit in Cromwell/Rawls).
+    # The partition task converts MB -> bytes via bash before calling the
+    # Python script. Default 10 GB target; partitions larger than 30 GB
+    # get subdivided.
+    Int     target_mb_per_partition = 10240    # 10 GB
+    Int     max_mb_per_partition    = 30720    # 30 GB
 
     # ---- Stage D toggle ----------------------------------------------
     Boolean do_concat        = true
@@ -99,10 +102,10 @@ workflow flare_pipeline {
     # A.1 plan partitions for this chromosome (reads only the .tbi).
     call partitions_wf.generate_genomic_partitions as plan_partitions {
       input:
-        vcf_index                  = aou_phased_vcf_indices[i],
-        chromosomes                = [chromosomes[i]],
-        target_bytes_per_partition = target_bytes_per_partition,
-        max_bytes_per_partition    = max_bytes_per_partition
+        vcf_index               = aou_phased_vcf_indices[i],
+        chromosomes             = [chromosomes[i]],
+        target_mb_per_partition = target_mb_per_partition,
+        max_mb_per_partition    = max_mb_per_partition
     }
 
     # A.2 stream-split each partition. Each task pulls only its region

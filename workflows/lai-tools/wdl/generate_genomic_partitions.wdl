@@ -10,24 +10,32 @@ version 1.0
 ##
 ## The .tbi *is* localized (it's small, ~300 KB for AoU chr1); only the
 ## main VCF stays remote.
+##
+## Why MB inputs (not bytes): WDL Int is 32-bit in Cromwell/Rawls
+## (max ~2.1 GB). 10 GB and 30 GB literal byte counts overflow. The task
+## converts MB -> bytes via bash arithmetic (which is 64-bit-safe) before
+## invoking the Python helper.
 
 task generate_genomic_partitions {
   input {
-    File          vcf_index                            # localized .tbi
-    Array[String]? chromosomes                         # optional restriction
-    Int           target_bytes_per_partition = 10737418240   # 10 GB
-    Int           max_bytes_per_partition    = 32212254720   # 30 GB safety valve
+    File          vcf_index                       # localized .tbi
+    Array[String] chromosomes = []                # empty = all contigs in the index
+    Int           target_mb_per_partition = 10240     # 10 GB
+    Int           max_mb_per_partition    = 30720     # 30 GB safety valve
     String        docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/lai-tools:latest"
   }
 
   command <<<
     set -euo pipefail
 
+    TARGET_BYTES=$(( ~{target_mb_per_partition} * 1048576 ))
+    MAX_BYTES=$(( ~{max_mb_per_partition} * 1048576 ))
+
     generate_partitions.py \
       --tbi-path "~{vcf_index}" \
-      ~{if defined(chromosomes) then "--chromosomes " + sep(" ", select_first([chromosomes])) else ""} \
-      --target-bytes-per-partition ~{target_bytes_per_partition} \
-      --max-bytes-per-partition ~{max_bytes_per_partition} \
+      ~{if length(chromosomes) > 0 then "--chromosomes" else ""} ~{sep=' ' chromosomes} \
+      --target-bytes-per-partition "$TARGET_BYTES" \
+      --max-bytes-per-partition "$MAX_BYTES" \
       --out-manifest partitions.tsv \
       --out-regions regions.txt \
       --out-region-ids region_ids.txt
@@ -50,19 +58,19 @@ task generate_genomic_partitions {
 workflow generate_genomic_partitions_workflow {
   input {
     File          vcf_index
-    Array[String]? chromosomes
-    Int           target_bytes_per_partition = 10737418240
-    Int           max_bytes_per_partition    = 32212254720
+    Array[String] chromosomes = []
+    Int           target_mb_per_partition = 10240
+    Int           max_mb_per_partition    = 30720
     String        docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/lai-tools:latest"
   }
 
   call generate_genomic_partitions {
     input:
-      vcf_index                  = vcf_index,
-      chromosomes                = chromosomes,
-      target_bytes_per_partition = target_bytes_per_partition,
-      max_bytes_per_partition    = max_bytes_per_partition,
-      docker_image               = docker_image
+      vcf_index               = vcf_index,
+      chromosomes             = chromosomes,
+      target_mb_per_partition = target_mb_per_partition,
+      max_mb_per_partition    = max_mb_per_partition,
+      docker_image            = docker_image
   }
 
   output {
