@@ -291,7 +291,7 @@ probe_bcftools_split_stream() {
     --groups-file "$GROUPS_FILE" \
     --regions "$REGION" --regions-overlap 0 \
     --output-type z --output "$OUT_DIR/out_stream" \
-    --hts-opts "nthreads=$CPU" \
+    --threads "$CPU" \
     "$VCF_URL" || cmd_rc=$?
   PROBE_BYTES_OUT=$(sum_dir_bytes "$OUT_DIR/out_stream")
   return "$cmd_rc"
@@ -368,7 +368,7 @@ probe_bcftools_split_local() {
   maybe_strace bcftools_split_local bcftools +split \
     --groups-file "$GROUPS_FILE" \
     --output-type z --output "$OUT_DIR/out_local" \
-    --hts-opts "nthreads=$CPU" \
+    --threads "$CPU" \
     "$OUT_DIR/local_slice.bgz" || cmd_rc=$?
   PROBE_BYTES_OUT=$(sum_dir_bytes "$OUT_DIR/out_local")
   return "$cmd_rc"

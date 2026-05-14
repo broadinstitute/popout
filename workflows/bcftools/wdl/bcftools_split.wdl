@@ -121,7 +121,7 @@ task bcftools_split_task {
       --groups-file groups.tsv \
       --output-type ~{output_type} \
       --output "$OUT_DIR" \
-      --hts-opts "nthreads=~{cpu}"
+      --threads ~{cpu}
 
     ls -lh "$OUT_DIR"
 

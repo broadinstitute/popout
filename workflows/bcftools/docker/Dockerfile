@@ -18,7 +18,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ARG HTSLIB_SHA
-ARG BCFTOOLS_VERSION
+ARG BCFTOOLS_REPO=https://github.com/samtools/bcftools.git
+ARG BCFTOOLS_REF       # tag, branch, or SHA — the value passed to `git checkout`
 
 # 1) htslib from develop, pinned to a SHA for reproducibility. The PR #1987
 #    retry/resilience changes are merged on develop but not yet in a tagged
@@ -45,11 +46,16 @@ RUN test -n "${HTSLIB_SHA}" \
     && make install \
     && ldconfig
 
-# 2) bcftools 1.23.x (already contains PR #2503's synced-reader truncation
-#    fix from 1.23.1 onwards) linked against the htslib we just installed.
-RUN test -n "${BCFTOOLS_VERSION}" \
-    && git clone --branch "${BCFTOOLS_VERSION}" https://github.com/samtools/bcftools.git /tmp/bcftools \
+# 2) bcftools (already contains PR #2503's synced-reader truncation fix from
+#    1.23.1 onwards) linked against the htslib we just installed.
+#    BCFTOOLS_REPO / BCFTOOLS_REF let us swap in a fork — currently pinned to
+#    gileshall/bcftools split-threads, which adds `bcftools +split --threads N`
+#    (wires bcf_sr_set_threads + a shared HTS_OPT_THREAD_POOL across outputs).
+#    When upstream picks up the patch, point back at samtools/bcftools + tag.
+RUN test -n "${BCFTOOLS_REF}" \
+    && git clone "${BCFTOOLS_REPO}" /tmp/bcftools \
     && cd /tmp/bcftools \
+    && git checkout "${BCFTOOLS_REF}" \
     && autoreconf -i \
     && ./configure --enable-libgsl --enable-perl-filters \
     && make -j"$(nproc)" \

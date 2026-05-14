@@ -137,7 +137,7 @@ task bcftools_split_streaming_task {
       --groups-file groups.tsv \
       --output-type z \
       --output "$OUT_DIR" \
-      --hts-opts "nthreads=~{cpu}"
+      --threads ~{cpu}
 
     ls -lh "$OUT_DIR"
 
