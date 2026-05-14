@@ -254,14 +254,10 @@ def main() -> int:
         # thresholds so the variants aren't all filtered out.
         "flare_pipeline.min_mac":                2,
         "flare_pipeline.min_maf":                0.01,
-        # Partition target tuned for the synthetic fixture: each chrom has
-        # ~2 BGZF blocks with very small within-block voff diffs, so the
-        # partitioner emits ~1-2 partitions per chrom — enough to exercise
-        # the parallel scatter path without spinning up hundreds of tasks
-        # on a tiny dataset. Pipeline inputs are in MB (WDL Int is 32-bit
-        # in Cromwell/Rawls, can't hold raw byte counts of biobank scale).
-        "flare_pipeline.target_mb_per_partition": 100,    # ~100 MB voff units
-        "flare_pipeline.max_mb_per_partition":    1000,   # ~1 GB voff units
+        # Use the production defaults (10 GB / 30 GB). Our synthetic VCFs
+        # are KB-sized so the partitioner emits 1 partition per chrom —
+        # correct behavior for files that fit in a few bgzf blocks. The
+        # e2e test still exercises the full scatter/gather/streaming path.
     }
     inputs_path = out_dir / "inputs.json"
     with inputs_path.open("w") as f:

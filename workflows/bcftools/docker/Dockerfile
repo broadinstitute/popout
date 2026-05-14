@@ -25,17 +25,22 @@ ARG BCFTOOLS_VERSION
 #    release as of plan time.
 #
 # --enable-libcurl: link libcurl directly into libhts.so so gs:// / https://
-# URLs work out of the box. We deliberately do NOT use --enable-plugins,
-# which would emit those handlers as separately-loadable .so files — the
-# runtime image would then need to also ship /usr/local/libexec/htslib/ and
-# any missing plugin causes "Protocol not supported" at open time.
+# URLs work out of the box.
+# --enable-gcs: compile in GCS-aware auth helpers — without this, htslib only
+# knows GCS_OAUTH_TOKEN / GOOGLE_APPLICATION_CREDENTIALS and never queries
+# the GCE metadata server, so streaming a private bucket from a Terra worker
+# fails with HTTP 403 even though Cromwell-side localization works fine.
+# We deliberately do NOT use --enable-plugins, which would emit these handlers
+# as separately-loadable .so files — the runtime image would then need to
+# also ship /usr/local/libexec/htslib/ and any missing plugin causes
+# "Protocol not supported" at open time.
 RUN test -n "${HTSLIB_SHA}" \
     && git clone --recurse-submodules https://github.com/samtools/htslib.git /tmp/htslib \
     && cd /tmp/htslib \
     && git checkout "${HTSLIB_SHA}" \
     && git submodule update --init --recursive \
     && autoreconf -i \
-    && ./configure --enable-libcurl \
+    && ./configure --enable-libcurl --enable-gcs \
     && make -j"$(nproc)" \
     && make install \
     && ldconfig

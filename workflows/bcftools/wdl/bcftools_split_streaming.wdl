@@ -65,6 +65,37 @@ task bcftools_split_streaming_task {
     export HTS_RETRY_DELAY=~{hts_retry_delay}
     export HTS_RETRY_MAX_DELAY=~{hts_retry_max_delay}
 
+    # ---- GCS auth refresher ----------------------------------------
+    # htslib's libcurl backend reads a bearer token from HTS_AUTH_LOCATION
+    # (or the file may contain a JSON response with an "access_token"
+    # field — exactly what the GCE metadata server returns). A FIFO
+    # backed by a `while true; curl` loop means every htslib read pulls
+    # a fresh token, so partitions that outlast the ~1 h token expiry
+    # don't need any refresh logic.
+    #
+    # We only set this up if GCS_OAUTH_TOKEN isn't already provided
+    # (e.g. by `miniwdl run --env GCS_OAUTH_TOKEN=...` for local
+    # testing) — HTS_AUTH_LOCATION would otherwise override the env
+    # token. On Terra workers the metadata server is reachable; on a
+    # laptop it isn't, so we test reachability before plumbing the FIFO.
+    if [ -z "${GCS_OAUTH_TOKEN:-}" ] && [ -z "${HTS_AUTH_LOCATION:-}" ] \
+       && curl -fsS -m 2 -H 'Metadata-Flavor: Google' \
+            http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token \
+            >/dev/null 2>&1; then
+      TOKEN_FIFO=/tmp/gcs_token_fifo
+      mkfifo "$TOKEN_FIFO"
+      (
+        while true; do
+          curl -fsS -H 'Metadata-Flavor: Google' \
+            http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token \
+            > "$TOKEN_FIFO" 2>/dev/null || true
+        done
+      ) &
+      export HTS_AUTH_LOCATION="$TOKEN_FIFO"
+      echo "GCS auth: HTS_AUTH_LOCATION FIFO refresher running (pid $!)"
+    fi
+    # -----------------------------------------------------------------
+
     OUT_DIR=out
     mkdir -p "$OUT_DIR"
 

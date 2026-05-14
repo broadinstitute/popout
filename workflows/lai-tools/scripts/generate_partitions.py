@@ -50,13 +50,19 @@ def _file_offset(voff: int) -> int:
     return voff >> 16
 
 
-# We use **full virtual-offset diffs** as the byte estimator. A voff packs a
+# Byte estimator: file_offset(voff_end) - file_offset(voff_start), i.e. the
+# compressed BGZF byte distance between two records. The voff packs the
 # 48-bit compressed file offset in the high bits and a 16-bit uncompressed
-# within-block offset in the low bits. At biobank scale most partitions span
-# many bgzf blocks, so the high-bit term dominates and the diff approximates
-# compressed bytes consumed (1 voff unit ≈ 1 byte). At small scale (test
-# fixtures, single-block files) the low-bit term carries the signal alone.
-# Either way, diffs are monotone and partitioning still balances correctly.
+# within-block offset in the low bits — at biobank scale per-bin spans are
+# multi-MB to multi-GB so the file_offset diff is the only signal that
+# scales sensibly with the user's `--target-bytes-per-partition`. Using
+# the full voff as the byte estimator would over-count by up to 65536x
+# (every within-block tick contributes one unit) and produces ~one
+# partition per linear-index bin on real biobank inputs.
+#
+# Single-block fixtures: file_offset diffs are zero across all bins, so the
+# algorithm emits one partition for the whole contig. That's the right
+# answer for a file that fits in one bgzf block — there's nothing to scatter.
 
 
 def parse_tbi(tbi_path: Path) -> dict[str, list[int]]:
@@ -120,31 +126,37 @@ def partition_chrom(
     if n == 0:
         return [], starting_partition_idx
 
+    # Precompute compressed file offsets (high 48 bits of each voff).
+    foffs = [_file_offset(v) for v in linear_index]
+
     partitions: list[Partition] = []
     idx = starting_partition_idx
     start_bin = 0
 
     while start_bin < n:
         # Empty bins have voff_i == voff_{i+1} (tabix propagates the next
-        # non-empty bin's voff backward into empty trailing bins).
+        # non-empty bin's voff backward into empty trailing bins). Compare
+        # full voffs here, not file offsets — multiple non-empty bins can
+        # share a file offset if their records all live in the same bgzf
+        # block, and those are NOT empty bins.
         while start_bin < n - 1 and linear_index[start_bin] == linear_index[start_bin + 1]:
             start_bin += 1
         if start_bin >= n - 1:
             break
 
-        start_voff = linear_index[start_bin]
+        start_foff = foffs[start_bin]
         end_bin = start_bin
         byte_span = 0
 
         # Walk forward until we cross target_bytes (or run out of bins).
+        # Byte span is the compressed-file distance between bins.
         while end_bin < n - 1:
-            byte_span = linear_index[end_bin + 1] - start_voff
+            byte_span = foffs[end_bin + 1] - start_foff
             if byte_span >= target_bytes:
                 break
             end_bin += 1
         else:
-            # Ran past the last bin without crossing target.
-            byte_span = linear_index[n - 1] - start_voff
+            byte_span = foffs[n - 1] - start_foff
             end_bin = n - 1
 
         # Cap subdivision at 1 bin per sub-partition: we can't usefully
