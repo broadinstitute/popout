@@ -177,6 +177,23 @@ def test_empty_index_emits_nothing():
     assert parts == []
 
 
+def test_last_bin_included_when_partition_ends_at_n_minus_2():
+    """Regression: with a target that lands a partition boundary at end_bin=n-2,
+    the old outer-loop guard would break out without processing bin n-1 — a real
+    data-loss bug because bin n-1's bp range partially lies within the chromosome.
+
+    11 bins × 1 MB each, target=5 MB. Partition 1 ends at bin 4 (5 MB), partition 2
+    at bin 9 (5 MB), then start_bin=10 (n-1). Without the fix that's where we
+    used to break — losing bin 10. With the fix, partition 3 covers bin 10.
+    """
+    idx = _uniform_index(n_bins=11, bytes_per_bin=1_000_000)
+    parts, _ = gp.partition_chrom("chr_tail", idx, target_bytes=5_000_000, max_bytes=10**12)
+    assert len(parts) == 3
+    # Last partition covers the last bin in bp.
+    last = parts[-1] if parts[-1].chrom == "chr_tail" else max(parts, key=lambda p: p.end)
+    assert last.end == 11 * 16384  # bin 10's upper edge = n*16384
+
+
 # ---------------------------------------------------------------------
 # generate_partitions top-level + manifest writer
 # ---------------------------------------------------------------------

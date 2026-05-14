@@ -141,7 +141,13 @@ def partition_chrom(
         # block, and those are NOT empty bins.
         while start_bin < n - 1 and linear_index[start_bin] == linear_index[start_bin + 1]:
             start_bin += 1
-        if start_bin >= n - 1:
+        # NOTE: must use `>= n`, not `>= n - 1`. The last bin (index n-1)
+        # can hold real records (its bp range is [(n-1)*16384+1, n*16384],
+        # whose lower portion lies within the chromosome). If a previous
+        # partition's end_bin landed at n-2 (because byte_span crossed
+        # target there), start_bin advances to n-1 and we MUST still
+        # process it — otherwise records with POS in bin n-1 vanish.
+        if start_bin >= n:
             break
 
         start_foff = foffs[start_bin]
