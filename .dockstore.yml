@@ -37,6 +37,10 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /workflows/gpu_probe/wdl/gpu_probe.wdl
     topic: Validate GPU machine types on Terra
+  - name: throughput-probe
+    subclass: WDL
+    primaryDescriptorPath: /workflows/lai-tools/wdl/throughput_probe.wdl
+    topic: Layered throughput diagnostic for gs:// VCF streaming (curl/gcloud/htslib/bcftools, streaming vs local)
   - name: popout
     subclass: WDL
     primaryDescriptorPath: /workflows/popout/wdl/popout.wdl
