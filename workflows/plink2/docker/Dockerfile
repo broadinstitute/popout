@@ -1,8 +1,13 @@
 FROM python:3.12-slim
 
+# bcftools is needed by plink2_export_clusters.wdl for `bcftools index --tbi`
+# on each per-cluster VCF output. The distro bcftools is plenty for index
+# generation — we don't need the htslib-develop features of our pinned
+# bcftools image since we're operating on local files.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         ca-certificates \
+        bcftools \
     && rm -rf /var/lib/apt/lists/*
 
 # plink2 AVX2 build, fetched from the upstream GitHub release.
