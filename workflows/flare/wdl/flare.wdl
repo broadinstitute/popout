@@ -44,13 +44,10 @@ task flare_task {
     File?    gt_samples              # restrict to this subset of target samples
     File?    excludemarkers
 
-    # Resource overrides — set explicitly per chromosome for biobank-scale
-    # runs (see flare_pipeline.wdl). Defaults below are tuned for the
-    # smallest autosomes (chr20-22) at K=15 cluster scale.
+    # Resource overrides (auto-scaled by gt VCF size by default).
     Int?     cpu_override
     String?  memory_override
     Int?     disk_size_gb_override
-    Int?     xmx_gb_override                # JVM -Xmx; defaults to memory_gb - 8
     String   disk_type     = "HDD"   # HDD (cheap, plenty fast for streaming), SSD, LOCAL_SSD
     Int      preemptible   = 0       # FLARE has no checkpointing — keep at 0 for multi-hour runs
 
@@ -60,25 +57,42 @@ task flare_task {
     String   docker_image  = "us-docker.pkg.dev/broad-dsde-methods/popout/flare:latest"
   }
 
+  Float ref_gb = size(ref_vcf, "GB")
+  Float gt_gb  = size(gt_vcf, "GB")
+
   # Supplying a model means "apply, don't train". FLARE ignores `em` when
   # `model=` is set, but we mirror that in WDL so the metric logged for
   # W&B reflects what FLARE will actually do.
   Boolean effective_em = if defined(model) then false else em
 
-  # Resources: literal defaults. See bcftools_view.wdl:88-91 for why
-  # size()-driven auto-scaling on `gt_vcf` is fragile in Cromwell when the
-  # File comes from an upstream task output (its size is not yet known at
-  # runtime-block eval time). Pass `*_override` for chr1/chr2/etc. Bins
-  # from the prior auto-scale table for reference:
+  # Auto-scale on gt VCF size. FLARE is JVM-resident: HMM state scales
+  # with ref-panel size and variants, while the gt sample loop is the
+  # parallel work that benefits from nthreads.
   #
   #   < 20 GB gt:    8 CPU,  32 GB mem, -Xmx 24g
   #   20-50 GB gt:  16 CPU,  64 GB mem, -Xmx 56g
   #   50-100 GB gt: 32 CPU, 128 GB mem, -Xmx 120g
   #   > 100 GB gt:  48 CPU, 192 GB mem, -Xmx 180g
-  Int    cpu          = select_first([cpu_override, 8])
-  String memory       = select_first([memory_override, "32 GB"])
-  Int    disk_size_gb = select_first([disk_size_gb_override, 200])
-  Int    xmx_gb       = select_first([xmx_gb_override, 24])
+  Int auto_cpu = if gt_gb > 100.0 then 48
+                 else if gt_gb > 50.0 then 32
+                 else if gt_gb > 20.0 then 16
+                 else 8
+  String auto_memory = if gt_gb > 100.0 then "192 GB"
+                       else if gt_gb > 50.0 then "128 GB"
+                       else if gt_gb > 20.0 then "64 GB"
+                       else "32 GB"
+  Int auto_xmx_gb = if gt_gb > 100.0 then 180
+                    else if gt_gb > 50.0 then 120
+                    else if gt_gb > 20.0 then 56
+                    else 24
+
+  # Disk: ref + gt + output. .anc.vcf.gz is ~1.5-2x gt size, ~3x with probs.
+  Float output_multiplier = if probs then 4.0 else 2.5
+  Int auto_disk = ceil(ref_gb + gt_gb * output_multiplier) + 50
+
+  Int    cpu          = select_first([cpu_override, auto_cpu])
+  String memory       = select_first([memory_override, auto_memory])
+  Int    disk_size_gb = select_first([disk_size_gb_override, auto_disk])
 
   command <<<
     set -euo pipefail
@@ -107,11 +121,11 @@ task flare_task {
       flare.probs="~{probs}" \
       flare.array="~{array}" \
       flare.cpu="~{cpu}" \
-      flare.xmx_gb="~{xmx_gb}" \
+      flare.xmx_gb="~{auto_xmx_gb}" \
       flare.disk_gb="~{disk_size_gb}" \
       flare.disk_type="~{disk_type}"
 
-    java -Xmx~{xmx_gb}g -jar /opt/flare/flare.jar \
+    java -Xmx~{auto_xmx_gb}g -jar /opt/flare/flare.jar \
       ref=~{ref_vcf} \
       ref-panel=~{ref_panel} \
       gt=~{gt_vcf} \
@@ -234,7 +248,6 @@ workflow flare {
     Int?     cpu_override
     String?  memory_override
     Int?     disk_size_gb_override
-    Int?     xmx_gb_override
     String   disk_type     = "HDD"
     Int      preemptible   = 0
 
@@ -263,7 +276,6 @@ workflow flare {
       cpu_override          = cpu_override,
       memory_override       = memory_override,
       disk_size_gb_override = disk_size_gb_override,
-      xmx_gb_override       = xmx_gb_override,
       disk_type             = disk_type,
       preemptible           = preemptible,
       wandb_api_key         = wandb_api_key,
