@@ -85,31 +85,22 @@ def write_phased_vcf(
     pysam.tabix_index(str(path), preset="vcf", force=True)
 
 
-def upload_gt_to_gcs(out_dir: Path, gcs_prefix: str) -> dict[str, str]:
-    """Upload the per-chrom gt.vcf.gz + .tbi to gs:// so the streaming pipeline
-    can read them via libcurl. Returns {chrom: gs_url} for the .vcf.gz."""
-    if not gcs_prefix.endswith("/"):
-        gcs_prefix = gcs_prefix + "/"
-    urls: dict[str, str] = {}
-    paths = []
-    for chrom in CHROMOSOMES:
-        for ext in ("vcf.gz", "vcf.gz.tbi"):
-            local = out_dir / f"{chrom}.gt.{ext}"
-            paths.append(str(local))
-        urls[chrom] = f"{gcs_prefix}{chrom}.gt.vcf.gz"
-    print(f"Uploading {len(paths)} files to {gcs_prefix} …", file=sys.stderr)
-    subprocess.run(["gcloud", "storage", "cp", *paths, gcs_prefix], check=True)
-    return urls
+def make_pgen_from_vcf(vcf_path: Path, out_prefix: Path) -> None:
+    """Run `plink2 --vcf X --make-pgen --out Y` to produce the PGEN triplet
+    that flare_pipeline.wdl Stage A consumes."""
+    cmd = [
+        "plink2",
+        "--vcf", str(vcf_path),
+        "--make-pgen",
+        "--out", str(out_prefix),
+    ]
+    subprocess.run(cmd, check=True)
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--out", required=True, type=Path, help="output directory")
     ap.add_argument("--seed", type=int, default=42, help="RNG seed (default: 42)")
-    ap.add_argument("--gcs-prefix", default=None,
-                    help="if set (e.g. gs://my-bucket/path/), upload the gt VCFs + indices to this "
-                         "prefix and emit inputs.json with gs:// URLs in aou_phased_vcf_urls so "
-                         "miniwdl can exercise the streaming split pipeline end-to-end")
     args = ap.parse_args()
 
     out_dir = args.out.resolve()
@@ -215,6 +206,13 @@ def main() -> int:
         write_phased_vcf(ref_vcf_path, chrom, contig_lengths, ref_samples,    ref_haps,    positions)
         write_phased_vcf(gt_vcf_path,  chrom, contig_lengths, target_samples, target_haps, positions)
 
+        # Materialize the PGEN triplet (pgen/pvar/psam) alongside each gt VCF
+        # so flare_pipeline.wdl Stage A (plink2_export_clusters) has its
+        # native binary input. We do this on the gt VCF (the one we feed to
+        # plink2_export_clusters); the ref VCF stays VCF-only because FLARE
+        # consumes it directly.
+        make_pgen_from_vcf(gt_vcf_path, out_dir / f"{chrom}.gt")
+
         # Write the genetic map: chr <tab> . <tab> cM <tab> bp.
         map_path = out_dir / f"{chrom}.map"
         with map_path.open("w") as f:
@@ -222,42 +220,31 @@ def main() -> int:
                 cm = (pos - START_BP) * CM_PER_MB / 1_000_000
                 f.write(f"{chrom}\t.\t{cm:.6f}\t{pos}\n")
 
-        print(f"  {chrom}: ref={ref_vcf_path.name} gt={gt_vcf_path.name} map={map_path.name} variants={VARIANTS_PER_CHROM}", file=sys.stderr)
+        print(f"  {chrom}: ref={ref_vcf_path.name} gt={gt_vcf_path.name} pgen={chrom}.gt.pgen map={map_path.name} variants={VARIANTS_PER_CHROM}", file=sys.stderr)
 
     # ---- inputs.json ----
     abs = lambda p: str((out_dir / p).resolve())
-    # aou_phased_vcf_urls is Array[String] in the new (streaming) pipeline —
-    # gs:// URLs when --gcs-prefix is set, local file paths otherwise (for
-    # quick offline inspection of the inputs JSON shape).
-    if args.gcs_prefix:
-        gt_urls = upload_gt_to_gcs(out_dir, args.gcs_prefix)
-        aou_phased_vcf_urls = [gt_urls[c] for c in CHROMOSOMES]
-    else:
-        aou_phased_vcf_urls = [abs(f"{c}.gt.vcf.gz") for c in CHROMOSOMES]
 
     inputs = {
-        "flare_pipeline.chromosomes":            CHROMOSOMES,
-        "flare_pipeline.aou_phased_vcf_urls":    aou_phased_vcf_urls,
-        "flare_pipeline.aou_phased_vcf_indices": [abs(f"{c}.gt.vcf.gz.tbi")   for c in CHROMOSOMES],
-        "flare_pipeline.ref_vcfs":               [abs(f"{c}.ref.vcf.gz")      for c in CHROMOSOMES],
-        "flare_pipeline.ref_vcf_indices":        [abs(f"{c}.ref.vcf.gz.tbi")  for c in CHROMOSOMES],
-        "flare_pipeline.genetic_maps":           [abs(f"{c}.map")             for c in CHROMOSOMES],
-        "flare_pipeline.ref_panel":              abs("ref.panel"),
-        "flare_pipeline.cluster_ids":            [c for c, _ in CLUSTERS],
-        "flare_pipeline.cluster_sample_lists":   [abs(f"clusters/{c}.tsv") for c, _ in CLUSTERS],
-        "flare_pipeline.model_chromosome":       "chr20",
-        "flare_pipeline.seed":                   12345,
-        "flare_pipeline.probs":                  False,
-        "flare_pipeline.do_concat":              True,
+        "flare_pipeline.chromosomes":          CHROMOSOMES,
+        "flare_pipeline.aou_pgen":             [abs(f"{c}.gt.pgen")        for c in CHROMOSOMES],
+        "flare_pipeline.aou_pvar":             [abs(f"{c}.gt.pvar")        for c in CHROMOSOMES],
+        "flare_pipeline.aou_psam":             [abs(f"{c}.gt.psam")        for c in CHROMOSOMES],
+        "flare_pipeline.ref_vcfs":             [abs(f"{c}.ref.vcf.gz")     for c in CHROMOSOMES],
+        "flare_pipeline.ref_vcf_indices":      [abs(f"{c}.ref.vcf.gz.tbi") for c in CHROMOSOMES],
+        "flare_pipeline.genetic_maps":         [abs(f"{c}.map")            for c in CHROMOSOMES],
+        "flare_pipeline.ref_panel":            abs("ref.panel"),
+        "flare_pipeline.cluster_ids":          [c for c, _ in CLUSTERS],
+        "flare_pipeline.cluster_sample_lists": [abs(f"clusters/{c}.tsv") for c, _ in CLUSTERS],
+        "flare_pipeline.model_chromosome":     "chr20",
+        "flare_pipeline.seed":                 12345,
+        "flare_pipeline.probs":                False,
+        "flare_pipeline.do_concat":            True,
         # FLARE defaults (min-mac=50, min-maf=0.005) are tuned for biobank-
         # scale ref panels; our 15-sample synthetic panel needs much looser
         # thresholds so the variants aren't all filtered out.
-        "flare_pipeline.min_mac":                2,
-        "flare_pipeline.min_maf":                0.01,
-        # Use the production defaults (10 GB / 30 GB). Our synthetic VCFs
-        # are KB-sized so the partitioner emits 1 partition per chrom —
-        # correct behavior for files that fit in a few bgzf blocks. The
-        # e2e test still exercises the full scatter/gather/streaming path.
+        "flare_pipeline.min_mac":              2,
+        "flare_pipeline.min_maf":              0.01,
     }
     inputs_path = out_dir / "inputs.json"
     with inputs_path.open("w") as f:

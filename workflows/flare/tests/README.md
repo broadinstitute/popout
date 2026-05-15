@@ -9,8 +9,9 @@ and ~3 hours of Cromwell compute before it tripped).
 
 A single `miniwdl run` exercises every stage and helper in the pipeline:
 
-- Stage A — `bcftools +split` (with the 3-col `-G` group file, `--hts-opts nthreads=`)
-- `find_chrom_index` + `pair_by_basename` helper tasks
+- Stage A — `plink2 --pfile --keep --export vcf-4.2 bgz` (one task per chrom,
+  loops over clusters; `bcftools index --tbi` on each per-cluster output)
+- `find_chrom_index` helper task
 - WDL `transpose()` on the `[chrom][cluster]` array
 - Stage B — FLARE `em=true` (train, produces `.model`)
 - Stage C — FLARE `em=false model=…` (apply, reuses train's model)
@@ -53,6 +54,10 @@ bcftools view -h "$F" | grep '^##FORMAT'            # → GT, AN1, AN2
 ## Prereqs
 
 - `miniwdl` ≥ 1.13 on PATH
-- Docker running, with access to `us-docker.pkg.dev/broad-dsde-methods/popout/{bcftools,flare}:latest`
+- Docker running, with access to `us-docker.pkg.dev/broad-dsde-methods/popout/{bcftools,flare,plink2}:latest`
   (run `gcloud auth configure-docker us-docker.pkg.dev` once if pulls fail)
-- Host has `python3` + `pysam` (any version ≥ 0.22) for the generator
+- Host has `python3` + `pysam` (any version ≥ 0.22) and `plink2` on PATH
+  for the generator (plink2 materializes the per-chrom PGEN triplets that
+  Stage A consumes). Install plink2 from
+  <https://www.cog-genomics.org/plink/2.0/> — the static prebuilt
+  `plink2_macarm64_*` or `plink2_linux_avx2_*` binaries both work.

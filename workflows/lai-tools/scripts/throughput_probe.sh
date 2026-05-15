@@ -317,18 +317,27 @@ probe_gcloud_cat_to_local() {
 
 prep_local_slice() {
   echo "[prep] fetching header [0, ${HEADER_BYTE_END})..."
-  rm -f "$OUT_DIR/_header.bgz" "$OUT_DIR/local_slice.bgz"
+  rm -f "$OUT_DIR/_header.bgz" "$OUT_DIR/_header.aligned.bgz" "$OUT_DIR/local_slice.bgz"
   if ! gcloud storage cat -r "0-$((HEADER_BYTE_END - 1))" "$VCF_URL" > "$OUT_DIR/_header.bgz"; then
-    echo "[prep] header fetch failed; local probes (7, 8) will likely fail too" >&2
+    echo "[prep] header fetch failed; local probes (7, 8, 10) will likely fail too" >&2
     return 1
   fi
   echo "[prep] header bytes: $(stat -c %s "$OUT_DIR/_header.bgz")"
-  cat "$OUT_DIR/_header.bgz" "$OUT_DIR/_slice.bgz" > "$OUT_DIR/local_slice.bgz"
+  # Truncate the 64 MiB header chunk to the last complete BGZF block.
+  # gcloud's byte-range cut almost never lands on a BGZF block boundary,
+  # so the raw concat would leave a mid-deflate seam that strict
+  # BSIZE-following readers can't resync past.
+  if ! bgzf_truncate.py "$OUT_DIR/_header.bgz" "$OUT_DIR/_header.aligned.bgz"; then
+    echo "[prep] bgzf_truncate.py failed; concat would produce a non-BGZF-aligned seam" >&2
+    return 1
+  fi
+  echo "[prep] aligned header bytes: $(stat -c %s "$OUT_DIR/_header.aligned.bgz")"
+  cat "$OUT_DIR/_header.aligned.bgz" "$OUT_DIR/_slice.bgz" > "$OUT_DIR/local_slice.bgz"
   # Append empty-BGZF EOF terminator (28 bytes) so bcftools doesn't warn
   # about truncated stream.
   printf '\x1f\x8b\x08\x04\x00\x00\x00\x00\x00\xff\x06\x00\x42\x43\x02\x00\x1b\x00\x03\x00\x00\x00\x00\x00\x00\x00\x00\x00' \
     >> "$OUT_DIR/local_slice.bgz"
-  rm -f "$OUT_DIR/_header.bgz" "$OUT_DIR/_slice.bgz"
+  rm -f "$OUT_DIR/_header.bgz" "$OUT_DIR/_header.aligned.bgz" "$OUT_DIR/_slice.bgz"
   echo "[prep] local_slice.bgz: $(stat -c %s "$OUT_DIR/local_slice.bgz") bytes"
 }
 

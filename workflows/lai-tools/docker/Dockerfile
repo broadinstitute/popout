@@ -44,7 +44,9 @@ RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg \
 # Drop the helpers in /usr/local/bin so they're directly invokable.
 COPY scripts/generate_partitions.py /usr/local/bin/generate_partitions.py
 COPY scripts/tbi_byte_range.py      /usr/local/bin/tbi_byte_range.py
+COPY scripts/bgzf_truncate.py       /usr/local/bin/bgzf_truncate.py
 COPY scripts/throughput_probe.sh    /usr/local/bin/throughput_probe.sh
 RUN chmod +x /usr/local/bin/generate_partitions.py \
              /usr/local/bin/tbi_byte_range.py \
+             /usr/local/bin/bgzf_truncate.py \
              /usr/local/bin/throughput_probe.sh
