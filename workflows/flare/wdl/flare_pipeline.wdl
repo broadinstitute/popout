@@ -53,11 +53,15 @@ workflow flare_pipeline {
     File ref_panel
 
     # ---- FLARE config (Sharon/Liz defaults from the 3/31 spec) -------
+    # min_maf / min_mac pinned to FLARE's documented defaults (flare.wdl:40-41)
+    # so they're never None at evaluation time — Cromwell trips on optional
+    # lookups inside the Stage C nested scatter, and concretizing here keeps
+    # the call sites simple. Override via inputs.json when needed.
     String  model_chromosome = "chr20"
     Int     seed             = 12345
     Boolean probs            = false
-    Float?  min_maf
-    Int?    min_mac
+    Float   min_maf          = 0.005
+    Int     min_mac          = 50
     Int?    gen
 
     # ---- Stage D toggle ----------------------------------------------
@@ -85,7 +89,7 @@ workflow flare_pipeline {
   # gather, no streaming-bytes drama.
   # =========================================================================
   scatter (i in range(length(chromosomes))) {
-    call plink2_export_wf.plink2_export_clusters as stage_a {
+    call plink2_export_wf.plink2_export_clusters as export_cluster_vcfs {
       input:
         pgen          = aou_pgen[i],
         pvar          = aou_pvar[i],
@@ -96,21 +100,21 @@ workflow flare_pipeline {
     }
   }
 
-  # stage_a.subset_vcfs has shape [chrom][cluster]; transpose to
+  # export_cluster_vcfs.subset_vcfs has shape [chrom][cluster]; transpose to
   # [cluster][chrom] for downstream FLARE consumption.
   # FLARE auto-discovers <gt_vcf>.tbi from the localized File, so we don't
   # need to wire the index array through the pipeline.
-  Array[Array[File]] by_cluster_vcfs = transpose(stage_a.subset_vcfs)
+  Array[Array[File]] by_cluster_vcfs = transpose(export_cluster_vcfs.subset_vcfs)
 
   # =========================================================================
   # Stages B + C + D: cluster scatter. Keeping these in one outer scatter
-  # gives each cluster shard direct access to its own train output, so
-  # stage C doesn't need to cross-index `train.out_model` by cluster.
+  # gives each cluster shard direct access to its own fit_ancestry_model
+  # output, so stage C doesn't need to cross-index the model by cluster.
   # =========================================================================
   scatter (c in range(length(cluster_ids))) {
 
-    # ---- Stage B: train (em=true) on the model chromosome ----
-    call flare_wf.flare as train {
+    # ---- Stage B: fit_ancestry_model (FLARE em=true) on the model chromosome ----
+    call flare_wf.flare as fit_ancestry_model {
       input:
         ref_vcf       = ref_vcfs[model_chr_idx],
         gt_vcf        = by_cluster_vcfs[c][model_chr_idx],
@@ -126,42 +130,46 @@ workflow flare_pipeline {
         wandb_api_key = wandb_api_key
     }
 
-    # ---- Stage C: apply (em=false) on the other 21 chromosomes ----
+    # ---- Stage C: infer_ancestry (FLARE em=false) on the other chromosomes ----
+    # min_maf / min_mac are restored here — FLARE re-filters variants by
+    # ref-allele-count at apply time too (AdmixReader.minMac validates against
+    # ref sample count regardless of em mode). seed and gen are genuinely
+    # training-only and stay dropped.
     scatter (ci in range(length(chromosomes))) {
       if (ci != model_chr_idx) {
-        call flare_wf.flare as apply {
+        call flare_wf.flare as infer_ancestry {
           input:
             ref_vcf       = ref_vcfs[ci],
             gt_vcf        = by_cluster_vcfs[c][ci],
             map_file      = genetic_maps[ci],
             ref_panel     = ref_panel,
             output_prefix = cluster_ids[c] + "." + chromosomes[ci],
-            model         = train.out_model,
+            model         = fit_ancestry_model.out_model,
             em            = false,
             probs         = probs,
-            seed          = seed,
             min_maf       = min_maf,
             min_mac       = min_mac,
-            gen           = gen,
             wandb_api_key = wandb_api_key
         }
       }
     }
-    # After the inner scatter, apply.anc_vcf is Array[File?] of length 22 —
-    # None at model_chr_idx, File elsewhere. Same for apply.global_anc / log.
+    # After the inner scatter, infer_ancestry.anc_vcf is Array[File?] of
+    # length N_chroms — None at model_chr_idx, File elsewhere. Same for
+    # infer_ancestry.global_anc / log.
 
-    # Re-assemble a full per-chromosome anc-VCF array by slotting train's
-    # output back in at model_chr_idx. select_first picks the File when the
-    # apply slot is set and falls back to train.anc_vcf otherwise (i.e.
-    # exactly at the model chromosome position).
+    # Re-assemble a full per-chromosome anc-VCF array by slotting
+    # fit_ancestry_model's output back in at model_chr_idx. select_first
+    # picks the File when the infer_ancestry slot is set and falls back to
+    # fit_ancestry_model.anc_vcf otherwise (i.e. exactly at the model
+    # chromosome position).
     scatter (ci in range(length(chromosomes))) {
-      File chrom_anc_vcf   = select_first([apply.anc_vcf[ci],   train.anc_vcf])
-      File chrom_qc_report = select_first([apply.qc_report[ci], train.qc_report])
+      File chrom_anc_vcf   = select_first([infer_ancestry.anc_vcf[ci],   fit_ancestry_model.anc_vcf])
+      File chrom_qc_report = select_first([infer_ancestry.qc_report[ci], fit_ancestry_model.qc_report])
     }
 
     # ---- Stage D (optional): concat to WGS anc VCF per cluster ----
     if (do_concat) {
-      call concat_wf.bcftools_concat as concat_cluster {
+      call concat_wf.bcftools_concat as concat_cluster_wgs {
         input:
           vcfs          = chrom_anc_vcf,
           output_prefix = cluster_ids[c] + ".wgs.anc",
@@ -175,9 +183,9 @@ workflow flare_pipeline {
 
   output {
     # Stage B outputs
-    Array[File] cluster_models              = train.out_model
-    Array[File] cluster_model_chr_anc_vcfs  = train.anc_vcf
-    Array[File] cluster_global_anc          = train.global_anc
+    Array[File] cluster_models              = fit_ancestry_model.out_model
+    Array[File] cluster_model_chr_anc_vcfs  = fit_ancestry_model.anc_vcf
+    Array[File] cluster_global_anc          = fit_ancestry_model.global_anc
 
     # Stage C outputs (per cluster, in chromosome order, model chrom slot
     # carries the stage-B anc VCF — same files as cluster_model_chr_anc_vcfs).
@@ -185,7 +193,7 @@ workflow flare_pipeline {
     Array[Array[File]] cluster_qc_reports_per_chrom  = chrom_qc_report
 
     # Stage D outputs (Array[File?] — None entries when do_concat=false).
-    Array[File?] cluster_wgs_anc_vcfs = concat_cluster.concat_vcf
+    Array[File?] cluster_wgs_anc_vcfs = concat_cluster_wgs.concat_vcf
   }
 }
 
