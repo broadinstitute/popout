@@ -18,9 +18,13 @@ version 1.0
 ##                      blanks + `#`-prefixed lines ignored, no FID column)
 ##   cluster_ids      — parallel array of cluster output basenames
 ##
-## Outputs:
-##   subset_vcfs[i]     = <cluster_ids[i]>.<chrom>.vcf.gz
-##   subset_indices[i]  = <cluster_ids[i]>.<chrom>.vcf.gz.tbi
+## Outputs (returned via glob() so Cromwell delocalizes them):
+##   subset_vcfs[i]     = <NNN>_<cluster_ids[i]>.<chrom>.vcf.gz
+##   subset_indices[i]  = <NNN>_<cluster_ids[i]>.<chrom>.vcf.gz.tbi
+##
+## The NNN prefix is the zero-padded input index, present only to anchor
+## glob()'s lexicographic order to cluster_ids[] input order — downstream
+## consumers use the array position, not the filename.
 ##
 ## Resources auto-scale on PGEN size (matches pgen_to_vcf.wdl). Magicwand
 ## instrumented so the first Terra run validates the size→(cpu,mem,disk)
@@ -145,16 +149,19 @@ task plink2_export_clusters_task {
       plink2_export_clusters.memory_gb="$(echo '~{memory}' | awk '{print $1}')" \
       plink2_export_clusters.disk_gb="~{disk_size_gb}"
 
-    : > output_list.txt
-    : > index_list.txt
-    : > per_cluster_timings.tsv
     printf 'cluster_id\tsamples\twall_s\n' > per_cluster_timings.tsv
 
+    # Output basenames are prefixed with the zero-padded input index so glob()
+    # at task-output time returns files in cluster_ids[] order (which the
+    # workflow relies on via transpose(stage_a.subset_vcfs) → by_cluster_vcfs[c]
+    # ↔ cluster_ids[c]). Without the prefix, glob's lexicographic order would
+    # silently desync from input order whenever cluster_ids is non-alphabetical.
     for i in "${!CLUSTER_IDS[@]}"; do
       cid="${CLUSTER_IDS[$i]}"
+      idx=$(printf '%03d' "$i")
       keep="$KEEP_DIR/${cid}.keep"
       n_samples="${PER_CLUSTER_SIZES[$i]}"
-      out_prefix="$OUT_DIR/${cid}.${CHROM_LABEL}"
+      out_prefix="$OUT_DIR/${idx}_${cid}.${CHROM_LABEL}"
 
       echo "===== plink2 export: cluster=$cid samples=$n_samples ====="
       cluster_start=$(date +%s.%N)
@@ -171,16 +178,14 @@ task plink2_export_clusters_task {
 
       bcftools index --tbi --threads ~{cpu} "${out_prefix}.vcf.gz"
 
-      echo "$PWD/${out_prefix}.vcf.gz"     >> output_list.txt
-      echo "$PWD/${out_prefix}.vcf.gz.tbi" >> index_list.txt
       printf '%s\t%s\t%s\n' "$cid" "$n_samples" "$wall_s" >> per_cluster_timings.tsv
 
       magicwand log \
         "plink2_export_clusters.cluster_wall_s.${cid}=$wall_s"
     done
 
-    OUTPUT_COUNT=$(wc -l < output_list.txt | tr -d ' ')
-    TOTAL_OUTPUT_BYTES=$(xargs -d '\n' -a output_list.txt stat -c %s | awk '{s+=$1} END {print s+0}')
+    OUTPUT_COUNT=$(ls -1 "$OUT_DIR"/*.vcf.gz | wc -l | tr -d ' ')
+    TOTAL_OUTPUT_BYTES=$(stat -c %s "$OUT_DIR"/*.vcf.gz | awk '{s+=$1} END {print s+0}')
     DISK_USED_BYTES=$(du -sb "$OUT_DIR" 2>/dev/null | awk '{print $1}')
     # /proc/self/status VmHWM is in KiB (man proc(5)).
     PEAK_RSS_KB=$(awk '/^VmHWM:/ {print $2}' /proc/self/status 2>/dev/null || echo 0)
@@ -199,9 +204,13 @@ task plink2_export_clusters_task {
   >>>
 
   output {
-    Array[File] subset_vcfs           = read_lines("output_list.txt")
-    Array[File] subset_indices        = read_lines("index_list.txt")
-    File        per_cluster_timings   = "per_cluster_timings.tsv"
+    # glob() is the WDL output pattern Cromwell handles via dynamic post-task
+    # delocalization. `Array[File] = read_lines(manifest)` does NOT — the
+    # delocalize script is a static array baked pre-task, so manifest contents
+    # are invisible to it and the listed files silently never reach GCS.
+    Array[File] subset_vcfs         = glob("out/*.vcf.gz")
+    Array[File] subset_indices      = glob("out/*.vcf.gz.tbi")
+    File        per_cluster_timings = "per_cluster_timings.tsv"
   }
 
   runtime {
