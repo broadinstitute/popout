@@ -16,7 +16,7 @@ A single `miniwdl run` exercises every stage and helper in the pipeline:
 - Stage B — FLARE `em=true` (train, produces `.model`)
 - Stage C — FLARE `em=false model=…` (apply, reuses train's model)
 - `select_first([apply.anc_vcf[ci], train.anc_vcf])` model-chrom slot-back
-- Stage D — `bcftools concat --naive`
+- Stage D — `bcftools merge` per chromosome (column-wise across clusters)
 - `magicwand` bootstrap (offline W&B, no `wandb_api_key` needed)
 
 Dimensions: 2 chromosomes (`chr20`, `chr21`), 24 target samples in 4 clusters,
@@ -39,15 +39,15 @@ The generator overwrites `data/synthetic_flare/` (gitignored). A fresh
 
 ## Verify outputs
 
-Each of the 4 clusters should produce one WGS anc VCF with:
-- 6 samples (cluster partition size)
-- ~900–1000 records spanning both `chr20` and `chr21`
+Each chromosome should produce one merged anc VCF with:
+- 24 samples (union of all 4 clusters)
+- ~450–500 records (one chrom's worth)
 - `AN1` and `AN2` FORMAT fields (FLARE hard-call ancestry)
 
 ```bash
-F=/tmp/miniwdl_flare_smoke/<run-id>/out/cluster_wgs_anc_vcfs/0/cluster_a.wgs.anc.vcf.gz
-bcftools query -l "$F" | wc -l                      # → 6
-bcftools view -H "$F" | cut -f1 | sort -u           # → chr20, chr21
+F=/tmp/miniwdl_flare_smoke/<run-id>/out/chrom_anc_vcfs/0/chr20.anc.vcf.gz
+bcftools query -l "$F" | wc -l                      # → 24
+bcftools view -H "$F" | cut -f1 | sort -u           # → chr20
 bcftools view -h "$F" | grep '^##FORMAT'            # → GT, AN1, AN2
 ```
 

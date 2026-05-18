@@ -13,17 +13,18 @@ version 1.0
 ##                                              model chromosome
 ##   C. flare em=false:    scatter[cluster x non-model-chrom]
 ##                                           -> anc VCF using model from B
-##   D. bcftools concat:   scatter[cluster]  -> one WGS anc VCF per cluster
-##                                              (optional, do_concat input)
+##   D. bcftools merge:    scatter[chrom]    -> one per-chrom anc VCF with
+##                                              the union of all clusters'
+##                                              samples (optional, do_merge)
 ##
-## Total task invocations for the AoU v9 + k=15 plan: 22 + 15 + 15*21 + 15 = 367.
+## Total task invocations for the AoU v9 + k=15 plan: 22 + 15 + 15*21 + 22 = 374.
 ## A single Cromwell run handles that scale; call-caching covers retries.
 ##
 ## Recommendations from the design doc surface here as input defaults
 ## rather than hardwires, so they can be overridden per run without
 ## editing the WDL.
 
-import "../../bcftools/wdl/bcftools_concat.wdl" as concat_wf
+import "../../bcftools/wdl/bcftools_merge.wdl" as merge_wf
 import "../../plink2/wdl/plink2_export_clusters.wdl" as plink2_export_wf
 import "./flare.wdl" as flare_wf
 
@@ -65,7 +66,7 @@ workflow flare_pipeline {
     Int?    gen
 
     # ---- Stage D toggle ----------------------------------------------
-    Boolean do_concat        = true
+    Boolean do_merge         = true
 
     # ---- Observability -----------------------------------------------
     String? wandb_api_key
@@ -107,9 +108,9 @@ workflow flare_pipeline {
   Array[Array[File]] by_cluster_vcfs = transpose(export_cluster_vcfs.subset_vcfs)
 
   # =========================================================================
-  # Stages B + C + D: cluster scatter. Keeping these in one outer scatter
-  # gives each cluster shard direct access to its own fit_ancestry_model
-  # output, so stage C doesn't need to cross-index the model by cluster.
+  # Stages B + C: cluster scatter. Keeping these in one outer scatter gives
+  # each cluster shard direct access to its own fit_ancestry_model output, so
+  # stage C doesn't need to cross-index the model by cluster.
   # =========================================================================
   scatter (c in range(length(cluster_ids))) {
 
@@ -166,16 +167,27 @@ workflow flare_pipeline {
       File chrom_anc_vcf   = select_first([infer_ancestry.anc_vcf[ci],   fit_ancestry_model.anc_vcf])
       File chrom_qc_report = select_first([infer_ancestry.qc_report[ci], fit_ancestry_model.qc_report])
     }
+  }
 
-    # ---- Stage D (optional): concat to WGS anc VCF per cluster ----
-    if (do_concat) {
-      call concat_wf.bcftools_concat as concat_cluster_wgs {
+  # =========================================================================
+  # Stage D: per-chromosome cross-cluster merge.
+  #
+  # After the cluster scatter, chrom_anc_vcf has shape [cluster][chrom].
+  # Each (cluster, chrom) anc VCF covers a disjoint sample subset at the
+  # same chrom-wide variant positions, so combining clusters within a chrom
+  # is a column-wise merge — `bcftools merge`, not `bcftools concat`. The
+  # delivery shape matches the input (one VCF per chrom, all 535K samples).
+  # =========================================================================
+  Array[Array[File]] anc_vcfs_by_chrom = transpose(chrom_anc_vcf)
+
+  if (do_merge) {
+    scatter (ci in range(length(chromosomes))) {
+      call merge_wf.bcftools_merge as merge_chrom_anc {
         input:
-          vcfs          = chrom_anc_vcf,
-          output_prefix = cluster_ids[c] + ".wgs.anc",
+          vcfs          = anc_vcfs_by_chrom[ci],
+          output_prefix = chromosomes[ci] + ".anc",
           output_type   = "z",
           write_index   = true,
-          naive         = true,    # FLARE writes identical headers across chroms
           wandb_api_key = wandb_api_key
       }
     }
@@ -192,8 +204,9 @@ workflow flare_pipeline {
     Array[Array[File]] cluster_anc_vcfs_per_chrom    = chrom_anc_vcf
     Array[Array[File]] cluster_qc_reports_per_chrom  = chrom_qc_report
 
-    # Stage D outputs (Array[File?] — None entries when do_concat=false).
-    Array[File?] cluster_wgs_anc_vcfs = concat_cluster_wgs.concat_vcf
+    # Stage D outputs: per-chrom merged anc VCFs (one per chrom, all clusters'
+    # samples). None when do_merge=false.
+    Array[File]? chrom_anc_vcfs = merge_chrom_anc.merged_vcf
   }
 }
 

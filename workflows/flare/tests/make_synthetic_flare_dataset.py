@@ -239,7 +239,7 @@ def main() -> int:
         "flare_pipeline.model_chromosome":     "chr20",
         "flare_pipeline.seed":                 12345,
         "flare_pipeline.probs":                False,
-        "flare_pipeline.do_concat":            True,
+        "flare_pipeline.do_merge":             True,
         # FLARE defaults (min-mac=50, min-maf=0.005) are tuned for biobank-
         # scale ref panels; our 15-sample synthetic panel needs much looser
         # thresholds so the variants aren't all filtered out.
