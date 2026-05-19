@@ -34,7 +34,7 @@ task bcftools_merge_task {
     String?  memory_override
     Int?     disk_size_gb_override
     String   disk_type    = "HDD"
-    Int      preemptible  = 0
+    Int      preemptible  = 1
 
     # Observability (magicwand -> W&B). Optional API key for online tracking.
     String?  wandb_api_key
@@ -47,9 +47,17 @@ task bcftools_merge_task {
                    else if output_type == "v" then "vcf"
                    else "bcf"
 
-  Int    cpu          = select_first([cpu_override, 16])
-  String memory       = select_first([memory_override, "16 GB"])
-  Int    disk_size_gb = select_first([disk_size_gb_override, 500])
+  # bcftools merge is mostly I/O-bound (stream-read each input, stream-write
+  # the merged output); 8 CPU saturates the merge thread pool comfortably.
+  Int    cpu = select_first([cpu_override, 8])
+  String memory = select_first([memory_override, "16 GB"])
+
+  # Disk = inputs + merged output (roughly same scale) + slack. At AoU
+  # scale, chr1's 16 cluster inputs total ~11 TB and the merged output is
+  # comparable, so the prior 500 GB literal would have OOM'd silently.
+  Float  total_input_gb = size(vcfs, "GB")
+  Int    auto_disk      = ceil(total_input_gb * 2.5) + 50
+  Int    disk_size_gb   = select_first([disk_size_gb_override, auto_disk])
 
   command <<<
     set -euo pipefail
@@ -132,7 +140,7 @@ workflow bcftools_merge {
     String?  memory_override
     Int?     disk_size_gb_override
     String   disk_type    = "HDD"
-    Int      preemptible  = 0
+    Int      preemptible  = 1
 
     String?  wandb_api_key
 

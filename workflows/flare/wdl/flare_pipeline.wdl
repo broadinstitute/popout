@@ -82,30 +82,33 @@ workflow flare_pipeline {
   Int model_chr_idx = find_chrom_index.idx
 
   # =========================================================================
-  # Stage A: per-chromosome plink2 export, K clusters per task.
+  # Stage A: per-(chrom × cluster) plink2 export.
   #
-  # plink2 reads the chrom's PGEN matrix once (column-major binary), then
-  # writes K bgzipped VCFs via `--keep <cluster> --export vcf-4.2 bgz`.
-  # One task per chromosome — no sub-chrom scatter, no inter-partition
-  # gather, no streaming-bytes drama.
+  # Each shard runs one plink2 --keep --export for a single (chrom, cluster)
+  # pair. K=16 clusters now scatter in parallel per chrom instead of looping
+  # serially inside one big VM. Right-sized at 4 CPU / 16 GB HDD, preemptible
+  # — see plink2_export_clusters.wdl for the W&B-backed sizing rationale.
   # =========================================================================
   scatter (i in range(length(chromosomes))) {
-    call plink2_export_wf.plink2_export_clusters as export_cluster_vcfs {
-      input:
-        pgen          = aou_pgen[i],
-        pvar          = aou_pvar[i],
-        psam          = aou_psam[i],
-        sample_groups = cluster_sample_lists,
-        cluster_ids   = cluster_ids,
-        wandb_api_key = wandb_api_key
+    scatter (c in range(length(cluster_ids))) {
+      call plink2_export_wf.plink2_export_clusters as export_cluster_vcfs {
+        input:
+          pgen                = aou_pgen[i],
+          pvar                = aou_pvar[i],
+          psam                = aou_psam[i],
+          cluster_sample_list = cluster_sample_lists[c],
+          cluster_id          = cluster_ids[c],
+          wandb_api_key       = wandb_api_key
+      }
     }
   }
 
-  # export_cluster_vcfs.subset_vcfs has shape [chrom][cluster]; transpose to
-  # [cluster][chrom] for downstream FLARE consumption.
+  # The nested scatter gives export_cluster_vcfs.subset_vcf shape
+  # [chrom][cluster] directly; transpose to [cluster][chrom] for downstream
+  # FLARE consumption.
   # FLARE auto-discovers <gt_vcf>.tbi from the localized File, so we don't
   # need to wire the index array through the pipeline.
-  Array[Array[File]] by_cluster_vcfs = transpose(export_cluster_vcfs.subset_vcfs)
+  Array[Array[File]] by_cluster_vcfs = transpose(export_cluster_vcfs.subset_vcf)
 
   # =========================================================================
   # Stages B + C: cluster scatter. Keeping these in one outer scatter gives
@@ -150,6 +153,7 @@ workflow flare_pipeline {
             probs         = probs,
             min_maf       = min_maf,
             min_mac       = min_mac,
+            preemptible   = 1,
             wandb_api_key = wandb_api_key
         }
       }

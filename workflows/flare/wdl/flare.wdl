@@ -69,22 +69,28 @@ task flare_task {
   # with ref-panel size and variants, while the gt sample loop is the
   # parallel work that benefits from nthreads.
   #
-  #   < 20 GB gt:    8 CPU,  32 GB mem, -Xmx 24g
-  #   20-50 GB gt:  16 CPU,  64 GB mem, -Xmx 56g
-  #   50-100 GB gt: 32 CPU, 128 GB mem, -Xmx 120g
-  #   > 100 GB gt:  48 CPU, 192 GB mem, -Xmx 180g
-  Int auto_cpu = if gt_gb > 100.0 then 48
-                 else if gt_gb > 50.0 then 32
-                 else if gt_gb > 20.0 then 16
-                 else 8
-  String auto_memory = if gt_gb > 100.0 then "192 GB"
-                       else if gt_gb > 50.0 then "128 GB"
-                       else if gt_gb > 20.0 then "64 GB"
-                       else "32 GB"
-  Int auto_xmx_gb = if gt_gb > 100.0 then 180
-                    else if gt_gb > 50.0 then 120
-                    else if gt_gb > 20.0 then 56
-                    else 24
+  # Trimmed from the original 8/16/32/48 CPU table after W&B telemetry
+  # from chr21/22 showed 212 MB peak memory on 32 GB allocation (150×
+  # headroom) and 42 % CPU on 8 cores. Smallest bucket is trimmed by 50 %
+  # because it's the only one with empirical backing; larger buckets get
+  # a smaller trim until we have chr1-scale telemetry.
+  #
+  #   < 20 GB gt:    4 CPU,  16 GB mem, -Xmx 12g
+  #   20-50 GB gt:   8 CPU,  32 GB mem, -Xmx 24g
+  #   50-100 GB gt: 16 CPU,  64 GB mem, -Xmx 56g
+  #   > 100 GB gt:  32 CPU, 128 GB mem, -Xmx 120g
+  Int auto_cpu = if gt_gb > 100.0 then 32
+                 else if gt_gb > 50.0 then 16
+                 else if gt_gb > 20.0 then 8
+                 else 4
+  String auto_memory = if gt_gb > 100.0 then "128 GB"
+                       else if gt_gb > 50.0 then "64 GB"
+                       else if gt_gb > 20.0 then "32 GB"
+                       else "16 GB"
+  Int auto_xmx_gb = if gt_gb > 100.0 then 120
+                    else if gt_gb > 50.0 then 56
+                    else if gt_gb > 20.0 then 24
+                    else 12
 
   # Disk: ref + gt + output. .anc.vcf.gz is ~1.5-2x gt size, ~3x with probs.
   Float output_multiplier = if probs then 4.0 else 2.5
