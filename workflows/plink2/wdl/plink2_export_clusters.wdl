@@ -61,11 +61,28 @@ task plink2_export_clusters_task {
   String memory       = select_first([memory_override, "16 GB"])
 
   Float pgen_gb = size(pgen, "GB")
-  # Disk = PGEN + worst-case per-cluster VCF.gz output. The per-cluster
-  # output/pgen ratio on chr20 was ~40×; 50× is a generous upper bound.
-  # Override per-task after the first green run trims this against actual
-  # output_bytes from W&B.
-  Int    auto_disk    = ceil(pgen_gb * 50) + 30
+
+  # Disk = PGEN + this cluster's VCF.gz output + slack.
+  #
+  # Prior formula `ceil(pgen_gb * 50) + 30` was sized for the worst-case
+  # output of a single chrom's BIGGEST cluster, applied uniformly to every
+  # (chrom, cluster) task. For small clusters it over-allocated ~35×.
+  # Output size scales with cluster_samples × variants; both are estimable
+  # from input file sizes (size() returns MB as Float):
+  #   est_samples  = sample_list_MB · 1e6 / 8 bytes-per-sample
+  #     (AoU sample IDs `TGT_NNNNN\n` = exactly 8 bytes/line for this cohort)
+  #   est_variants = pvar_MB · 1e6 / 100 bytes-per-variant
+  #     (empirical ~98-100 bytes/variant in plink2 pvar text format)
+  #   est_output_gb = est_samples · est_variants · 0.23 byte/call / 1e9
+  # The 1.5× safety factor on output absorbs cluster-size and bytes/call
+  # variation; the 1.2× on pgen leaves room for the symlinked triplet.
+  Float sample_list_mb = size(cluster_sample_list, "MB")
+  Float pvar_mb        = size(pvar, "MB")
+  Int   est_samples    = ceil(sample_list_mb * 125000.0)
+  Int   est_variants   = ceil(pvar_mb * 10000.0)
+  Float est_output_gb  = est_samples * est_variants * 0.23 / 1000000000.0
+
+  Int    auto_disk    = ceil(pgen_gb * 1.2 + est_output_gb * 1.5) + 20
   Int    disk_size_gb = select_first([disk_size_gb_override, auto_disk])
 
   command <<<
@@ -107,6 +124,9 @@ task plink2_export_clusters_task {
       plink2_export_clusters.chrom_label="$CHROM_LABEL" \
       plink2_export_clusters.cluster_id="~{cluster_id}" \
       plink2_export_clusters.cluster_samples="$N_SAMPLES" \
+      plink2_export_clusters.est_samples="~{est_samples}" \
+      plink2_export_clusters.est_variants="~{est_variants}" \
+      plink2_export_clusters.est_output_gb="~{est_output_gb}" \
       plink2_export_clusters.pgen_bytes="$PGEN_BYTES" \
       plink2_export_clusters.cpu="~{cpu}" \
       plink2_export_clusters.memory_gb="$(echo '~{memory}' | awk '{print $1}')" \
