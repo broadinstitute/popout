@@ -69,18 +69,28 @@ task plink2_export_clusters_task {
   # (chrom, cluster) task. For small clusters it over-allocated ~35×.
   # Output size scales with cluster_samples × variants; both are estimable
   # from input file sizes (size() returns MB as Float):
-  #   est_samples  = sample_list_MB · 1e6 / 8 bytes-per-sample
+  #   samples_f  = sample_list_MB · 1e6 / 8 bytes-per-sample
   #     (AoU sample IDs `TGT_NNNNN\n` = exactly 8 bytes/line for this cohort)
-  #   est_variants = pvar_MB · 1e6 / 100 bytes-per-variant
+  #   variants_f = pvar_MB · 1e6 / 100 bytes-per-variant
   #     (empirical ~98-100 bytes/variant in plink2 pvar text format)
-  #   est_output_gb = est_samples · est_variants · 0.23 byte/call / 1e9
-  # The 1.5× safety factor on output absorbs cluster-size and bytes/call
-  # variation; the 1.2× on pgen leaves room for the symlinked triplet.
+  #   est_output_gb = samples_f · variants_f · 0.10 byte/call / 1e9
+  # The 0.10 byte/call constant covers the empirical max of 0.091 (W&B,
+  # 225 finished shards across chr1-chr21). The 1.5× safety factor on top
+  # absorbs the cluster-to-cluster variance; the 1.2× on pgen leaves room
+  # for the symlinked triplet.
+  #
+  # The intermediate products MUST be Float — at AoU scale (~60K samples
+  # × ~60M variants) the product is 3.6e12, which overflows Cromwell's
+  # Int representation and silently zeroes out est_output_gb.
   Float sample_list_mb = size(cluster_sample_list, "MB")
   Float pvar_mb        = size(pvar, "MB")
-  Int   est_samples    = ceil(sample_list_mb * 125000.0)
-  Int   est_variants   = ceil(pvar_mb * 10000.0)
-  Float est_output_gb  = est_samples * est_variants * 0.23 / 1000000000.0
+  Float samples_f      = sample_list_mb * 125000.0
+  Float variants_f     = pvar_mb * 10000.0
+  Float est_output_gb  = samples_f * variants_f * 0.10 / 1000000000.0
+
+  # Int versions just for logging.
+  Int   est_samples    = ceil(samples_f)
+  Int   est_variants   = ceil(variants_f)
 
   Int    auto_disk    = ceil(pgen_gb * 1.2 + est_output_gb * 1.5) + 20
   Int    disk_size_gb = select_first([disk_size_gb_override, auto_disk])
