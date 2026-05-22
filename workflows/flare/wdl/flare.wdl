@@ -66,31 +66,35 @@ task flare_task {
   Boolean effective_em = if defined(model) then false else em
 
   # Auto-scale on gt VCF size. FLARE is JVM-resident: HMM state scales
-  # with ref-panel size and variants, while the gt sample loop is the
-  # parallel work that benefits from nthreads.
+  # with ref-panel size × variants, NOT with gt_vcf_bytes. At AoU per-
+  # cluster scale gt_vcf is always small (0.5–3 GB for typical clusters
+  # post-plink2-export), so 134 of 144 production runs land in <20 GB.
+  # The earlier trim to 4 CPU / 16 GB / -Xmx 12g on that bucket produced
+  # a 27.6 % OOM crash rate (W&B project=flare, May 22 2026 run).
+  # Bumping every bucket; the small bucket gets a bigger bump because
+  # that's where the real production cohort sits.
   #
-  # Trimmed from the original 8/16/32/48 CPU table after W&B telemetry
-  # from chr21/22 showed 212 MB peak memory on 32 GB allocation (150×
-  # headroom) and 42 % CPU on 8 cores. Smallest bucket is trimmed by 50 %
-  # because it's the only one with empirical backing; larger buckets get
-  # a smaller trim until we have chr1-scale telemetry.
+  # The -Xmx leaves ~25 % of physical memory for FLARE's native / off-heap
+  # working set (zstd buffers, htslib reader buffers, JNI), which is the
+  # missing factor that turned 16 GB physical into "JVM ran fine until
+  # native alloc killed the process" for the trimmed small bucket.
   #
-  #   < 20 GB gt:    4 CPU,  16 GB mem, -Xmx 12g
-  #   20-50 GB gt:   8 CPU,  32 GB mem, -Xmx 24g
-  #   50-100 GB gt: 16 CPU,  64 GB mem, -Xmx 56g
-  #   > 100 GB gt:  32 CPU, 128 GB mem, -Xmx 120g
+  #   < 20 GB gt:    8 CPU,  48 GB mem, -Xmx 36g
+  #   20-50 GB gt:  16 CPU,  64 GB mem, -Xmx 48g
+  #   50-100 GB gt: 24 CPU, 128 GB mem, -Xmx 96g
+  #   > 100 GB gt:  32 CPU, 192 GB mem, -Xmx 144g
   Int auto_cpu = if gt_gb > 100.0 then 32
-                 else if gt_gb > 50.0 then 16
-                 else if gt_gb > 20.0 then 8
-                 else 4
-  String auto_memory = if gt_gb > 100.0 then "128 GB"
-                       else if gt_gb > 50.0 then "64 GB"
-                       else if gt_gb > 20.0 then "32 GB"
-                       else "16 GB"
-  Int auto_xmx_gb = if gt_gb > 100.0 then 120
-                    else if gt_gb > 50.0 then 56
-                    else if gt_gb > 20.0 then 24
-                    else 12
+                 else if gt_gb > 50.0 then 24
+                 else if gt_gb > 20.0 then 16
+                 else 8
+  String auto_memory = if gt_gb > 100.0 then "192 GB"
+                       else if gt_gb > 50.0 then "128 GB"
+                       else if gt_gb > 20.0 then "64 GB"
+                       else "48 GB"
+  Int auto_xmx_gb = if gt_gb > 100.0 then 144
+                    else if gt_gb > 50.0 then 96
+                    else if gt_gb > 20.0 then 48
+                    else 36
 
   # Disk: ref + gt + output. .anc.vcf.gz is ~1.5-2x gt size, ~3x with probs.
   Float output_multiplier = if probs then 4.0 else 2.5
@@ -202,10 +206,17 @@ task flare_task {
     ) || true
     # -----------------------------------------------------------------
 
+    # Capture peak process RSS so we can tune the bucket table without
+    # depending on W&B's system-metric history fetch (which doesn't
+    # always survive a crashed run).
+    PEAK_RSS_KB=$(awk '/^VmHWM:/ {print $2}' /proc/self/status 2>/dev/null || echo 0)
+    PEAK_RSS_GB=$(awk -v k="$PEAK_RSS_KB" 'BEGIN {printf "%.3f", k/1048576}')
+
     # Pull a few QC headlines into magicwand too. Each subshell falls
     # back to empty on failure; magicwand is tolerant of empty values.
     qc_get() { awk -F'\t' -v k="$1" '$1==k {print $2; exit}' "$QC" 2>/dev/null; }
     magicwand log \
+      flare.peak_rss_gb="$PEAK_RSS_GB" \
       flare.output_anc_vcf_bytes="$(stat -c %s ~{output_prefix}.anc.vcf.gz 2>/dev/null)" \
       flare.output_global_anc_bytes="$(stat -c %s ~{output_prefix}.global.anc.gz 2>/dev/null)" \
       flare.output_model_bytes="$(stat -c %s ~{output_prefix}.model 2>/dev/null)" \
