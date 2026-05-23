@@ -65,36 +65,62 @@ task flare_task {
   # W&B reflects what FLARE will actually do.
   Boolean effective_em = if defined(model) then false else em
 
-  # Auto-scale on gt VCF size. FLARE is JVM-resident: HMM state scales
-  # with ref-panel size × variants, NOT with gt_vcf_bytes. At AoU per-
-  # cluster scale gt_vcf is always small (0.5–3 GB for typical clusters
-  # post-plink2-export), so 134 of 144 production runs land in <20 GB.
-  # The earlier trim to 4 CPU / 16 GB / -Xmx 12g on that bucket produced
-  # a 27.6 % OOM crash rate (W&B project=flare, May 22 2026 run).
-  # Bumping every bucket; the small bucket gets a bigger bump because
-  # that's where the real production cohort sits.
+  # Auto-scale on gt VCF size. FLARE's JVM heap actually scales with
+  # ref_haps × samples × variants (the IBS-haplotype index built in
+  # admix.IbsHaps.<init>), not gt_vcf_bytes. At fixed AoU ref panel
+  # size (~4151 samples = 8302 haps), heap is approximately linear in
+  # gt_gb at the rate:
   #
-  # The -Xmx leaves ~25 % of physical memory for FLARE's native / off-heap
-  # working set (zstd buffers, htslib reader buffers, JNI), which is the
-  # missing factor that turned 16 GB physical into "JVM ran fine until
-  # native alloc killed the process" for the trimmed small bucket.
+  #   peak_heap_gb ≈ gt_gb × 2.2     (empirical, AoU-tuned)
   #
+  # Calibration points (W&B project=flare, May 22-23 2026):
+  #   gt 9.4 GB train  → peak 28.8 GB heap (3.05 GB/GB)
+  #   gt 48 GB train   → OOM at -Xmx 48g, needed ≥ 105 GB (≥ 2.2 GB/GB)
+  # 2.2 is the lower-bound rate observed at biobank scale; safety factor
+  # below absorbs the slope variance.
+  #
+  # The structure below preserves Cromwell call-cache hits for tasks
+  # that already succeeded: a bucket table (verbatim from the 1280016
+  # commit) supplies the OLD command-line value when the predicted heap
+  # fits the bucket. When the prediction exceeds the bucket, we scale
+  # up — the command body changes, cache misses, but those tasks need
+  # to re-run anyway because they were OOM'ing.
+  #
+  # Bucket-table defaults (kept identical to 1280016 so old commands
+  # match exactly when the bucket wins):
   #   < 20 GB gt:    8 CPU,  48 GB mem, -Xmx 36g
   #   20-50 GB gt:  16 CPU,  64 GB mem, -Xmx 48g
   #   50-100 GB gt: 24 CPU, 128 GB mem, -Xmx 96g
   #   > 100 GB gt:  32 CPU, 192 GB mem, -Xmx 144g
-  Int auto_cpu = if gt_gb > 100.0 then 32
-                 else if gt_gb > 50.0 then 24
-                 else if gt_gb > 20.0 then 16
-                 else 8
-  String auto_memory = if gt_gb > 100.0 then "192 GB"
-                       else if gt_gb > 50.0 then "128 GB"
-                       else if gt_gb > 20.0 then "64 GB"
-                       else "48 GB"
-  Int auto_xmx_gb = if gt_gb > 100.0 then 144
-                    else if gt_gb > 50.0 then 96
-                    else if gt_gb > 20.0 then 48
-                    else 36
+  Int bucket_cpu = if gt_gb > 100.0 then 32
+                   else if gt_gb > 50.0 then 24
+                   else if gt_gb > 20.0 then 16
+                   else 8
+  Int bucket_mem_gb = if gt_gb > 100.0 then 192
+                      else if gt_gb > 50.0 then 128
+                      else if gt_gb > 20.0 then 64
+                      else 48
+  Int bucket_xmx_gb = if gt_gb > 100.0 then 144
+                      else if gt_gb > 50.0 then 96
+                      else if gt_gb > 20.0 then 48
+                      else 36
+
+  # Predicted sizing — used only when it exceeds the bucket value.
+  # 1.3× on the empirical heap prediction is a 30% safety factor;
+  # 1.34× converts heap → physical memory (leaves ~25% for off-heap).
+  # Divide by 8 GB/CPU = n2-custom's max memory-to-vCPU ratio.
+  Float predicted_heap_gb = gt_gb * 2.2
+  Int   sized_xmx_gb      = ceil(predicted_heap_gb * 1.3)
+  Int   sized_mem_gb      = ceil(sized_xmx_gb * 1.34)
+  Int   sized_cpu         = ceil(sized_mem_gb * 1.0 / 8.0)
+
+  # max(bucket, sized). When bucket wins, command body is byte-identical
+  # to the 1280016 version → cache hit. When sized wins, the command
+  # changes → cache miss, but that task needed re-sizing.
+  Int    auto_cpu       = if sized_cpu    > bucket_cpu    then sized_cpu    else bucket_cpu
+  Int    auto_xmx_gb    = if sized_xmx_gb > bucket_xmx_gb then sized_xmx_gb else bucket_xmx_gb
+  Int    auto_mem_int   = if sized_mem_gb > bucket_mem_gb then sized_mem_gb else bucket_mem_gb
+  String auto_memory    = "~{auto_mem_int} GB"
 
   # Disk: ref + gt + output. .anc.vcf.gz is ~1.5-2x gt size, ~3x with probs.
   Float output_multiplier = if probs then 4.0 else 2.5
