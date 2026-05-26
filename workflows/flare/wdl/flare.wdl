@@ -181,75 +181,17 @@ task flare_task {
 
     ls -lh ~{output_prefix}.*
 
-    # ---- Coverage QC: informative-only, never fails the task --------
-    # FLARE can exit 0 while producing a header-only anc VCF when the ref
-    # panel and gt VCF share no markers after min-mac/min-maf filtering.
-    # We compare sample / record counts (overall + per-chrom) between the
-    # input gt_vcf and the .anc.vcf.gz output and write a TSV plus stderr
-    # report. The entire block is wrapped in a subshell with strict mode
-    # disabled and a trailing `|| true`, so a bad zcat/awk/tee cannot
-    # tank a multi-hour analysis run.
-    QC=~{output_prefix}.qc.tsv
-    touch "$QC"
-    (
-      set +eu
-      set +o pipefail
-
-      gt_vcf=~{gt_vcf}
-      out_vcf=~{output_prefix}.anc.vcf.gz
-
-      gt_samples=$(zcat "$gt_vcf"  2>/dev/null | awk '/^#CHROM/ {print NF-9; exit}' 2>/dev/null)
-      out_samples=$(zcat "$out_vcf" 2>/dev/null | awk '/^#CHROM/ {print NF-9; exit}' 2>/dev/null)
-      gt_records=$(zcat "$gt_vcf"  2>/dev/null | awk '!/^#/' 2>/dev/null | wc -l 2>/dev/null | tr -d ' ')
-      out_records=$(zcat "$out_vcf" 2>/dev/null | awk '!/^#/' 2>/dev/null | wc -l 2>/dev/null | tr -d ' ')
-
-      {
-        printf 'gt_samples\t%s\n'  "${gt_samples:-unknown}"
-        printf 'out_samples\t%s\n' "${out_samples:-unknown}"
-        printf 'gt_records\t%s\n'  "${gt_records:-unknown}"
-        printf 'out_records\t%s\n' "${out_records:-unknown}"
-        zcat "$gt_vcf"  2>/dev/null | awk '!/^#/ {c[$1]++} END {for (k in c) printf "gt_records.%s\t%s\n",  k, c[k]}' 2>/dev/null | sort
-        zcat "$out_vcf" 2>/dev/null | awk '!/^#/ {c[$1]++} END {for (k in c) printf "out_records.%s\t%s\n", k, c[k]}' 2>/dev/null | sort
-      } > "$QC" 2>/dev/null
-
-      echo "===== FLARE coverage QC for ~{output_prefix} =====" >&2
-      cat "$QC" >&2 2>/dev/null
-      echo "==================================================" >&2
-
-      # Plain-English interpretation. Numeric comparisons guarded with `2>/dev/null`
-      # so non-numeric ${var:-unknown} fallbacks can't trigger an arithmetic error.
-      if [ "${out_records:-0}" = "0" ] 2>/dev/null; then
-        echo "QC WARNING: FLARE produced 0 output records — likely zero shared markers between ref and gt after min-mac/min-maf filtering." >&2
-      fi
-      if [ -n "$gt_samples" ] && [ -n "$out_samples" ] && [ "$gt_samples" != "$out_samples" ]; then
-        echo "QC WARNING: output has $out_samples samples vs $gt_samples in input — investigate." >&2
-      fi
-      if [ -n "$gt_records" ] && [ -n "$out_records" ]; then
-        ratio=$(awk -v a="$out_records" -v b="$gt_records" 'BEGIN { if (b+0 > 0) printf "%.3f", (a+0)/(b+0); else print "n/a" }' 2>/dev/null)
-        echo "QC INFO: out/gt record ratio = ${ratio:-n/a}" >&2
-      fi
-      exit 0
-    ) || true
-    # -----------------------------------------------------------------
-
     # Capture peak process RSS so we can tune the bucket table without
     # depending on W&B's system-metric history fetch (which doesn't
     # always survive a crashed run).
     PEAK_RSS_KB=$(awk '/^VmHWM:/ {print $2}' /proc/self/status 2>/dev/null || echo 0)
     PEAK_RSS_GB=$(awk -v k="$PEAK_RSS_KB" 'BEGIN {printf "%.3f", k/1048576}')
 
-    # Pull a few QC headlines into magicwand too. Each subshell falls
-    # back to empty on failure; magicwand is tolerant of empty values.
-    qc_get() { awk -F'\t' -v k="$1" '$1==k {print $2; exit}' "$QC" 2>/dev/null; }
     magicwand log \
       flare.peak_rss_gb="$PEAK_RSS_GB" \
       flare.output_anc_vcf_bytes="$(stat -c %s ~{output_prefix}.anc.vcf.gz 2>/dev/null)" \
       flare.output_global_anc_bytes="$(stat -c %s ~{output_prefix}.global.anc.gz 2>/dev/null)" \
-      flare.output_model_bytes="$(stat -c %s ~{output_prefix}.model 2>/dev/null)" \
-      flare.qc.gt_samples="$(qc_get gt_samples)" \
-      flare.qc.out_samples="$(qc_get out_samples)" \
-      flare.qc.gt_records="$(qc_get gt_records)" \
-      flare.qc.out_records="$(qc_get out_records)" || true
+      flare.output_model_bytes="$(stat -c %s ~{output_prefix}.model 2>/dev/null)" || true
   >>>
 
   output {
@@ -257,7 +199,6 @@ task flare_task {
     File global_anc = "~{output_prefix}.global.anc.gz"
     File out_model  = "~{output_prefix}.model"
     File log        = "~{output_prefix}.log"
-    File qc_report  = "~{output_prefix}.qc.tsv"
   }
 
   runtime {
@@ -330,6 +271,5 @@ workflow flare {
     File global_anc = flare_task.global_anc
     File out_model  = flare_task.out_model
     File log        = flare_task.log
-    File qc_report  = flare_task.qc_report
   }
 }

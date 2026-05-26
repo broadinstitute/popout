@@ -168,8 +168,7 @@ workflow flare_pipeline {
     # fit_ancestry_model.anc_vcf otherwise (i.e. exactly at the model
     # chromosome position).
     scatter (ci in range(length(chromosomes))) {
-      File chrom_anc_vcf   = select_first([infer_ancestry.anc_vcf[ci],   fit_ancestry_model.anc_vcf])
-      File chrom_qc_report = select_first([infer_ancestry.qc_report[ci], fit_ancestry_model.qc_report])
+      File chrom_anc_vcf = select_first([infer_ancestry.anc_vcf[ci], fit_ancestry_model.anc_vcf])
     }
   }
 
@@ -205,8 +204,7 @@ workflow flare_pipeline {
 
     # Stage C outputs (per cluster, in chromosome order, model chrom slot
     # carries the stage-B anc VCF — same files as cluster_model_chr_anc_vcfs).
-    Array[Array[File]] cluster_anc_vcfs_per_chrom    = chrom_anc_vcf
-    Array[Array[File]] cluster_qc_reports_per_chrom  = chrom_qc_report
+    Array[Array[File]] cluster_anc_vcfs_per_chrom = chrom_anc_vcf
 
     # Stage D outputs: per-chrom merged anc VCFs (one per chrom, all clusters'
     # samples). None when do_merge=false.
