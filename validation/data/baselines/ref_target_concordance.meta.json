@@ -1,0 +1,7 @@
+{
+  "anchor": "R6 ref/target site concordance",
+  "source": "Liz Kiernan's chr20 AFR-1000-random audit; see my_notes/flare_validation_notebooks_audit.md and lk_compare_ref_alt_records.ipynb",
+  "threshold_pct": 94.5,
+  "interpretation": "Per-cluster (per-chrom) exact_overlap_pct from validate_ref_target_concordance.py should be >= 94.5 for a pass. The chr20 anchor scenario landed at 94.8; the 0.3-pct buffer accommodates per-cluster MAF differences.",
+  "pysam_split_state_caveat": "validate_ref_target_concordance.py counts exact (chrom, pos, ref, alt) matches WITHOUT splitting multiallelics. The FLARE ref VCF is biallelic-SNPs-only; the per-cluster gt VCF may have multiallelics. Multiallelic-split mismatches surface as position_match_but_alleles_differ, which is the intended classification."
+}

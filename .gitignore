@@ -10,4 +10,6 @@ notebooks/
 run.sh
 scripts/
 !workflows/lai-tools/scripts/
+!validation/scripts/
+!validation/data/
 workflows/bcftools/data/

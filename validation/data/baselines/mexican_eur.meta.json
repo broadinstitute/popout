@@ -1,0 +1,12 @@
+{
+  "anchor": "R21 self-reported-Mexican",
+  "n_samples": 416,
+  "source": "Liz Kiernan's 2026-02-24 test run (v2); see my_notes/flare_validation_notebooks_audit.md",
+  "expected_primary_calls": {
+    "flare_amr_primary_n": 38,
+    "rye_amr_primary_n": 23,
+    "overlap_n": 23,
+    "note": "All 23 Rye-AMR-primary samples are contained within the 38 FLARE-AMR-primary samples; the 15-sample gap is allele-frequency-driven boundary noise (EUR-leaning samples with non-trivial AMR)."
+  },
+  "interpretation": "Soft proportions (mean per-ancestry mu) are the right comparison metric, NOT hard primary-call counts. Production runs on self-reported-Mexican subsets should show mean amr_mu >= 0.18 (the FLARE baseline) for an R21 pass."
+}
