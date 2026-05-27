@@ -79,17 +79,24 @@ def cosine_similarity_per_sample(A: np.ndarray, B: np.ndarray) -> np.ndarray:
 
 
 def load_rye_q(path: Path) -> dict[str, np.ndarray]:
-    """Read a Rye Q TSV. First column research_id; next 5 cols are RYE_LABELS.
+    """Read a Rye Q TSV. Column order is detected by name — `research_id`
+    (or sample_id/SAMPLE/sample) can appear anywhere in the header, and
+    the 5 ancestry columns are pulled by name from RYE_LABELS.
+
+    Observed in production: `eur eas amr afr sas research_id` (id LAST).
 
     Returns dict mapping sample_id -> length-5 proportion array (in RYE_LABELS order).
     """
+    ID_ALIASES = ("research_id", "sample_id", "sample")
     out: dict[str, np.ndarray] = {}
     with open(path) as f:
         header = f.readline().rstrip("\n").split("\t")
         lower = [h.lower() for h in header]
-        if lower[0] not in ("research_id", "sample_id", "sample"):
+        id_col = next((i for i, h in enumerate(lower) if h in ID_ALIASES), None)
+        if id_col is None:
             raise RuntimeError(
-                f"{path}: first column must be research_id/sample_id/SAMPLE; got {header[0]!r}"
+                f"{path}: no sample-id column found in header. Expected one of "
+                f"{ID_ALIASES}; got {header}"
             )
         # Build a permutation from header order → RYE_LABELS order.
         col_idx: list[int] = []
@@ -100,11 +107,12 @@ def load_rye_q(path: Path) -> dict[str, np.ndarray]:
                 raise RuntimeError(
                     f"{path}: missing required Rye column {label!r}. Got: {header}"
                 )
+        max_col = max(id_col, max(col_idx))
         for line in f:
             parts = line.rstrip("\n").split("\t")
-            if len(parts) < max(col_idx) + 1:
+            if len(parts) <= max_col:
                 continue
-            sid = parts[0].strip()
+            sid = parts[id_col].strip()
             if not sid:
                 continue
             try:
