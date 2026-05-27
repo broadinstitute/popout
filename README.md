@@ -1,12 +1,12 @@
-<p align="center">
-  <img src="docs/logo.webp" alt="popout" width="200">
-</p>
-
 # popout
+
+<img src="docs/logo.webp" alt="popout" align="right" width="300">
 
 **GPU-accelerated local ancestry inference at biobank scale — no reference panel required.**
 
 Feed it phased WGS from a large cohort and ancestry structure falls out of the joint distribution.
+
+<br clear="all">
 
 ## How it works
 
