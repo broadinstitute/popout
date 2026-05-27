@@ -38,13 +38,13 @@ def ancestry_names(n: int, labels: dict | None = None) -> list[str]:
     """Return human-readable ancestry names.
 
     If *labels* (from ``read_labels_json``) is provided and contains a
-    ``label_map``, uses population names (e.g. ``"eur"``).  When multiple
-    indices share the same label, appends the index for disambiguation
-    (e.g. ``"afr.0"``, ``"afr.2"``).  Otherwise falls back to
-    ``"Ancestry 0"``, ``"Ancestry 1"``, etc.
+    ``popout_to_rf_label``, uses population names (e.g. ``"eur"``). When
+    multiple indices share the same label, appends the index for
+    disambiguation (e.g. ``"afr.0"``, ``"afr.2"``). Otherwise falls back
+    to ``"Ancestry 0"``, ``"Ancestry 1"``, etc.
     """
-    if labels and "label_map" in labels:
-        lm = labels["label_map"]
+    if labels and "popout_to_rf_label" in labels:
+        lm = labels["popout_to_rf_label"]
         raw = [lm.get(i, lm.get(str(i), f"Ancestry {i}")) for i in range(n)]
         from collections import Counter
         counts = Counter(raw)

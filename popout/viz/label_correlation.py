@@ -37,18 +37,18 @@ def plot_label_correlation(
     corr = labels["correlations"]  # (K_inf, K_ref) numpy array
     if isinstance(corr, list):
         corr = np.array(corr, dtype=np.float64)
-    ref_names = labels.get("ref_names", [f"Ref {i}" for i in range(corr.shape[1])])
+    ref_names = labels.get("rf_ref_labels", [f"Ref {i}" for i in range(corr.shape[1])])
     n_inf = corr.shape[0]
     names = ancestry_names(n_inf, labels)
     n_overlap = labels.get("n_overlapping_sites", "?")
 
-    # Identify assigned matches from label_map
-    label_map = labels.get("label_map", {})
+    # Identify assigned matches from popout_to_rf_label
+    popout_to_rf = labels.get("popout_to_rf_label", {})
     assigned: set[tuple[int, int]] = set()
-    for inf_idx, pop_name in label_map.items():
+    for inf_idx, rf_name in popout_to_rf.items():
         inf_idx = int(inf_idx)
-        if pop_name in ref_names:
-            ref_idx = ref_names.index(pop_name)
+        if rf_name in ref_names:
+            ref_idx = ref_names.index(rf_name)
             assigned.add((inf_idx, ref_idx))
 
     with popout_style():

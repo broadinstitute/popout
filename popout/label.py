@@ -299,12 +299,18 @@ def rewrite_tracts_tsv(
 
 
 def write_label_report(out_path: str | Path, label_result: LabelResult) -> None:
-    """Write labeling metadata as JSON."""
+    """Write labeling metadata as JSON.
+
+    Key contract (see diagnostics/GLOSSARY.md):
+      rf_ref_labels           — reference label ordering (e.g. RF classifier class names)
+      popout_to_rf_label      — popout component index (str) → reference label
+      rf_to_popout_components — reference label → list of popout component indices
+    """
     out_path = Path(out_path)
     report = {
-        "label_map": {str(k): v for k, v in label_result.label_map.items()},
-        "merge_map": label_result.merge_map,
-        "ref_names": label_result.ref_names,
+        "popout_to_rf_label": {str(k): v for k, v in label_result.label_map.items()},
+        "rf_to_popout_components": label_result.merge_map,
+        "rf_ref_labels": label_result.ref_names,
         "n_overlapping_sites": label_result.n_overlapping_sites,
         "correlations": label_result.correlations.tolist(),
     }

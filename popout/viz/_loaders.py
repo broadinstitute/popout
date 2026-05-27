@@ -190,16 +190,19 @@ def read_spectral_npz(path: str | Path) -> dict[str, np.ndarray] | None:
 # ---------------------------------------------------------------------------
 
 def read_labels_json(path: str | Path) -> dict:
-    """Read ``{prefix}.labels.json`` produced by ``popout label``.
+    """Read ``{prefix}.labels.json`` produced by ``popout label`` or compare_to_rf.py.
 
-    Returns a dict with keys: label_map, merge_map, correlations, ref_names,
-    n_overlapping_sites.  ``label_map`` keys are converted to ``int``.
+    Returns a dict with keys: popout_to_rf_label, rf_to_popout_components,
+    correlations, rf_ref_labels, n_overlapping_sites. ``popout_to_rf_label``
+    keys are converted to ``int``.
+
+    See diagnostics/GLOSSARY.md for the canonical vocabulary.
     """
     path = Path(path)
     with open(path) as f:
         raw = json.load(f)
-    # Ensure label_map keys are ints
-    raw["label_map"] = {int(k): v for k, v in raw["label_map"].items()}
+    # Ensure popout_to_rf_label keys are ints
+    raw["popout_to_rf_label"] = {int(k): v for k, v in raw["popout_to_rf_label"].items()}
     if "correlations" in raw:
         raw["correlations"] = np.array(raw["correlations"], dtype=np.float64)
     return raw
