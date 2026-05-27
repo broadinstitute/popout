@@ -280,6 +280,7 @@ limitation.
 | `--recursive-em-iter` | 3 | EM iterations per K=2 split |
 | `--recursive-merge-hellinger` | 0.04 | Merge leaves with Hellinger distance below this (0 = disable) |
 | `--freeze-anchors-iters` | 0 | Freeze seed responsibilities for first N EM iterations |
+| `--em-t-policy` | `gated` | T-update policy: `hold` (T fixed), `gated` (single update when freq stabilises), or `every-iter` (legacy) |
 
 ## Recursive seeding
 

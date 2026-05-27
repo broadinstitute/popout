@@ -447,6 +447,16 @@ def main(argv: list[str] | None = None) -> None:
              "if small leaves are getting absorbed.",
     )
     parser.add_argument(
+        "--em-t-policy",
+        choices=["hold", "gated", "every-iter"],
+        default="gated",
+        help="EM T-update policy (default: gated). 'gated' fires a single "
+             "T update the first iteration after mean Δfreq < 0.005 (or "
+             "by iter 15 as a safety valve). 'hold' keeps T fixed at "
+             "--gen-since-admix. 'every-iter' is the legacy behaviour "
+             "(T held at iter 0, updated every iter thereafter).",
+    )
+    parser.add_argument(
         "--recursive-split-restarts", type=int, default=5,
         help="K-means++ restarts per K=2 split for balance selection (default: 5). "
              "Set to 1 to disable balance preference and use the first spectral split.",
@@ -829,6 +839,7 @@ def main(argv: list[str] | None = None) -> None:
                 "block_emissions": args.block_emissions,
                 "block_size": args.block_size,
                 "freeze_anchors_iters": args.freeze_anchors_iters,
+                "em_t_policy": args.em_t_policy,
                 "probs": args.probs,
                 "per_hap_T": args.per_hap_T,
                 "n_T_buckets": args.n_T_buckets,
@@ -896,6 +907,7 @@ def main(argv: list[str] | None = None) -> None:
             seed_method=args.seed_method,
             recursive_kwargs=recursive_kwargs,
             freeze_anchors_iters=args.freeze_anchors_iters,
+            em_t_policy=args.em_t_policy,
             out_prefix=args.out,
             stop_after_seeding=args.stop_after_seeding,
             resume_from_checkpoint=args.resume_from_checkpoint,

@@ -106,6 +106,7 @@ def test_run_em_per_hap_T_with_block_emissions_uses_buckets(monkeypatch):
         block_size=8,
         skip_decode=True,
         rng_seed=0,
+        em_t_policy="every-iter",
     )
 
     assert len(captured_T_per_iter) >= 2, (
@@ -157,6 +158,7 @@ def test_block_em_soft_switches_are_density_invariant_not_hard_cast(monkeypatch)
         block_size=8,
         skip_decode=True,
         rng_seed=1,
+        em_t_policy="every-iter",
     )
 
     assert captured, "M-step was not called"
@@ -341,6 +343,104 @@ def test_run_em_seeded_init_skips_window_refine():
         np.array(expected_freq),
         rtol=1e-5, atol=1e-5,
     )
+
+
+def _run_em_with_seeded_fixture(em_t_policy, n_em_iter=3, monkeypatch=None,
+                                spy_target=None):
+    """Shared fixture for em_t_policy tests. Returns (result, n_T_calls)
+    when spy_target is provided, else (result, None)."""
+    from popout.em import run_em
+    import popout.em as em_mod
+    from popout.simulate import simulate_admixed
+
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=200, n_sites=400, n_ancestries=3,
+        gen_since_admix=20, chrom_length_cm=80.0,
+        pure_fraction=0.3, rng_seed=42,
+    )
+    H = chrom_data.geno.shape[0]
+    rng = np.random.default_rng(0)
+    labels = rng.integers(0, 3, size=H)
+    seed_resp_np = np.zeros((H, 3), dtype=np.float32)
+    seed_resp_np[np.arange(H), labels] = 1.0
+    seed_resp = jnp.array(seed_resp_np)
+
+    n_T_calls = [0]
+    if spy_target is not None and monkeypatch is not None:
+        real_fn = getattr(em_mod, spy_target)
+        def spy(*args, **kwargs):
+            n_T_calls[0] += 1
+            return real_fn(*args, **kwargs)
+        monkeypatch.setattr(em_mod, spy_target, spy)
+
+    result = run_em(
+        chrom_data,
+        n_ancestries=3,
+        n_em_iter=n_em_iter,
+        gen_since_admix=20.0,
+        rng_seed=42,
+        seed_responsibilities=seed_resp,
+        em_t_policy=em_t_policy,
+    )
+    return result, n_T_calls[0] if spy_target is not None else None
+
+
+def test_em_t_policy_hold_keeps_T_fixed(monkeypatch):
+    """--em-t-policy hold: T is never updated; update_generations_* is
+    never called."""
+    result, n_T_calls = _run_em_with_seeded_fixture(
+        "hold", n_em_iter=3, monkeypatch=monkeypatch,
+        spy_target="update_generations_from_stats",
+    )
+    assert n_T_calls == 0, f"hold policy must not call T update; got {n_T_calls}"
+    assert float(result.model.gen_since_admix) == 20.0, (
+        f"hold policy must keep T at 20.0; got {result.model.gen_since_admix}"
+    )
+
+
+def test_em_t_policy_gated_fires_at_most_once(monkeypatch):
+    """--em-t-policy gated: update_generations_* is called at most once
+    across the run."""
+    result, n_T_calls = _run_em_with_seeded_fixture(
+        "gated", n_em_iter=5, monkeypatch=monkeypatch,
+        spy_target="update_generations_from_stats",
+    )
+    assert n_T_calls <= 1, (
+        f"gated policy must fire at most once; got {n_T_calls} calls"
+    )
+
+
+def test_em_t_policy_every_iter_updates_every_iter_after_zero(monkeypatch):
+    """--em-t-policy every-iter: update_generations_* is called
+    n_em_iter - 1 times (held at iter 0, updated thereafter)."""
+    n_iter = 3
+    _, n_T_calls = _run_em_with_seeded_fixture(
+        "every-iter", n_em_iter=n_iter, monkeypatch=monkeypatch,
+        spy_target="update_generations_from_stats",
+    )
+    assert n_T_calls == n_iter - 1, (
+        f"every-iter policy must call T update {n_iter - 1} times for "
+        f"n_em_iter={n_iter}; got {n_T_calls}"
+    )
+
+
+def test_em_t_policy_rejects_unknown():
+    """Unknown em_t_policy values must raise ValueError fast."""
+    import pytest
+    from popout.em import run_em
+    from popout.simulate import simulate_admixed
+
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=100, n_sites=200, n_ancestries=2,
+        gen_since_admix=20, chrom_length_cm=80.0,
+        pure_fraction=0.3, rng_seed=42,
+    )
+    with pytest.raises(ValueError, match="em_t_policy"):
+        run_em(
+            chrom_data, n_ancestries=2, n_em_iter=1,
+            gen_since_admix=20.0, rng_seed=42,
+            em_t_policy="bogus",
+        )
 
 
 if __name__ == "__main__":

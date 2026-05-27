@@ -428,6 +428,7 @@ def run_em(
     max_ancestries: int = 20,
     seed_responsibilities: Optional[jnp.ndarray] = None,
     freeze_anchors_iters: int = 0,
+    em_t_policy: str = "gated",
     checkpoint_after_em: Optional[str] = None,
     ancestry_names: Optional[list[str]] = None,
     write_dense_decode: bool = False,
@@ -532,9 +533,15 @@ def run_em(
         log.info("  [diag] AncestryModel with block_data built")
 
     # --- Stage 2-3: EM iterations ---
+    if em_t_policy not in ("hold", "gated", "every-iter"):
+        raise ValueError(
+            f"em_t_policy must be one of 'hold', 'gated', 'every-iter'; "
+            f"got {em_t_policy!r}"
+        )
     bucket_centers = compute_bucket_centers(n_T_buckets) if per_hap_T else None
     prev_freq = model.allele_freq
     prev_T = model.gen_since_admix
+    t_updated = False  # 'gated' policy: fires once across the run
 
     for iteration in range(n_em_iter):
         log.info("--- EM iteration %d/%d ---", iteration + 1, n_em_iter)
@@ -749,24 +756,54 @@ def run_em(
             frozen_totals = seed_responsibilities.sum(axis=0)[:, None]
             new_freq = (frozen_wc + 0.5) / (frozen_totals + 1.0)
 
-        # T is held fixed during iteration 0 so frequencies can stabilize from
-        # the spectral init before the switch-rate estimator kicks in. From
-        # iteration 1 onward, T is updated every iteration alongside mu and freq.
+        # Freq delta is needed *before* the T policy decides whether to fire
+        # (the 'gated' policy keys off mean_delta from this iteration).
+        max_delta = float(jnp.abs(new_freq - prev_freq).max())
+        mean_delta = float(jnp.abs(new_freq - prev_freq).mean())
+
+        # T update policy: 'hold' freezes T, 'gated' fires once when freq
+        # stabilises (with a safety valve at iter 15), 'every-iter' is the
+        # legacy behaviour (T held at iter 0, updated every iter thereafter).
         T_per_hap = None
         bucket_assignments = None
-        should_update_T = iteration > 0
 
-        if not should_update_T:
-            new_T = model.gen_since_admix
-        elif per_hap_T and bucket_centers is not None:
-            T_per_hap, bucket_assignments, new_T = update_generations_per_hap_from_stats(
-                em_stats, d_morgan_j, model.gen_since_admix, new_mu, bucket_centers,
+        def _T_update():
+            if per_hap_T and bucket_centers is not None:
+                tph, ba, t_g = update_generations_per_hap_from_stats(
+                    em_stats, d_morgan_j, model.gen_since_admix, new_mu, bucket_centers,
+                )
+                log.info("  T (per-hap): mean=%.1f, std=%.1f",
+                         float(jnp.mean(tph)), float(jnp.std(tph)))
+                return tph, ba, t_g
+            t_g = update_generations_from_stats(
+                em_stats, d_morgan_j, model.gen_since_admix, model.mu,
             )
-            log.info("  T (per-hap): mean=%.1f, std=%.1f",
-                     float(jnp.mean(T_per_hap)), float(jnp.std(T_per_hap)))
-        else:
-            new_T = update_generations_from_stats(em_stats, d_morgan_j, model.gen_since_admix, model.mu)
-            log.info("  T: %.1f → %.1f", model.gen_since_admix, new_T)
+            log.info("  T: %.1f → %.1f", model.gen_since_admix, t_g)
+            return None, None, t_g
+
+        if em_t_policy == "hold":
+            new_T = model.gen_since_admix
+        elif em_t_policy == "gated":
+            gate_fires = (
+                not t_updated
+                and ((iteration > 0 and mean_delta < 0.005) or iteration >= 15)
+            )
+            if gate_fires:
+                T_per_hap, bucket_assignments, new_T = _T_update()
+                t_updated = True
+                log.info(
+                    "  T (gated single update): %.1f → %.1f at iter %d",
+                    model.gen_since_admix, new_T, iteration + 1,
+                )
+            else:
+                new_T = model.gen_since_admix
+        elif em_t_policy == "every-iter":
+            if iteration == 0:
+                new_T = model.gen_since_admix
+            else:
+                T_per_hap, bucket_assignments, new_T = _T_update()
+        else:  # validated above the loop, but defensive
+            raise ValueError(f"unknown em_t_policy: {em_t_policy!r}")
 
         if stats is not None:
             stats.timer_stop("m_step", chrom=chrom_data.chrom, iteration=iteration)
@@ -815,9 +852,7 @@ def run_em(
         log.info("  mu = %s", np.array(model.mu).round(3))
         log.info("  T = %.1f generations", model.gen_since_admix)
 
-        # Check convergence
-        max_delta = float(jnp.abs(new_freq - prev_freq).max())
-        mean_delta = float(jnp.abs(new_freq - prev_freq).mean())
+        # Check convergence (max_delta / mean_delta were computed pre-T-policy)
         log.info("  max Δ(freq) = %.6f, mean Δ(freq) = %.6f", max_delta, mean_delta)
 
         if stats is not None:
@@ -1676,6 +1711,7 @@ def run_em_genome(
     seed_method: str = "gmm",
     recursive_kwargs: Optional[dict] = None,
     freeze_anchors_iters: int = 0,
+    em_t_policy: str = "gated",
     out_prefix: Optional[str] = None,
     stop_after_seeding: bool = False,
     resume_from_checkpoint: Optional[str] = None,
@@ -1897,6 +1933,7 @@ def run_em_genome(
                     max_ancestries=max_ancestries,
                     seed_responsibilities=seed_resp,
                     freeze_anchors_iters=freeze_anchors_iters,
+                    em_t_policy=em_t_policy,
                     skip_decode=True,
                 )
                 fitted_model = result.model

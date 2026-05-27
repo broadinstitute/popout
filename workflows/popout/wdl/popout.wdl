@@ -38,6 +38,7 @@ task popout_task {
     # Recursive seeding (--seed-method recursive)
     String  seed_method              = "gmm"
     Int     freeze_anchors_iters     = 0
+    String  em_t_policy              = "gated"
     Float   recursive_merge_hellinger = 0.012
     Int     recursive_max_leaves     = 20
     Int     recursive_min_leaf_size  = 500
@@ -168,6 +169,7 @@ task popout_task {
     if [ "~{freeze_anchors_iters}" -gt 0 ]; then
       CMD="$CMD --freeze-anchors-iters ~{freeze_anchors_iters}"
     fi
+    CMD="$CMD --em-t-policy ~{em_t_policy}"
     ~{if stop_after_seeding then 'CMD="$CMD --stop-after-seeding"' else ''}
     ~{if post_em_consolidation then '' else 'CMD="$CMD --no-post-em-consolidation"'}
     ~{if defined(exclude_seeding_samples) then 'CMD="$CMD --exclude-seeding-samples ~{exclude_seeding_samples}"' else ''}
@@ -266,6 +268,7 @@ workflow popout {
     # Recursive seeding
     String  seed_method              = "gmm"
     Int     freeze_anchors_iters     = 0
+    String  em_t_policy              = "gated"
     Float   recursive_merge_hellinger = 0.012
     Int     recursive_max_leaves     = 20
     Int     recursive_min_leaf_size  = 500
@@ -312,6 +315,7 @@ workflow popout {
       ancestry_names     = ancestry_names,
       seed_method               = seed_method,
       freeze_anchors_iters      = freeze_anchors_iters,
+      em_t_policy               = em_t_policy,
       recursive_merge_hellinger = recursive_merge_hellinger,
       recursive_max_leaves      = recursive_max_leaves,
       recursive_min_leaf_size   = recursive_min_leaf_size,
