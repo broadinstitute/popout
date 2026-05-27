@@ -73,7 +73,7 @@ RUN chmod +x /usr/local/bin/generate_partitions.py \
 # package resolves.
 COPY --from=validation . /opt/validation/
 RUN touch /opt/validation/__init__.py /opt/validation/scripts/__init__.py
-ENV PYTHONPATH=/opt:${PYTHONPATH}
+ENV PYTHONPATH=/opt
 
 # popout (viz loaders) — diagnostic scripts import popout.viz._loaders and
 # popout.viz._style. These are pure-numpy; --no-deps avoids pulling in jax

@@ -31,7 +31,8 @@ BCFTOOLS_IMAGE="us-docker.pkg.dev/broad-dsde-methods/popout/bcftools:${BCFTOOLS_
 # Dockerfile offline-buildable and deterministic — every build sees
 # byte-identical BEDs regardless of UCSC availability at build time.
 REGION_MASKS_STAGED="$(mktemp -d "${TMPDIR:-/tmp}/lai-tools-region-masks.XXXXXX")"
-trap 'rm -rf "$REGION_MASKS_STAGED"' EXIT
+POPOUT_STAGED="$(mktemp -d "${TMPDIR:-/tmp}/lai-tools-popout-src.XXXXXX")"
+trap 'rm -rf "$REGION_MASKS_STAGED" "$POPOUT_STAGED"' EXIT
 echo "Staging region masks → $REGION_MASKS_STAGED"
 
 # Centromere positions (UCSC centromeres.txt: bin, chrom, chromStart, chromEnd, ...).
@@ -64,10 +65,28 @@ cp "$HIGH_LD_BED" "$REGION_MASKS_STAGED/high_ld.bed"
 echo "Staged region masks:"
 ls -l "$REGION_MASKS_STAGED"
 
+# ── Stage a minimal popout source tree ──────────────────────────────────
+# The full popout repo carries cohort-scale data/ (tens of GB) that isn't
+# needed for `pip install --no-deps`. Send only what setuptools actually
+# reads: the popout/ package + pyproject.toml (+ setup.py/cfg + README if
+# present). Without this, buildx serializes the entire 70+ GB context and
+# blows out the docker daemon's overlay store.
+echo "Staging popout source → $POPOUT_STAGED"
+cp -R "$POPOUT_DIR/popout" "$POPOUT_STAGED/"
+cp "$POPOUT_DIR/pyproject.toml" "$POPOUT_STAGED/"
+for opt in setup.py setup.cfg README.md README.rst; do
+    [ -f "$POPOUT_DIR/$opt" ] && cp "$POPOUT_DIR/$opt" "$POPOUT_STAGED/"
+done
+# Drop the byte-compiled bloat that's harmless but inflates transfer.
+find "$POPOUT_STAGED" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null
+echo "Staged popout source size: $(du -sh "$POPOUT_STAGED" | cut -f1)"
+
 # ── Version tag ─────────────────────────────────────────────────────────
 # Tag based on the git SHA of every input that affects the image:
 # the lai-tools scripts dir + the validation dir + the popout repo SHA.
-SCRIPTS_SHA=$(cd "$CONTEXT" && git rev-parse --short HEAD:scripts 2>/dev/null || echo "x")
+# `git rev-parse HEAD:<path>` is always repo-root-relative regardless of
+# cwd, so spell out the full path for each tree.
+SCRIPTS_SHA=$(cd "$REPO_ROOT" && git rev-parse --short HEAD:workflows/lai-tools/scripts 2>/dev/null || echo "x")
 VAL_SHA=$(cd "$REPO_ROOT" && git rev-parse --short HEAD:validation 2>/dev/null || echo "x")
 POPOUT_SHA=$(cd "$POPOUT_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "x")
 
@@ -89,7 +108,7 @@ docker buildx build \
     --platform linux/amd64 \
     --build-arg "BCFTOOLS_IMAGE=${BCFTOOLS_IMAGE}" \
     --build-context "validation=${VALIDATION_DIR}" \
-    --build-context "popout=${POPOUT_DIR}" \
+    --build-context "popout=${POPOUT_STAGED}" \
     --build-context "region_masks=${REGION_MASKS_STAGED}" \
     --push \
     "$CONTEXT"
