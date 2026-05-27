@@ -11,11 +11,15 @@ FROM ${BCFTOOLS_IMAGE}
 # to behave like generic Python utility containers.
 ENTRYPOINT []
 
-# pysam is the only Python dep — needed for parsing the .tbi binary format
-# in generate_partitions.py and for building synthetic test fixtures.
+# Python deps:
+#   pysam      — required by generate_partitions.py + diagnostic scripts (parse VCF/BCF)
+#   numpy, scipy, statsmodels, matplotlib  — required by the FLARE validation
+#       diagnostic scripts (compare_to_rf, validate_regional, plot_concordance, etc.)
+#   pandas     — popout transitive dep (read_tracts uses it indirectly)
 # --break-system-packages is required on Ubuntu 24.04 (PEP 668 marks the
 # system Python as externally managed).
-RUN pip3 install --break-system-packages --no-cache-dir pysam
+RUN pip3 install --break-system-packages --no-cache-dir \
+        pysam numpy scipy statsmodels matplotlib pandas
 
 # Diagnostic tools for throughput_probe.sh:
 #   tabix     — htslib's raw region-streamer (apt-installed, links against
@@ -50,3 +54,38 @@ RUN chmod +x /usr/local/bin/generate_partitions.py \
              /usr/local/bin/tbi_byte_range.py \
              /usr/local/bin/bgzf_truncate.py \
              /usr/local/bin/throughput_probe.sh
+
+# ── FLARE validation layer ──────────────────────────────────────────────
+#
+# Four named build contexts are expected (set by push.sh via
+# `--build-context`):
+#   default      : the lai-tools build dir (this Dockerfile + scripts/)
+#   validation   : the repo's validation/ dir (schema + orchestrator + sub-scripts)
+#   popout       : the popout repo root (for pip install --no-deps)
+#   region_masks : a dir push.sh staged with centromere.bed, segdup.bed,
+#                  hla.bed, high_ld.bed (fetched outside the docker build
+#                  so this Dockerfile is offline-buildable and deterministic)
+#
+# Source vendoring is avoided — everything comes through build contexts.
+
+# validation/ — orchestrator + collator + all sub-scripts. Importable as
+# `validation.schema` via PYTHONPATH; __init__.py files are added so the
+# package resolves.
+COPY --from=validation . /opt/validation/
+RUN touch /opt/validation/__init__.py /opt/validation/scripts/__init__.py
+ENV PYTHONPATH=/opt:${PYTHONPATH}
+
+# popout (viz loaders) — diagnostic scripts import popout.viz._loaders and
+# popout.viz._style. These are pure-numpy; --no-deps avoids pulling in jax
+# / CUDA. Concrete deps (numpy, scipy, pysam, matplotlib) are installed
+# above.
+COPY --from=popout . /tmp/popout-src/
+RUN pip3 install --break-system-packages --no-cache-dir --no-deps /tmp/popout-src \
+ && rm -rf /tmp/popout-src
+
+# Bundled reference data:
+#   /opt/grch38.chrom.sizes  — for validate_regional.py
+#   /opt/region_masks/       — HLA, segdup, centromere, high-LD BEDs
+# Both fetched/staged by push.sh outside this build.
+COPY --from=validation data/grch38.chrom.sizes /opt/grch38.chrom.sizes
+COPY --from=region_masks . /opt/region_masks/
