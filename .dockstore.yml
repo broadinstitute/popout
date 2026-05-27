@@ -33,6 +33,10 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /workflows/flare/wdl/flare_pipeline.wdl
     topic: End-to-end FLARE LAI orchestration over biobank-scale chromosome shards and sample clusters
+  - name: flare-validate
+    subclass: WDL
+    primaryDescriptorPath: /workflows/flare/wdl/flare_validate.wdl
+    topic: Per-cluster FLARE validation (scatter diagnostics + cohort collation, versioned artifact bundle)
   - name: gpu-probe
     subclass: WDL
     primaryDescriptorPath: /workflows/gpu_probe/wdl/gpu_probe.wdl
