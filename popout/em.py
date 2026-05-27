@@ -740,12 +740,16 @@ def run_em(
         new_freq = update_allele_freq_from_stats(em_stats)
         new_mu = update_mu_from_stats(em_stats)
 
-        # Anchor freezing: override frequencies with seed-derived values
+        # Anchor freezing: linear blend new_freq and new_mu toward seed-derived
+        # values over the first freeze_anchors_iters iterations. w_anchor goes
+        # 1.0 → 1/N → 0 across the window so EM gradually takes over rather
+        # than handing off in a discontinuous step.
         if (seed_responsibilities is not None
                 and freeze_anchors_iters > 0
                 and iteration < freeze_anchors_iters):
-            log.info("  Anchor freeze: overriding frequencies (iter %d/%d)",
-                     iteration + 1, freeze_anchors_iters)
+            w_anchor = 1.0 - (iteration / freeze_anchors_iters)
+            log.info("  Anchor freeze: blend w=%.2f (iter %d/%d)",
+                     w_anchor, iteration + 1, freeze_anchors_iters)
             _FREEZE_BATCH = 50_000
             H_f, T_f = geno.shape
             A_f = seed_responsibilities.shape[1]
@@ -754,7 +758,13 @@ def run_em(
                 fe = min(fs + _FREEZE_BATCH, H_f)
                 frozen_wc += seed_responsibilities[fs:fe].T @ geno[fs:fe].astype(jnp.float32)
             frozen_totals = seed_responsibilities.sum(axis=0)[:, None]
-            new_freq = (frozen_wc + 0.5) / (frozen_totals + 1.0)
+            frozen_freq = (frozen_wc + 0.5) / (frozen_totals + 1.0)
+            frozen_freq = jnp.clip(frozen_freq, 1e-4, 1.0 - 1e-4)
+            new_freq = w_anchor * frozen_freq + (1.0 - w_anchor) * new_freq
+
+            frozen_mu = seed_responsibilities.sum(axis=0) / float(H_f)
+            frozen_mu = frozen_mu / frozen_mu.sum()
+            new_mu = w_anchor * frozen_mu + (1.0 - w_anchor) * new_mu
 
         # Freq delta is needed *before* the T policy decides whether to fire
         # (the 'gated' policy keys off mean_delta from this iteration).

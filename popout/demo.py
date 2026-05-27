@@ -397,8 +397,9 @@ def main():
                         help="Fraction of haplotypes that are single-ancestry (default: 0.3)")
     parser.add_argument("--seed-method", choices=["gmm", "recursive"], default="gmm",
                         help="Seeding strategy (default: gmm)")
-    parser.add_argument("--freeze-anchors-iters", type=int, default=0,
-                        help="Freeze seed responsibilities for first N EM iters (default: 0)")
+    parser.add_argument("--freeze-anchors-iters", type=int, default=None,
+                        help="Linear-blend seed responsibilities into the M-step for first N "
+                             "EM iters (default: 5 if --seed-method=recursive, else 0)")
     parser.add_argument("--em-t-policy",
                         choices=["hold", "gated", "every-iter"], default="gated",
                         help="T-update policy during EM (default: gated)")
@@ -407,6 +408,9 @@ def main():
     parser.add_argument("--convert", action="store_true",
                         help="Run convert demo (simulate → popout → VCF → parse_flare)")
     args = parser.parse_args()
+
+    if args.freeze_anchors_iters is None:
+        args.freeze_anchors_iters = 5 if args.seed_method == "recursive" else 0
 
     if args.sweep:
         run_sweep()

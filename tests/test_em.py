@@ -443,6 +443,94 @@ def test_em_t_policy_rejects_unknown():
         )
 
 
+def test_anchor_freeze_blend_weight_schedule(monkeypatch, caplog):
+    """Anchor-freeze blend weight schedule: for freeze_anchors_iters=N,
+    w_anchor = 1 - iteration/N for iteration in 0..N-1, branch skipped at
+    iteration N. Captures the log lines and parses w out of them.
+    """
+    import logging
+    import re
+    from popout.em import run_em
+    from popout.simulate import simulate_admixed
+
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=200, n_sites=400, n_ancestries=3,
+        gen_since_admix=20, chrom_length_cm=80.0,
+        pure_fraction=0.3, rng_seed=42,
+    )
+    H = chrom_data.geno.shape[0]
+    rng = np.random.default_rng(0)
+    labels = rng.integers(0, 3, size=H)
+    seed_resp_np = np.zeros((H, 3), dtype=np.float32)
+    seed_resp_np[np.arange(H), labels] = 1.0
+    seed_resp = jnp.array(seed_resp_np)
+
+    N = 5
+    with caplog.at_level(logging.INFO, logger="popout.em"):
+        run_em(
+            chrom_data,
+            n_ancestries=3,
+            n_em_iter=N + 1,  # one past the freeze window
+            gen_since_admix=20.0,
+            rng_seed=42,
+            seed_responsibilities=seed_resp,
+            freeze_anchors_iters=N,
+            em_t_policy="hold",
+        )
+
+    pat = re.compile(r"Anchor freeze: blend w=([\d.]+) \(iter (\d+)/(\d+)\)")
+    weights = {int(m.group(2)): float(m.group(1)) for m in
+               (pat.search(rec.message) for rec in caplog.records) if m}
+    expected = {1: 1.0, 2: 0.8, 3: 0.6, 4: 0.4, 5: 0.2}
+    assert weights == expected, f"got {weights}, expected {expected}"
+
+
+def test_anchor_freeze_frozen_freq_clipped():
+    """frozen_freq must be clipped to [1e-4, 1 - 1e-4] before blending,
+    even for sites where every kept hap in a leaf has the same allele."""
+    from popout.em import run_em
+    from popout.simulate import simulate_admixed
+
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=200, n_sites=400, n_ancestries=3,
+        gen_since_admix=20, chrom_length_cm=80.0,
+        pure_fraction=0.3, rng_seed=42,
+    )
+    H = chrom_data.geno.shape[0]
+    rng = np.random.default_rng(0)
+    labels = rng.integers(0, 3, size=H)
+    seed_resp_np = np.zeros((H, 3), dtype=np.float32)
+    seed_resp_np[np.arange(H), labels] = 1.0
+    seed_resp = jnp.array(seed_resp_np)
+
+    result = run_em(
+        chrom_data,
+        n_ancestries=3,
+        n_em_iter=1,  # single iter at w=1.0 → new_freq == frozen_freq
+        gen_since_admix=20.0,
+        rng_seed=42,
+        seed_responsibilities=seed_resp,
+        freeze_anchors_iters=1,
+        em_t_policy="hold",
+    )
+    freq = np.array(result.model.allele_freq)
+    assert freq.min() >= 1e-4, f"min freq {freq.min()} < 1e-4"
+    assert freq.max() <= 1.0 - 1e-4, f"max freq {freq.max()} > 1 - 1e-4"
+
+
+def test_cli_freeze_anchors_default_resolves_by_seed_method():
+    """--seed-method recursive: default → 5. --seed-method gmm: default → 0.
+    Explicit --freeze-anchors-iters always wins (including explicit 0)."""
+    from popout.cli import _resolve_freeze_anchors_default as resolve
+
+    assert resolve(None, "recursive") == 5
+    assert resolve(None, "gmm") == 0
+    assert resolve(7, "recursive") == 7
+    assert resolve(7, "gmm") == 7
+    assert resolve(0, "recursive") == 0
+    assert resolve(0, "gmm") == 0
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

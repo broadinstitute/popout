@@ -149,6 +149,19 @@ def load_seeding_exclusion_list(path: str) -> set[str]:
 _XLA_DETERMINISM_FLAG = "--xla_gpu_deterministic_ops=true"
 
 
+def _resolve_freeze_anchors_default(value: int | None, seed_method: str) -> int:
+    """Auto-resolve --freeze-anchors-iters when the user did not supply one.
+
+    Recursive seeding produces small sibling leaves whose mass can collapse
+    under EM without anchor protection, so the recursive default is 5.
+    The GMM seed already gives soft per-hap labels with no positional
+    resolution, so its default stays 0.
+    """
+    if value is not None:
+        return value
+    return 5 if seed_method == "recursive" else 0
+
+
 def _peek_reproducible(raw_args: list[str]) -> str:
     """Pre-parse --reproducible without invoking the full argparse.
 
@@ -441,10 +454,11 @@ def main(argv: list[str] | None = None) -> None:
         help="EM iterations per K=2 split (default: 3). Cheap; small values fine.",
     )
     parser.add_argument(
-        "--freeze-anchors-iters", type=int, default=0,
-        help="Freeze seed responsibilities for the first N EM iterations "
-             "(default: 0 = no freezing). With recursive seeding, try 3-5 "
-             "if small leaves are getting absorbed.",
+        "--freeze-anchors-iters", type=int, default=None,
+        help="Linear-blend seed responsibilities into the M-step for the "
+             "first N EM iterations (w=1.0 at iter 0, w=1/N at iter N-1, "
+             "w=0 thereafter). Default: 5 when --seed-method=recursive, "
+             "else 0. Pass 0 explicitly to disable.",
     )
     parser.add_argument(
         "--em-t-policy",
@@ -639,6 +653,10 @@ def main(argv: list[str] | None = None) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    args.freeze_anchors_iters = _resolve_freeze_anchors_default(
+        args.freeze_anchors_iters, args.seed_method,
+    )
 
     # --- Logging ---
     logging.basicConfig(
