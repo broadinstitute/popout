@@ -27,8 +27,8 @@ struct FlareClusterRun {
   File   flare_log
   File?  flare_qc_tsv              # ★ v1.1: optional — pre-pipeline fixtures have no qc.tsv
   File?  flare_summary             # FLARE does not emit one today; reserved
-  File   input_vcf
-  File   ref_vcf                   # ★ v1.1: per-chrom FLARE reference VCF (R6 audit)
+  File   input_vcf                 # validate_ref_target_concordance auto-tabix-indexes if .tbi missing
+  File   ref_vcf                   # ★ v1.1: per-chrom FLARE reference VCF (R6 audit); same auto-tabix
 }
 
 task validate_cluster {
