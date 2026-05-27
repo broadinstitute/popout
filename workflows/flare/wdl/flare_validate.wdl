@@ -128,7 +128,7 @@ task validate_cluster {
     # The orchestrator's DAG runner sizes its thread pool to --max-workers;
     # we pass through the WDL-allocated CPU count so within-task parallelism
     # tracks the resource grant.
-    python /opt/validation/scripts/run_cluster_validation.py \
+    python3 /opt/validation/scripts/run_cluster_validation.py \
       --cluster-id     ~{cluster_run.cluster_id} \
       --chrom          ~{cluster_run.chrom} \
       --anc-vcf        ~{cluster_run.anc_vcf} \
@@ -222,7 +222,7 @@ task collate_cohort {
       flare_collate.n_artifacts="~{length(cluster_artifacts)}" \
       flare_collate.schema_version="~{schema_version}"
 
-    python /opt/validation/scripts/collate_runs.py \
+    python3 /opt/validation/scripts/collate_runs.py \
       --cluster-artifacts ~{sep=" " cluster_artifacts} \
       ~{"--collation-config " + collation_config} \
       ~{"--diff-against "     + previous_cohort_bundle} \
@@ -232,7 +232,7 @@ task collate_cohort {
       --out-summary       ~{out_summary}
 
     # Bubble up a few cohort-level metrics for the dashboard.
-    python -c "
+    python3 -c "
 import json, sys
 d = json.load(open('~{out_summary}'))
 print(f\"flare_collate.n_clusters_pass_coverage={d['n_clusters_pass_coverage']}\")

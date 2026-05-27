@@ -33,6 +33,7 @@ RUN pip3 install --break-system-packages --no-cache-dir \
 # All of these are diagnostic; production WDLs only need bcftools/python.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tabix strace sysstat jq gnupg apt-transport-https \
+        python-is-python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # google-cloud-cli — for `gcloud storage cat -r` byte-range probes. Installs
