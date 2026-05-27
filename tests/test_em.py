@@ -518,6 +518,89 @@ def test_anchor_freeze_frozen_freq_clipped():
     assert freq.max() <= 1.0 - 1e-4, f"max freq {freq.max()} > 1 - 1e-4"
 
 
+def test_build_seed_resp_held_out_soft_beats_uniform():
+    """_build_seed_resp with held_out_init='soft': held-out haps get
+    non-uniform soft assignments that put most mass on the leaf whose
+    allele frequencies best explain their genotypes. With
+    held_out_init='uniform' they get exact 1/K rows."""
+    from popout.em import _build_seed_resp
+    from popout.simulate import simulate_admixed
+
+    chrom_data, true_ancestry, _ = simulate_admixed(
+        n_samples=300, n_sites=1000, n_ancestries=3,
+        gen_since_admix=20, chrom_length_cm=80.0,
+        pure_fraction=1.0, rng_seed=42,
+    )
+    H = chrom_data.geno.shape[0]
+    # Mark 20% of haps as held-out (mask=False); rest are kept.
+    rng = np.random.default_rng(0)
+    held_mask = rng.random(H) < 0.2
+    seeding_mask = ~held_mask
+
+    # Kept-hap "true" labels: use the simulator's per-hap dominant ancestry.
+    # true_ancestry is (H, T) per-site labels; with pure_fraction=1.0 they are
+    # constant per hap.
+    kept_idx = np.where(seeding_mask)[0]
+    held_idx = np.where(held_mask)[0]
+    kept_labels = np.asarray(true_ancestry[kept_idx, 0])
+    held_truth = np.asarray(true_ancestry[held_idx, 0])
+
+    # Uniform mode
+    resp_uniform = np.array(_build_seed_resp(
+        chrom_data.geno, kept_labels, 3,
+        seeding_mask=seeding_mask, held_out_init="uniform",
+    ))
+    np.testing.assert_allclose(
+        resp_uniform[held_idx], 1.0 / 3, atol=1e-6,
+        err_msg="uniform mode must put exactly 1/K on every held-out hap",
+    )
+
+    # Soft mode
+    resp_soft = np.array(_build_seed_resp(
+        chrom_data.geno, kept_labels, 3,
+        seeding_mask=seeding_mask, held_out_init="soft",
+    ))
+    # Rows must sum to 1 (softmax invariant)
+    np.testing.assert_allclose(
+        resp_soft[held_idx].sum(axis=1), 1.0, atol=1e-5,
+    )
+    # Soft assignments should NOT be uniform.
+    held_max = resp_soft[held_idx].max(axis=1)
+    assert (held_max > 0.5).mean() > 0.5, (
+        f"soft mode produced too many uniform-like rows; "
+        f"frac with max>0.5: {(held_max > 0.5).mean():.2f}"
+    )
+    # Soft assignment's argmax should match the true ancestry on most
+    # held-out haps (these are pure-ancestry haps).
+    soft_argmax = resp_soft[held_idx].argmax(axis=1)
+    acc = float((soft_argmax == held_truth).mean())
+    assert acc > 0.8, (
+        f"held-out soft assignment accuracy {acc:.2f} is too low; "
+        f"expected >0.8 on pure-ancestry haps"
+    )
+
+    # Kept rows must be exact one-hot in both modes.
+    for resp, name in [(resp_uniform, "uniform"), (resp_soft, "soft")]:
+        kept_max = resp[kept_idx].max(axis=1)
+        np.testing.assert_allclose(
+            kept_max, 1.0, atol=1e-6,
+            err_msg=f"{name}: kept rows must be exact one-hot",
+        )
+
+
+def test_build_seed_resp_rejects_unknown_held_out_init():
+    """_build_seed_resp must raise on unknown held_out_init values."""
+    import pytest
+    from popout.em import _build_seed_resp
+    geno = np.zeros((10, 5), dtype=np.uint8)
+    seeding_mask = np.array([True, True, False, True, False,
+                             True, False, True, True, True])
+    labels = np.array([0, 1, 0, 1, 0, 1, 0])  # compact (H_kept,)
+    with pytest.raises(ValueError, match="held_out_init"):
+        _build_seed_resp(geno, labels, 2,
+                         seeding_mask=seeding_mask, held_out_init="bogus")
+
+
 def test_cli_freeze_anchors_default_resolves_by_seed_method():
     """--seed-method recursive: default → 5. --seed-method gmm: default → 0.
     Explicit --freeze-anchors-iters always wins (including explicit 0)."""

@@ -471,6 +471,14 @@ def main(argv: list[str] | None = None) -> None:
              "(T held at iter 0, updated every iter thereafter).",
     )
     parser.add_argument(
+        "--held-out-init",
+        choices=["uniform", "soft"],
+        default="soft",
+        help="How to seed haplotypes excluded from --exclude-seeding-samples. "
+             "'soft' (default): Bernoulli emission softmax against "
+             "kept-derived leaf allele freqs. 'uniform': 1/K per leaf (legacy).",
+    )
+    parser.add_argument(
         "--recursive-split-restarts", type=int, default=5,
         help="K-means++ restarts per K=2 split for balance selection (default: 5). "
              "Set to 1 to disable balance preference and use the first spectral split.",
@@ -858,6 +866,7 @@ def main(argv: list[str] | None = None) -> None:
                 "block_size": args.block_size,
                 "freeze_anchors_iters": args.freeze_anchors_iters,
                 "em_t_policy": args.em_t_policy,
+                "held_out_init": args.held_out_init,
                 "probs": args.probs,
                 "per_hap_T": args.per_hap_T,
                 "n_T_buckets": args.n_T_buckets,
@@ -926,6 +935,7 @@ def main(argv: list[str] | None = None) -> None:
             recursive_kwargs=recursive_kwargs,
             freeze_anchors_iters=args.freeze_anchors_iters,
             em_t_policy=args.em_t_policy,
+            held_out_init=args.held_out_init,
             out_prefix=args.out,
             stop_after_seeding=args.stop_after_seeding,
             resume_from_checkpoint=args.resume_from_checkpoint,

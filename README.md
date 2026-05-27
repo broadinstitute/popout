@@ -281,6 +281,7 @@ limitation.
 | `--recursive-merge-hellinger` | 0.04 | Merge leaves with Hellinger distance below this (0 = disable) |
 | `--freeze-anchors-iters` | 5 (recursive) / 0 (gmm) | Linear-blend seed responsibilities into the M-step over the first N iterations |
 | `--em-t-policy` | `gated` | T-update policy: `hold` (T fixed), `gated` (single update when freq stabilises), or `every-iter` (legacy) |
+| `--held-out-init` | `soft` | Seed init for haplotypes from `--exclude-seeding-samples`: `soft` (Bernoulli softmax against kept-derived leaf freqs) or `uniform` (1/K legacy) |
 
 ## Recursive seeding
 

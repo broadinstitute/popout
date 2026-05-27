@@ -1677,30 +1677,80 @@ def _load_decode_workdir(wd, chrom, chrom_data):
     )
 
 
-def _labels_to_resp(labels, n_haps, n_anc, seeding_mask=None):
-    """Convert hard leaf labels to soft responsibilities matrix."""
-    if seeding_mask is not None:
-        kept_idx = np.where(seeding_mask)[0]
-        # labels may be (H_kept,) or (H_total,) with -1 for excluded
-        if len(labels) == n_haps:
-            # Full-size labels with -1 for excluded
-            seed_resp_np = np.full(
-                (n_haps, n_anc), 1.0 / n_anc, dtype=np.float32,
-            )
-            mask = labels >= 0
-            seed_resp_np[mask] = 0.0
-            seed_resp_np[mask, labels[mask]] = 1.0
-        else:
-            # Compact labels (H_kept,)
-            seed_resp_np = np.full(
-                (n_haps, n_anc), 1.0 / n_anc, dtype=np.float32,
-            )
-            seed_resp_np[kept_idx] = 0.0
-            seed_resp_np[kept_idx, labels] = 1.0
+def _build_seed_resp(
+    geno,
+    labels,
+    n_anc,
+    *,
+    seeding_mask=None,
+    held_out_init: str = "soft",
+):
+    """Build (H_total, A) seed responsibilities from per-kept-hap leaf labels.
+
+    labels may be:
+      - shape (H_kept,) — compact labels for the seeded subset.
+      - shape (H_total,) — full labels with -1 for held-out haps.
+
+    held_out_init:
+      - 'uniform': held-out rows get [1/A, ..., 1/A] (legacy).
+      - 'soft': held-out rows get softmax(Bernoulli emission LL) against
+        kept-derived per-leaf allele freqs. Concentrates mass on whichever
+        leaf best explains each held-out hap's genotype.
+    """
+    H_total = geno.shape[0]
+
+    if seeding_mask is None:
+        resp = jnp.zeros((H_total, n_anc), dtype=jnp.float32)
+        return resp.at[jnp.arange(H_total), jnp.array(labels)].set(1.0)
+
+    if held_out_init not in ("uniform", "soft"):
+        raise ValueError(
+            f"held_out_init must be 'uniform' or 'soft'; got {held_out_init!r}"
+        )
+
+    labels_np = np.asarray(labels)
+    kept_idx = np.where(seeding_mask)[0]
+    held_idx = np.where(~seeding_mask)[0]
+    kept_labels = labels_np[kept_idx] if len(labels_np) == H_total else labels_np
+
+    seed_resp_np = np.zeros((H_total, n_anc), dtype=np.float32)
+    seed_resp_np[kept_idx, kept_labels] = 1.0
+
+    if held_out_init == "uniform" or len(held_idx) == 0:
+        if held_out_init == "uniform":
+            seed_resp_np[held_idx] = 1.0 / n_anc
         return jnp.array(seed_resp_np)
-    else:
-        resp = jnp.zeros((n_haps, n_anc), dtype=jnp.float32)
-        return resp.at[jnp.arange(n_haps), jnp.array(labels)].set(1.0)
+
+    # 'soft': leaf allele freqs from kept haps via closed-form M-step,
+    # then Bernoulli emission softmax over held-out haps. Both passes
+    # batch over haps to avoid materialising a copy of geno.
+    _BATCH = 20_000
+    n_sites = geno.shape[1]
+    leaf_wc = jnp.zeros((n_anc, n_sites), dtype=jnp.float32)
+    for s in range(0, len(kept_idx), _BATCH):
+        e = min(s + _BATCH, len(kept_idx))
+        idx = kept_idx[s:e]
+        bg = jnp.asarray(geno[idx]).astype(jnp.float32)
+        bl = kept_labels[s:e]
+        bresp_np = np.zeros((e - s, n_anc), dtype=np.float32)
+        bresp_np[np.arange(e - s), bl] = 1.0
+        leaf_wc = leaf_wc + jnp.asarray(bresp_np).T @ bg
+    leaf_totals = jnp.asarray(
+        np.bincount(kept_labels, minlength=n_anc).astype(np.float32)
+    )[:, None]
+    leaf_freq = (leaf_wc + 0.5) / (leaf_totals + 1.0)
+    leaf_freq = jnp.clip(leaf_freq, 1e-4, 1.0 - 1e-4)
+
+    log_f = jnp.log(leaf_freq)
+    log_1mf = jnp.log(1.0 - leaf_freq)
+    for s in range(0, len(held_idx), _BATCH):
+        e = min(s + _BATCH, len(held_idx))
+        idx = held_idx[s:e]
+        bg = jnp.asarray(geno[idx]).astype(jnp.float32)
+        ll = bg @ log_f.T + (1.0 - bg) @ log_1mf.T
+        seed_resp_np[idx] = np.asarray(jax.nn.softmax(ll, axis=1))
+
+    return jnp.array(seed_resp_np)
 
 
 def run_em_genome(
@@ -1722,6 +1772,7 @@ def run_em_genome(
     recursive_kwargs: Optional[dict] = None,
     freeze_anchors_iters: int = 0,
     em_t_policy: str = "gated",
+    held_out_init: str = "soft",
     out_prefix: Optional[str] = None,
     stop_after_seeding: bool = False,
     resume_from_checkpoint: Optional[str] = None,
@@ -1785,9 +1836,10 @@ def run_em_genome(
                 ckpt_model, ckpt_labels, leaf_info_for_ckpt = \
                     _load_seed_workdir(wd, chrom_data)
                 n_leaves = ckpt_model.n_ancestries
-                seed_resp = _labels_to_resp(
-                    ckpt_labels, chrom_data.n_haps, n_leaves,
+                seed_resp = _build_seed_resp(
+                    chrom_data.geno, ckpt_labels, n_leaves,
                     seeding_mask=seeding_mask,
+                    held_out_init=held_out_init,
                 )
                 em_n_ancestries = n_leaves
                 leaf_labels_for_ckpt = ckpt_labels
@@ -1800,8 +1852,8 @@ def run_em_genome(
                     resume_from_checkpoint, chrom_data,
                 )
                 n_leaves = ckpt_model.n_ancestries
-                seed_resp = _labels_to_resp(
-                    ckpt_labels, chrom_data.n_haps, n_leaves,
+                seed_resp = _build_seed_resp(
+                    chrom_data.geno, ckpt_labels, n_leaves,
                 )
                 em_n_ancestries = n_leaves
                 leaf_labels_for_ckpt = ckpt_labels
@@ -1826,25 +1878,17 @@ def run_em_genome(
                     n_leaves = len(leaf_info)
                     H_total = chrom_data.n_haps
 
+                    seed_resp = _build_seed_resp(
+                        chrom_data.geno, leaf_labels, n_leaves,
+                        seeding_mask=seeding_mask,
+                        held_out_init=held_out_init,
+                    )
                     if seeding_mask is not None:
                         kept_idx = np.where(seeding_mask)[0]
-                        seed_resp_np = np.full(
-                            (H_total, n_leaves), 1.0 / n_leaves,
-                            dtype=np.float32,
-                        )
-                        seed_resp_np[kept_idx] = 0.0
-                        seed_resp_np[kept_idx, leaf_labels] = 1.0
-                        seed_resp = jnp.array(seed_resp_np)
                         full_leaf_labels = np.full(H_total, -1, dtype=np.int32)
                         full_leaf_labels[kept_idx] = leaf_labels
                         leaf_labels_for_ckpt = full_leaf_labels
                     else:
-                        seed_resp = jnp.zeros(
-                            (H_total, n_leaves), dtype=jnp.float32,
-                        )
-                        seed_resp = seed_resp.at[
-                            jnp.arange(H_total), jnp.array(leaf_labels)
-                        ].set(1.0)
                         leaf_labels_for_ckpt = leaf_labels
 
                     em_n_ancestries = n_leaves
