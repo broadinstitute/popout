@@ -43,7 +43,7 @@ task validate_cluster {
     File?  ref_panel               # for sha256-in-manifest only
 
     String run_name                # magicwand run-name prefix
-    String panel_id = ""
+    String? panel_id
     String schema_version = "1.1.0"   # ★ v1.1 bump
 
     # Resource overrides (auto-scaled by anc_vcf size by default).
@@ -277,7 +277,7 @@ workflow flare_validate {
     File?  previous_cohort_bundle
 
     String run_name
-    String panel_id = ""
+    String? panel_id
     String schema_version = "1.1.0"     # ★ v1.1 bump
 
     Int?     cpu_override
