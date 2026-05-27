@@ -63,6 +63,20 @@ def ensure_tbi(vcf_path: Path) -> None:
 
 
 def count_exact_variant_overlap_safe(reference_vcf_path, target_vcf_path, chromosome):
+    """Memory-bounded overlap count between ref and target on one chrom.
+
+    Original lift (cell 13) built BOTH ref_set and target_set in memory,
+    then took intersection / difference. For chr1 production phased VCFs
+    target_set can hold tens of millions of tuples (~2 GB) and the task
+    gets OOM-killed.
+
+    Equivalent algorithm with bounded memory:
+      - Build ref_set once (~600k tuples on chr1 → ~50 MB).
+      - Stream target VCF; for each (chrom, pos, ref, alt), increment a
+        target_total counter and, if the tuple is in ref_set, add it to
+        a matched set. Never materialize target_set.
+      - missing = ref_set - matched.
+    """
     ref_vcf = pysam.VariantFile(reference_vcf_path)
     tgt_vcf = pysam.VariantFile(target_vcf_path)
 
@@ -74,26 +88,27 @@ def count_exact_variant_overlap_safe(reference_vcf_path, target_vcf_path, chromo
     if chromosome not in tgt_contigs:
         raise ValueError(f"{chromosome} not found in target VCF contigs.")
 
-    target_variants = {
-        (rec.chrom, rec.pos, rec.ref, alt)
-        for rec in tgt_vcf.fetch(chromosome)
-        for alt in (rec.alts or [])
-    }
-
-    reference_variants = [
+    reference_set: set[tuple[str, int, str, str]] = {
         (rec.chrom, rec.pos, rec.ref, alt)
         for rec in ref_vcf.fetch(chromosome)
         for alt in (rec.alts or [])
-    ]
+    }
 
-    reference_set = set(reference_variants)
-    matched = reference_set & target_variants
-    missing = reference_set - target_variants
+    matched: set[tuple[str, int, str, str]] = set()
+    target_total = 0
+    for rec in tgt_vcf.fetch(chromosome):
+        for alt in (rec.alts or []):
+            target_total += 1
+            t = (rec.chrom, rec.pos, rec.ref, alt)
+            if t in reference_set:
+                matched.add(t)
+
+    missing = reference_set - matched
 
     summary = pd.DataFrame([{
         "chromosome": chromosome,
         "reference_total_records": len(reference_set),
-        "target_total_records_on_chromosome": len(target_variants),
+        "target_total_records_on_chromosome": target_total,
         "overlap_count": len(matched),
         "percent_reference_found_in_target": (
             100 * len(matched) / len(reference_set) if len(reference_set) > 0 else 0
