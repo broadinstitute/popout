@@ -61,3 +61,65 @@ bcftools view -h "$F" | grep '^##FORMAT'            # → GT, AN1, AN2
   Stage A consumes). Install plink2 from
   <https://www.cog-genomics.org/plink/2.0/> — the static prebuilt
   `plink2_macarm64_*` or `plink2_linux_avx2_*` binaries both work.
+
+---
+
+# flare_validate.wdl smoke test
+
+Same idea as above, layered on top: after a successful `flare_pipeline`
+miniwdl run, `make_synthetic_flare_validate_dataset.py` walks the
+resulting call tree to produce inputs.json for `flare_validate.wdl`. The
+per-cluster diagnostic DAG (see `validation/SCHEMA.md`) runs locally
+in the `lai-tools:latest` image.
+
+## What it covers
+
+- Stage 1 (per-cluster validate): scatter over the 4 synthetic clusters ×
+  2 chroms = 8 tasks. Each task runs the 11-step diagnostic DAG via
+  `run_cluster_validation.py` and emits a versioned artifact tarball
+  matching SCHEMA.md §1.
+- Stage 2 (cohort collate): gather all 8 artifact tarballs and emit a
+  cohort bundle matching SCHEMA.md §2.
+
+## Run it
+
+```bash
+# Step 1: run flare_pipeline (see above) to produce per-(cluster, chrom)
+# FLARE outputs.
+miniwdl run workflows/flare/wdl/flare_pipeline.wdl \
+  --input data/synthetic_flare/inputs.json \
+  --dir /tmp/miniwdl_flare_smoke/
+
+# Step 2: build flare_validate inputs from that run.
+python workflows/flare/tests/make_synthetic_flare_validate_dataset.py \
+  --pipeline-run-dir /tmp/miniwdl_flare_smoke/<run-id>/ \
+  --rf-ancestry data/synthetic_flare/rf_ancestry.tsv \
+  --chrom-sizes validation/data/grch38.chrom.sizes \
+  --out workflows/flare/tests/synthetic_flare_validate_inputs.json
+
+# Step 3: run flare_validate.
+miniwdl run workflows/flare/wdl/flare_validate.wdl \
+  --input workflows/flare/tests/synthetic_flare_validate_inputs.json \
+  --dir /tmp/miniwdl_flare_validate/
+```
+
+Note: `data/synthetic_flare/rf_ancestry.tsv` is not produced by the
+existing synthetic generator. For an end-to-end smoke test you can
+either (a) reuse the real RF table at
+`my_notes/drc-prod/foxtrot_v4.ancestry_preds.tsv` (sample IDs won't
+match the synthetic `TGT_***` ids, which exercises the orchestrator's
+"no overlap" failure path), or (b) author a tiny synthetic RF TSV with
+matching IDs.
+
+## Verify the cohort bundle
+
+```bash
+B=/tmp/miniwdl_flare_validate/<run-id>/out/cohort_bundle/cohort_bundle.synthetic_flare_validate.v1.0.0.tar.gz
+tar -tzf "$B" | head -30
+tar -xzOf "$B" cohort_bundle/cohort_summary.json | jq .
+tar -xzOf "$B" cohort_bundle/cohort_qc_dashboard.json | jq .
+```
+
+The cohort bundle should have all per-cluster artifacts under
+`cohort_bundle/per_cluster/<cluster_id>/<chrom>/` plus the long-form
+cohort tables under `cohort_bundle/cohort/`.
