@@ -502,8 +502,12 @@ def run_em(
     d_morgan_j = jnp.array(d_morgan)
 
     # --- Stage 1: Init model from soft assignments + window refinement ---
+    # Skip window-refine when seeds are hard one-hot — it would erase them.
     log.info("Stage 1: Initializing model from soft assignments")
-    model = init_model_soft(geno, responsibilities, n_anc, gen_since_admix)
+    model = init_model_soft(
+        geno, responsibilities, n_anc, gen_since_admix,
+        window_refine=(seed_responsibilities is None),
+    )
     log.info("  mu = %s", np.array(model.mu).round(3))
     log.info("  T = %.1f generations", model.gen_since_admix)
 

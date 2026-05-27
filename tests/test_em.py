@@ -295,6 +295,54 @@ def test_bucketed_blocks_decode_matches_unbucketed_when_B_eq_1(tmp_path):
     )
 
 
+def test_run_em_seeded_init_skips_window_refine():
+    """When seed_responsibilities is supplied, init_model_soft must NOT
+    run window-refinement — the iter-0 allele_freq must equal the
+    closed-form seed-derived value (pseudocount-smoothed, clipped).
+
+    Pre-fix: window_init_allele_freq's uniform-prior softmax perturbs
+    freq and this assertion fails. Post-fix: window_refine is gated on
+    seed_responsibilities is None, so freq matches the closed form.
+    """
+    from popout.em import run_em
+    from popout.simulate import simulate_admixed
+
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=200, n_sites=400, n_ancestries=3,
+        gen_since_admix=20, chrom_length_cm=80.0,
+        pure_fraction=0.3, rng_seed=42,
+    )
+
+    H, _T = chrom_data.geno.shape
+    A = 3
+    rng = np.random.default_rng(0)
+    labels = rng.integers(0, A, size=H)
+    seed_resp_np = np.zeros((H, A), dtype=np.float32)
+    seed_resp_np[np.arange(H), labels] = 1.0
+    seed_resp = jnp.array(seed_resp_np)
+
+    result = run_em(
+        chrom_data,
+        n_ancestries=A,
+        n_em_iter=0,
+        gen_since_admix=20.0,
+        rng_seed=42,
+        seed_responsibilities=seed_resp,
+    )
+
+    geno_f32 = jnp.asarray(chrom_data.geno).astype(jnp.float32)
+    expected_wc = seed_resp.T @ geno_f32
+    expected_totals = seed_resp.sum(axis=0)[:, None]
+    expected_freq = (expected_wc + 0.5) / (expected_totals + 1.0)
+    expected_freq = jnp.clip(expected_freq, 1e-4, 1.0 - 1e-4)
+
+    np.testing.assert_allclose(
+        np.array(result.model.allele_freq),
+        np.array(expected_freq),
+        rtol=1e-5, atol=1e-5,
+    )
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])
