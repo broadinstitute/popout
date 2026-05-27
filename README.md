@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.webp" alt="popout" width="200">
+</p>
+
 # popout
 
 **GPU-accelerated local ancestry inference at biobank scale — no reference panel required.**
