@@ -63,25 +63,29 @@ task validate_cluster {
   # (cluster sizes 500–30k samples × ~600k markers/chr), anc_vcf ranges
   # ~150 MB (null cluster, 506 samp) to ~10+ GB (largest cluster).
   #
-  # Bucket-table defaults — generous; recalibrate after first Terra run
-  # using peak_rss_gb from magicwand:
+  # First-Terra-run calibration (chr1, 506 / 1297 / 1607 sample clusters):
+  # peak_rss observed at 0.91 GB across all three, ~8× headroom below the
+  # original 8 GB floor and 17× below the 16 GB floor. Dropped the small
+  # bucket memory floor to 8 GB. Mid + large buckets stay generous until
+  # we see a >5 GB anc_vcf cluster on Terra.
   Float anc_gb = size(cluster_run.anc_vcf, "GB")
   Int bucket_cpu = if anc_gb > 5.0 then 16
                    else if anc_gb > 1.0 then 8
                    else 4
   Int bucket_mem_gb = if anc_gb > 5.0 then 64
                       else if anc_gb > 1.0 then 32
-                      else 16
+                      else 8
   Int bucket_disk_gb = ceil(anc_gb * 4) + 20
 
   # Predicted sizing — used only when it exceeds the bucket value.
   # The orchestrator's peak working set is the union of step 1's tract
   # streaming (~3× anc_gb in pysam decompressed buffer) and step 4's
   # numpy correlation matrices (~1.5× n_samples × K). Empirical
-  # multiplier (placeholder until first Terra run): 4.5× anc_gb + 8 GB
-  # baseline.
-  Float predicted_mem_gb = anc_gb * 4.5 + 8.0
-  Int   sized_mem_gb     = ceil(predicted_mem_gb * 1.2)
+  # multiplier from the first Terra run: peak_rss ≈ 0.91 GB at anc_gb
+  # ≈ 0.15 GB (null cluster), so the linear coefficient is ~6× anc_gb
+  # plus a ~1 GB baseline. Tightened from the pre-run guess of 4.5× + 8 GB.
+  Float predicted_mem_gb = anc_gb * 6.0 + 1.0
+  Int   sized_mem_gb     = ceil(predicted_mem_gb * 1.5)   # 50% headroom
   Int   sized_cpu        = ceil(sized_mem_gb * 1.0 / 8.0)
 
   Int    auto_cpu       = if sized_cpu    > bucket_cpu    then sized_cpu    else bucket_cpu

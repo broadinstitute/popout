@@ -431,21 +431,34 @@ def build_cohort_summary(
         if all(g.manifest.get("coverage_passed") for g in group)
     )
 
-    # Mean merged-r per RF label, cohort-wide.
-    merged_r_sum: dict[str, list[float]] = defaultdict(list)
+    # μ-weighted mean merged-r per RF label, cohort-wide. Skip rows where
+    # the RF label has no FLARE components mapped to it (summed_mu == 0)
+    # — those are degenerate non-tests and a plain np.mean would drag the
+    # cohort-wide signal down to zero for any label that's absent from one
+    # cluster (e.g., a 3-cluster cohort where 2 clusters have no AFR gets a
+    # misleading mean_merged_r_afr ≈ 0.33).
+    mu_by_label: dict[str, list[tuple[float, float]]] = defaultdict(list)  # [(merged_r, summed_mu)]
     mg_path = cohort_dir / "merged_groups_rf.tsv"
     if mg_path.exists():
         with open(mg_path) as f:
             header = f.readline().rstrip("\n").split("\t")
             i_lab = header.index("rf_label")
             i_r = header.index("merged_r")
+            i_mu = header.index("summed_mu")
             for line in f:
                 parts = line.rstrip("\n").split("\t")
                 try:
-                    merged_r_sum[parts[i_lab]].append(float(parts[i_r]))
+                    mu = float(parts[i_mu])
+                    if mu <= 0:
+                        continue
+                    mu_by_label[parts[i_lab]].append((float(parts[i_r]), mu))
                 except (ValueError, IndexError):
                     continue
-    mean_merged_r = {lab: float(np.mean(vs)) for lab, vs in merged_r_sum.items() if vs}
+    mean_merged_r: dict[str, float] = {}
+    for lab, rs in mu_by_label.items():
+        total_mu = sum(mu for _, mu in rs)
+        if total_mu > 0:
+            mean_merged_r[lab] = sum(r * mu for r, mu in rs) / total_mu
 
     # HLA / regional outlier counts via per-cluster regional summary.json.
     n_with_hla = 0
@@ -544,7 +557,12 @@ def build_qc_dashboard(arts: list[ClusterArtifact], thresholds: dict) -> dict:
         verdicts: dict[str, str] = {}
         # coverage
         verdicts["coverage"] = "green" if all(g.manifest.get("coverage_passed") for g in group) else "red"
-        # concordance: any merged_r < 0.7 → yellow; < 0.5 → red
+        # concordance: any merged_r < 0.7 → yellow; < 0.5 → red. Skip rows
+        # where summed_mu == 0 — those are RF labels with no FLARE components
+        # mapped (mid is always one for FLARE-source clusters since the FLARE
+        # basis drops it per Sharon's R4 rule, and any cohort can legitimately
+        # have zero samples of some ancestry). A degenerate non-test shouldn't
+        # force red.
         min_r = 1.0
         for g in group:
             mg = g.artifact_dir / "soft_correlation" / "rf_merged_groups.tsv"
@@ -553,7 +571,12 @@ def build_qc_dashboard(arts: list[ClusterArtifact], thresholds: dict) -> dict:
                     next(f)
                     for line in f:
                         parts = line.rstrip("\n").split("\t")
+                        if len(parts) < 3:
+                            continue
                         try:
+                            mu = float(parts[2])
+                            if mu <= 0:
+                                continue
                             r = float(parts[1])
                             min_r = min(min_r, r)
                         except (ValueError, IndexError):
