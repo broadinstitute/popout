@@ -126,13 +126,24 @@ def count_exact_variant_overlap_safe(reference_vcf_path, target_vcf_path, chromo
 
 def inspect_target_at_positions(target_vcf_path, positions_df):
     """For each (chrom, pos) in positions_df, pull records from target VCF
-    and report REF/ALT alleles present at that position."""
+    and report REF/ALT alleles present at that position.
+
+    Dedupes (chrom, pos) before fetching — the missing_df can have the
+    same position listed multiple times when one ref multiallelic split
+    into N (ref, alt) tuples. Saves O(N) redundant fetches.
+    """
     vcf = pysam.VariantFile(target_vcf_path)
     results = []
 
-    for _, row in positions_df.iterrows():
-        chrom = row["chrom"]
-        pos = int(row["pos"])
+    # Dedupe positions; iterate over the unique set.
+    unique_positions = positions_df[["chrom", "pos"]].drop_duplicates()
+    n_total = len(unique_positions)
+    print(f"  inspect_target_at_positions: {n_total:,} unique positions to fetch")
+
+    for i, (chrom, pos) in enumerate(zip(unique_positions["chrom"], unique_positions["pos"])):
+        if n_total >= 10000 and i % 5000 == 0 and i > 0:
+            print(f"    ... fetched {i:,}/{n_total:,} ({100*i/n_total:.1f}%)")
+        pos = int(pos)
         found_any = False
         try:
             for rec in vcf.fetch(chrom, pos - 1, pos):  # pysam is 0-based half-open
@@ -163,19 +174,43 @@ def inspect_target_at_positions(target_vcf_path, positions_df):
 
 
 def classify_exact_misses(missing_df, inspection_df):
+    """Classify each missing ref variant against the inspection_df.
+
+    Original lift (cell 19) did an O(n) boolean mask of inspection_df
+    PER missing row → O(n²) total. For chr1 with 30k+ missing rows this
+    hangs for hours. Replace with two precomputed dicts:
+      - positions_seen: set[(chrom, pos)] — quickly tells "absent_in_target"
+        vs. "position present but check alleles"
+      - alleles_seen: set[(chrom, pos, target_ref, target_alt)] — O(1)
+        lookup of "is this exact (ref, alt) present at the position"
+    Both built in one pass over inspection_df.
+    """
+    # Build the two index sets in one O(n) pass.
+    positions_seen: set[tuple] = set()                 # (chrom, pos) with at least one non-null record
+    alleles_seen: set[tuple] = set()                   # (chrom, pos, target_ref, target_alt)
+    for _, row in inspection_df.iterrows():
+        chrom, pos = row["chrom"], row["pos"]
+        target_ref = row["target_ref"]
+        if pd.notna(target_ref):
+            positions_seen.add((chrom, pos))
+            alleles_seen.add((chrom, pos, target_ref, row["target_alt"]))
+
+    n_total = len(missing_df)
+    print(f"  classify_exact_misses: {n_total:,} missing rows; "
+          f"{len(positions_seen):,} positions, {len(alleles_seen):,} (pos, ref, alt) tuples "
+          f"in inspection index")
+
     out = []
-    for _, row in missing_df.iterrows():
-        chrom, pos, ref, alt = row["chrom"], row["pos"], row["ref"], row["alt"]
-        subset = inspection_df[
-            (inspection_df["chrom"] == chrom) & (inspection_df["pos"] == pos)
-        ]
-        if subset.empty or subset["target_ref"].isna().all():
+    for i, (chrom, pos, ref, alt) in enumerate(zip(
+            missing_df["chrom"], missing_df["pos"], missing_df["ref"], missing_df["alt"])):
+        if n_total >= 10000 and i % 50000 == 0 and i > 0:
+            print(f"    ... classified {i:,}/{n_total:,} ({100*i/n_total:.1f}%)")
+        if (chrom, pos) not in positions_seen:
             status = "absent_in_target"
+        elif (chrom, pos, ref, alt) in alleles_seen:
+            status = "exact_match_found_on_reinspection"
         else:
-            exact_match = (
-                (subset["target_ref"] == ref) & (subset["target_alt"] == alt)
-            ).any()
-            status = "exact_match_found_on_reinspection" if exact_match else "position_match_but_alleles_differ"
+            status = "position_match_but_alleles_differ"
         out.append({"chrom": chrom, "pos": pos, "ref": ref, "alt": alt, "status": status})
     return pd.DataFrame(out)
 
