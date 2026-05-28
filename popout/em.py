@@ -756,7 +756,10 @@ def run_em(
             frozen_wc = jnp.zeros((A_f, T_f))
             for fs in range(0, H_f, _FREEZE_BATCH):
                 fe = min(fs + _FREEZE_BATCH, H_f)
-                frozen_wc += seed_responsibilities[fs:fe].T @ geno[fs:fe].astype(jnp.float32)
+                bg = geno[fs:fe].astype(jnp.float32)
+                frozen_wc = frozen_wc + seed_responsibilities[fs:fe].T @ bg
+                frozen_wc.block_until_ready()  # BIOBANK_SCALE.md trap #9
+                del bg
             frozen_totals = seed_responsibilities.sum(axis=0)[:, None]
             frozen_freq = (frozen_wc + 0.5) / (frozen_totals + 1.0)
             frozen_freq = jnp.clip(frozen_freq, 1e-4, 1.0 - 1e-4)
@@ -1724,6 +1727,11 @@ def _build_seed_resp(
     # 'soft': leaf allele freqs from kept haps via closed-form M-step,
     # then Bernoulli emission softmax over held-out haps. Both passes
     # batch over haps to avoid materialising a copy of geno.
+    #
+    # block_until_ready() per batch severs the lazy graph so that bg
+    # tensors don't pile up on the device. Without it the leaf_wc
+    # accumulator holds ~1.3 GB × n_batches of bg alive at biobank scale
+    # (BIOBANK_SCALE.md traps #4, #9; mirrors window_init_allele_freq).
     _BATCH = 20_000
     n_sites = geno.shape[1]
     leaf_wc = jnp.zeros((n_anc, n_sites), dtype=jnp.float32)
@@ -1735,20 +1743,25 @@ def _build_seed_resp(
         bresp_np = np.zeros((e - s, n_anc), dtype=np.float32)
         bresp_np[np.arange(e - s), bl] = 1.0
         leaf_wc = leaf_wc + jnp.asarray(bresp_np).T @ bg
+        leaf_wc.block_until_ready()
+        del bg
     leaf_totals = jnp.asarray(
         np.bincount(kept_labels, minlength=n_anc).astype(np.float32)
     )[:, None]
     leaf_freq = (leaf_wc + 0.5) / (leaf_totals + 1.0)
     leaf_freq = jnp.clip(leaf_freq, 1e-4, 1.0 - 1e-4)
-
+    # Sever the kept-loop graph before the held-loop reads leaf_freq.
+    leaf_freq = jnp.asarray(jax.device_get(leaf_freq))
     log_f = jnp.log(leaf_freq)
     log_1mf = jnp.log(1.0 - leaf_freq)
+
     for s in range(0, len(held_idx), _BATCH):
         e = min(s + _BATCH, len(held_idx))
         idx = held_idx[s:e]
         bg = jnp.asarray(geno[idx]).astype(jnp.float32)
         ll = bg @ log_f.T + (1.0 - bg) @ log_1mf.T
         seed_resp_np[idx] = np.asarray(jax.nn.softmax(ll, axis=1))
+        del bg, ll
 
     return jnp.array(seed_resp_np)
 
