@@ -28,7 +28,9 @@ struct FlareClusterRun {
   File?  flare_qc_tsv              # ★ v1.1: optional — pre-pipeline fixtures have no qc.tsv
   File?  flare_summary             # FLARE does not emit one today; reserved
   File   input_vcf                 # validate_ref_target_concordance auto-tabix-indexes if .tbi missing
+  File?  input_vcf_idx             # pre-built .tbi — provide it and Cromwell co-localizes, skipping auto-tabix
   File   ref_vcf                   # ★ v1.1: per-chrom FLARE reference VCF (R6 audit); same auto-tabix
+  File?  ref_vcf_idx               # pre-built .tbi for ref_vcf, same reasoning
 }
 
 task validate_cluster {
