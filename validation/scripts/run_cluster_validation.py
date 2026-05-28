@@ -142,15 +142,27 @@ def _run_subprocess(cmd: list[str], log_path: Path, *, step_name: str = "") -> i
     """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     prefix = f"[{step_name}] " if step_name else ""
+    # PYTHONUNBUFFERED disables Python's block-buffering on stdout/stderr
+    # so child print()s flush per-line. Without this, child output sits
+    # in a 4 KB buffer through any long C call (pysam.tabix_index, etc.)
+    # and the live-tee shows nothing for minutes. Belt-and-suspenders:
+    # also tee the command line into stderr so the operator sees what's
+    # about to run before any of its own output appears.
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    cmd_str = "$ " + " ".join(str(c) for c in cmd)
+    sys.stderr.write(prefix + cmd_str + "\n")
+    sys.stderr.flush()
     with open(log_path, "w") as logf:
-        logf.write(f"$ {' '.join(str(c) for c in cmd)}\n\n")
+        logf.write(cmd_str + "\n\n")
         logf.flush()
         proc = subprocess.Popen(
             [str(c) for c in cmd],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            bufsize=1,           # line-buffered so live stream is timely
+            bufsize=1,           # line-buffered on the parent's read side
+            env=env,
         )
         assert proc.stdout is not None
         for line in proc.stdout:
