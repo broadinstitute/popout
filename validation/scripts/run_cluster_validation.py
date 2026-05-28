@@ -128,16 +128,37 @@ class Workspace:
 # ── Sub-script invocation helper ──────────────────────────────────────────
 
 
-def _run_subprocess(cmd: list[str], log_path: Path) -> int:
-    """Run cmd, tee stdout+stderr to log_path. Return exit code."""
+def _run_subprocess(cmd: list[str], log_path: Path, *, step_name: str = "") -> int:
+    """Run cmd, tee stdout+stderr to both `log_path` AND the orchestrator's
+    stderr in real time. Return exit code.
+
+    Live tee to stderr is non-negotiable for Cromwell: per-step log files
+    only become accessible after the task completes (Cromwell streams the
+    task's stderr/stdout to GCS during the run, but anything under the
+    execution dir's work tree is invisible until the task finishes).
+    Without live tee, hung sub-steps look identical to slow-but-progressing
+    sub-steps. Each line is prefixed `[step_name]` so concurrent DAG
+    streams don't blend into nonsense.
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    prefix = f"[{step_name}] " if step_name else ""
     with open(log_path, "w") as logf:
         logf.write(f"$ {' '.join(str(c) for c in cmd)}\n\n")
         logf.flush()
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [str(c) for c in cmd],
-            stdout=logf, stderr=subprocess.STDOUT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,           # line-buffered so live stream is timely
         )
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            logf.write(line)
+            logf.flush()
+            sys.stderr.write(prefix + line)
+            sys.stderr.flush()
+        proc.wait()
     return proc.returncode
 
 
@@ -170,7 +191,7 @@ def step_vcf_to_tracts(args, ws: Workspace, log_dir: Path) -> None:
         [sys.executable, str(SCRIPTS_DIR / "flare_vcf_to_tracts.py"),
          "--anc-vcf", str(args.anc_vcf),
          "--out", str(out)],
-        log_dir / "01_flare_vcf_to_tracts.log",
+        log_dir / "01_flare_vcf_to_tracts.log", step_name="vcf_to_tracts",
     )
     _check("flare_vcf_to_tracts", log_dir / "01_flare_vcf_to_tracts.log", rc)
     if not out.exists():
@@ -195,7 +216,7 @@ def step_to_popout_format(args, ws: Workspace, log_dir: Path) -> None:
          "--flare-prefix", str(flare_prefix),
          "--out-dir", str(out_dir),
          "--run-prefix", stem],
-        log_dir / "02_flare_to_popout_format.log",
+        log_dir / "02_flare_to_popout_format.log", step_name="to_popout_format",
     )
     _check("flare_to_popout_format", log_dir / "02_flare_to_popout_format.log", rc)
     ws.intermediates["popout_prefix"] = out_dir / stem
@@ -247,7 +268,7 @@ def step_coverage(args, ws: Workspace, log_dir: Path) -> None:
     ]
     if args.flare_qc_tsv is not None:
         cmd += ["--qc-tsv", str(args.flare_qc_tsv)]
-    rc = _run_subprocess(cmd, log_dir / "03_validate_coverage.log")
+    rc = _run_subprocess(cmd, log_dir / "03_validate_coverage.log", step_name="coverage")
     # Mark in workspace so the manifest writer can read it.
     ws.intermediates["coverage_exit"] = rc
     if rc != 0:
@@ -264,7 +285,7 @@ def step_compare_to_rf(args, ws: Workspace, log_dir: Path) -> None:
          "--popout-global", str(ws.intermediates["global_tsv"]),
          "--rf-ancestry", str(args.rf_ancestry),
          "--out-dir", str(scratch)],
-        log_dir / "04_compare_to_rf.log",
+        log_dir / "04_compare_to_rf.log", step_name="compare_to_rf",
     )
     _check("compare_to_rf", log_dir / "04_compare_to_rf.log", rc)
 
@@ -311,7 +332,7 @@ def step_compare_to_rye(args, ws: Workspace, log_dir: Path) -> None:
          "--rye-q", str(args.rye_q),
          "--labels-json", str(ws.intermediates["labels_json"]),
          "--out-dir", str(scratch)],
-        log_dir / "05_compare_to_rye.log",
+        log_dir / "05_compare_to_rye.log", step_name="compare_to_rye",
     )
     _check("compare_to_rye", log_dir / "05_compare_to_rye.log", rc)
 
@@ -340,7 +361,7 @@ def step_ref_target_concordance(args, ws: Workspace, log_dir: Path) -> None:
          "--input-vcf", str(args.input_vcf),
          "--chrom", args.chrom,
          "--out-dir", str(scratch)],
-        log_dir / "05a_validate_ref_target_concordance.log",
+        log_dir / "05a_validate_ref_target_concordance.log", step_name="ref_target_concordance",
     )
     _check("validate_ref_target_concordance", log_dir / "05a_validate_ref_target_concordance.log", rc)
     prov = ws.subdir("provenance")
@@ -359,7 +380,7 @@ def step_self_id(args, ws: Workspace, log_dir: Path) -> None:
          "--self-id-tsv", str(args.self_id),
          "--labels-json", str(ws.intermediates["labels_json"]),
          "--out-dir", str(out)],
-        log_dir / "06_validate_self_id.log",
+        log_dir / "06_validate_self_id.log", step_name="self_id",
     )
     _check("validate_self_id", log_dir / "06_validate_self_id.log", rc)
 
@@ -390,7 +411,7 @@ def step_structural(args, ws: Workspace, log_dir: Path) -> None:
          "--prefix", str(popout_prefix),
          "--out-dir", str(scratch),
          *labels_args],
-        log_dir / "07_validate_structural.log",
+        log_dir / "07_validate_structural.log", step_name="structural",
     )
     _check("validate_structural", log_dir / "07_validate_structural.log", rc)
 
@@ -425,7 +446,7 @@ def step_hap_disagreement(args, ws: Workspace, log_dir: Path) -> None:
          "--rf-ancestry", str(args.rf_ancestry),
          "--out-dir", str(scratch),
          *extra],
-        log_dir / "08_validate_hap_disagreement.log",
+        log_dir / "08_validate_hap_disagreement.log", step_name="hap_disagreement",
     )
     _check("validate_hap_disagreement", log_dir / "08_validate_hap_disagreement.log", rc)
 
@@ -461,7 +482,7 @@ def step_regional(args, ws: Workspace, log_dir: Path) -> None:
          "--chrom-sizes", str(args.chrom_sizes),
          "--out-dir", str(scratch),
          *extra, *labels_args],
-        log_dir / "09_validate_regional.log",
+        log_dir / "09_validate_regional.log", step_name="regional",
     )
     _check("validate_regional", log_dir / "09_validate_regional.log", rc)
 
@@ -498,7 +519,7 @@ def step_plot_concordance(args, ws: Workspace, log_dir: Path) -> None:
          "--labels-json", str(ws.intermediates["labels_json"]),
          "--out-dir", str(scratch),
          *extra],
-        log_dir / "11_plot_concordance.log",
+        log_dir / "11_plot_concordance.log", step_name="plot_concordance",
     )
     _check("plot_concordance", log_dir / "11_plot_concordance.log", rc)
 
