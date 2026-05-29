@@ -436,10 +436,16 @@ def run_collector(args: argparse.Namespace) -> None:
         # per-site attribution = the per-tract attribution telescopically.
         if width:
             agree_mask = an1 == an2
-            agree_bp += np.where(agree_mask, width, 0)
-            disagree_bp += np.where(agree_mask, 0, width)
-            np.add.at(bp_per_anc_h1, (sample_idx, an1), width)
-            np.add.at(bp_per_anc_h2, (sample_idx, an2), width)
+            agree_bp[agree_mask] += width            # masked write — no temp alloc
+            disagree_bp[~agree_mask] += width        # one ~ alloc; tolerable
+            # `sample_idx` is np.arange(n_samples), so (sample_idx, an1)
+            # has no duplicate index pairs. Fancy-index += is the correct
+            # scatter-add semantics here AND is ~100× faster than
+            # np.add.at, which forces an atomic accumulation loop. At
+            # 34k samples × 587k records that single switch is the
+            # difference between minutes and hours.
+            bp_per_anc_h1[sample_idx, an1] += width
+            bp_per_anc_h2[sample_idx, an2] += width
 
         # ── Tract state (structural / switch rate / regional) ──
         # Regional bp lives in _close_tracts so we respect tract-end
