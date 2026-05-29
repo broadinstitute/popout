@@ -4,11 +4,11 @@
 See `validation/SCHEMA.md` for the artifact contract this writes and
 `my_notes/validation/PLAN.md` §2.2 for the design.
 
-The 11 diagnostic sub-scripts (siblings in validation/scripts/) form a
+The diagnostic sub-scripts (siblings in validation/scripts/) form a
 DAG with two independent tracks once setup completes. We execute the
 DAG via concurrent.futures.ThreadPoolExecutor sized to --max-workers so
-that, e.g., {validate_structural, validate_hap_disagreement,
-validate_regional} can run while compare_to_rf is producing labels.json.
+that, e.g., ref_target_concordance can run while compare_to_rf is
+producing labels.json.
 
 Each step emits a structured stderr phase block on entry and exit,
 captures wallclock + peak RSS via resource.getrusage deltas, and
@@ -196,19 +196,52 @@ def _check(step: str, log_path: Path, rc: int) -> None:
         raise StepFailed(step, rc, log_path)
 
 
-def step_vcf_to_tracts(args, ws: Workspace, log_dir: Path) -> None:
-    """Step 1: flare_vcf_to_tracts.py → tracts.tsv.gz (intermediate)."""
-    out = ws.scratch_root / "tracts.tsv.gz"
+def step_per_site_metrics(args, ws: Workspace, log_dir: Path) -> None:
+    """Step 1: validate_per_site_metrics.py — fused single-pass collector.
+
+    Replaces the old vcf_to_tracts → {structural, hap_disagreement, regional}
+    fan-out. Streams the FLARE anc.vcf.gz once through bcftools query,
+    advances three accumulators in lock-step, and writes the
+    schema-mandated summary files directly under
+    structural/, hap_disagreement/, regional/, model/.
+    No tracts.tsv.gz is ever written.
+    """
+    cmd = [
+        sys.executable, str(SCRIPTS_DIR / "validate_per_site_metrics.py"),
+        "--anc-vcf",     str(args.anc_vcf),
+        "--global-tsv",  str(ws.intermediates["global_tsv"]),
+        "--flare-model", str(args.flare_model),
+        "--rf-ancestry", str(args.rf_ancestry),
+        "--chrom-sizes", str(args.chrom_sizes),
+        "--out-root",    str(ws.work_root),
+    ]
+    if "labels_json" in ws.intermediates:
+        cmd += ["--labels-json", str(ws.intermediates["labels_json"])]
+    if args.region_masks_dir is not None and args.region_masks_dir.is_dir():
+        for bed in sorted(args.region_masks_dir.glob("*.bed")):
+            cmd += ["--region-mask-bed", str(bed)]
     rc = _run_subprocess(
-        [sys.executable, str(SCRIPTS_DIR / "flare_vcf_to_tracts.py"),
-         "--anc-vcf", str(args.anc_vcf),
-         "--out", str(out)],
-        log_dir / "01_flare_vcf_to_tracts.log", step_name="vcf_to_tracts",
+        cmd, log_dir / "01_per_site_metrics.log", step_name="per_site_metrics",
     )
-    _check("flare_vcf_to_tracts", log_dir / "01_flare_vcf_to_tracts.log", rc)
-    if not out.exists():
-        raise RuntimeError(f"flare_vcf_to_tracts produced no output at {out}")
-    ws.intermediates["tracts_tsv_gz"] = out
+    _check("per_site_metrics", log_dir / "01_per_site_metrics.log", rc)
+
+
+def step_render_collector_pngs(args, ws: Workspace, log_dir: Path) -> None:
+    """Step 7: render_collector_pngs.py — produces the 5 PNGs the schema
+    lists under structural/, hap_disagreement/, regional/. Reads only the
+    summary JSONs/TSVs that step_per_site_metrics just wrote — no VCF
+    access, no tract streaming."""
+    cmd = [
+        sys.executable, str(SCRIPTS_DIR / "render_collector_pngs.py"),
+        "--out-root", str(ws.work_root),
+    ]
+    if args.region_masks_dir is not None and args.region_masks_dir.is_dir():
+        for bed in sorted(args.region_masks_dir.glob("*.bed")):
+            cmd += ["--region-mask-bed", str(bed)]
+    rc = _run_subprocess(
+        cmd, log_dir / "07_render_collector_pngs.log", step_name="render_collector_pngs",
+    )
+    _check("render_collector_pngs", log_dir / "07_render_collector_pngs.log", rc)
 
 
 def step_to_popout_format(args, ws: Workspace, log_dir: Path) -> None:
@@ -395,123 +428,6 @@ def step_self_id(args, ws: Workspace, log_dir: Path) -> None:
         log_dir / "06_validate_self_id.log", step_name="self_id",
     )
     _check("validate_self_id", log_dir / "06_validate_self_id.log", rc)
-
-
-def step_structural(args, ws: Workspace, log_dir: Path) -> None:
-    """Step 7: validate_structural.py — also emits mu_vs_global_diff to model/."""
-    scratch = ws.scratch_root / "structural"
-    scratch.mkdir(parents=True, exist_ok=True)
-
-    # validate_structural reads `<prefix>.tracts.tsv.gz` etc. by appending
-    # suffixes to --prefix. Symlink the intermediates next to the popout
-    # prefix so the discovery succeeds.
-    popout_prefix = ws.intermediates["popout_prefix"]
-    tracts_link = popout_prefix.with_name(popout_prefix.name + ".tracts.tsv.gz")
-    if tracts_link.exists() or tracts_link.is_symlink():
-        tracts_link.unlink()
-    try:
-        tracts_link.symlink_to(ws.intermediates["tracts_tsv_gz"].resolve())
-    except OSError:
-        shutil.copy2(ws.intermediates["tracts_tsv_gz"], tracts_link)
-
-    labels_args = []
-    if "labels_json" in ws.intermediates:
-        labels_args = ["--labels-json", str(ws.intermediates["labels_json"])]
-
-    rc = _run_subprocess(
-        [sys.executable, str(SCRIPTS_DIR / "validate_structural.py"),
-         "--prefix", str(popout_prefix),
-         "--out-dir", str(scratch),
-         *labels_args],
-        log_dir / "07_validate_structural.log", step_name="structural",
-    )
-    _check("validate_structural", log_dir / "07_validate_structural.log", rc)
-
-    structural_out = ws.subdir("structural")
-    model_out = ws.subdir("model")
-    # Route per SCHEMA.md §1.9 + §1.4.
-    for name in ("tract_length_distribution.png",
-                 "switch_rate_distribution.png",
-                 "switch_rate_distribution_log.png",
-                 "tract_length_summary.json",
-                 "switch_rate_summary.json"):
-        src = scratch / name
-        if src.exists():
-            shutil.move(str(src), structural_out / name)
-    mu_diff = scratch / "mu_vs_global_diff.json"
-    if mu_diff.exists():
-        shutil.move(str(mu_diff), model_out / "mu_vs_global_diff.json")
-
-
-def step_hap_disagreement(args, ws: Workspace, log_dir: Path) -> None:
-    """Step 8: validate_hap_disagreement.py."""
-    scratch = ws.scratch_root / "hap_disagreement"
-    scratch.mkdir(parents=True, exist_ok=True)
-    extra: list[str] = []
-    if ws.optional_inputs.get("region_bed"):
-        # PLAN.md doesn't pass a region_bed at the WDL level for hap
-        # disagreement; if added later, wire here.
-        pass
-    rc = _run_subprocess(
-        [sys.executable, str(SCRIPTS_DIR / "validate_hap_disagreement.py"),
-         "--tracts", str(ws.intermediates["tracts_tsv_gz"]),
-         "--rf-ancestry", str(args.rf_ancestry),
-         "--out-dir", str(scratch),
-         *extra],
-        log_dir / "08_validate_hap_disagreement.log", step_name="hap_disagreement",
-    )
-    _check("validate_hap_disagreement", log_dir / "08_validate_hap_disagreement.log", rc)
-
-    out = ws.subdir("hap_disagreement")
-    # Rename per SCHEMA.md §1.10.
-    rename = {
-        "hap_disagreement.per_sample.tsv": "per_sample.tsv",
-        "hap_disagreement_by_rf_label.png": "by_rf_label.png",
-        "hap_disagreement.per_region.tsv": "per_region.tsv",
-        "hap_disagreement_by_region.png": "by_region.png",
-        "summary.json": "summary.json",
-    }
-    for src_name, dst_name in rename.items():
-        src = scratch / src_name
-        if src.exists():
-            shutil.move(str(src), out / dst_name)
-
-
-def step_regional(args, ws: Workspace, log_dir: Path) -> None:
-    """Step 9: validate_regional.py."""
-    scratch = ws.scratch_root / "regional"
-    scratch.mkdir(parents=True, exist_ok=True)
-    extra: list[str] = []
-    if args.region_masks_dir is not None and args.region_masks_dir.is_dir():
-        for bed in sorted(args.region_masks_dir.glob("*.bed")):
-            extra += ["--region-mask-bed", str(bed)]
-    labels_args = []
-    if "labels_json" in ws.intermediates:
-        labels_args = ["--labels-json", str(ws.intermediates["labels_json"])]
-    rc = _run_subprocess(
-        [sys.executable, str(SCRIPTS_DIR / "validate_regional.py"),
-         "--tracts", str(ws.intermediates["tracts_tsv_gz"]),
-         "--chrom-sizes", str(args.chrom_sizes),
-         "--out-dir", str(scratch),
-         *extra, *labels_args],
-        log_dir / "09_validate_regional.log", step_name="regional",
-    )
-    _check("validate_regional", log_dir / "09_validate_regional.log", rc)
-
-    out = ws.subdir("regional")
-    # Rename per SCHEMA.md §1.11.
-    rename = {
-        "regional_windows.tsv.gz": "windows.tsv.gz",
-        "regional_significant.bed": "significant.bed",
-        "summary.json": "summary.json",
-    }
-    for src_name, dst_name in rename.items():
-        src = scratch / src_name
-        if src.exists():
-            shutil.move(str(src), out / dst_name)
-    # Per-chrom plots: keep filename.
-    for png in scratch.glob("regional_qc_*.png"):
-        shutil.move(str(png), out / png.name)
 
 
 def step_plot_concordance(args, ws: Workspace, log_dir: Path) -> None:
@@ -844,6 +760,15 @@ def _write_tier1_metrics(ws: Workspace, manifest: dict) -> None:
             pass
     add("flare_validate.ref_target_exact_overlap_pct", r6_pct)
 
+    # Per-step wallclock. Already in manifest.json:steps.<name>.wallclock_seconds;
+    # surfacing them as tier1 rows lets the WDL replay drop them into the
+    # flare-validate W&B project as step.<name>.wallclock_seconds so a
+    # cluster-by-cluster before/after chart is one click away.
+    for step_name, step_info in manifest.get("steps", {}).items():
+        wall = step_info.get("wallclock_seconds")
+        add(f"step.{step_name}.wallclock_seconds",
+            round(float(wall), 2) if wall is not None else None)
+
     with open(ws.work_root / "tier1_metrics.tsv", "w") as f:
         for k, v in rows:
             f.write(f"{k}\t{v}\n")
@@ -1070,8 +995,11 @@ def main() -> int:
         raise RuntimeError("--ref-vcf is required (R6 ref/target concordance audit)")
 
     # ── DAG definition ──
+    # Tract-derived metrics (structural / hap_disagreement / regional) all
+    # come from one fused single-pass step (`per_site_metrics`) that streams
+    # the anc.vcf.gz exactly once via bcftools query. Render is a thin
+    # downstream PNG step.
     steps: list[Step] = [
-        Step(1, "vcf_to_tracts",        (),                          step_vcf_to_tracts),
         Step(2, "to_popout_format",     (),                          step_to_popout_format),
         Step(3, "coverage",             ("to_popout_format",),       step_coverage, nonfatal=True),
         Step(4, "compare_to_rf",        ("to_popout_format", "coverage"), step_compare_to_rf),
@@ -1079,9 +1007,11 @@ def main() -> int:
         # Schedule at the "to_popout_format" depth so it runs in parallel with
         # coverage / compare_to_rf instead of serializing behind them.
         Step(5, "ref_target_concordance", ("to_popout_format",),     step_ref_target_concordance),
-        Step(7, "structural",           ("vcf_to_tracts", "to_popout_format"), step_structural),
-        Step(8, "hap_disagreement",     ("vcf_to_tracts",),          step_hap_disagreement),
-        Step(9, "regional",             ("vcf_to_tracts",),          step_regional),
+        # per_site_metrics waits for compare_to_rf so labels.json is ready
+        # to feed ancestry names into windows.tsv.gz. compare_to_rf is
+        # cheap relative to the heavy VCF pass.
+        Step(1, "per_site_metrics",     ("to_popout_format", "compare_to_rf"), step_per_site_metrics),
+        Step(7, "render_collector_pngs", ("per_site_metrics",),      step_render_collector_pngs),
         Step(11, "plot_concordance",    ("compare_to_rf",),          step_plot_concordance),
     ]
     # ★ v1.1: Rye (was admixture) concordance is per-cluster optional.

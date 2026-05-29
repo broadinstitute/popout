@@ -1,0 +1,848 @@
+#!/usr/bin/env python3
+"""Fused per-site collector — replaces the four-step
+``vcf_to_tracts → structural/hap_disagreement/regional`` slice with a
+single pass over the FLARE ancestry VCF.
+
+Architecture
+============
+
+A `bcftools query` subprocess emits flat per-site text at htslib (C)
+speed:
+
+    bcftools query -f '%CHROM\\t%POS[\\t%AN1\\t%AN2]\\n' <anc.vcf.gz>
+
+The Python side parses one line at a time. Every per-sample integer at
+that site is converted with ``np.array(parts[2:], dtype=np.int8)`` — one
+C call per record, not one Python dict lookup per cell. Three
+accumulators advance in lock-step:
+
+* **structural** — per-(sample, hap) open-tract state plus per-ancestry
+  list of finished tract lengths in bp. Emits ``tract_length_summary.json``
+  and ``switch_rate_summary.json``.
+* **hap_disagreement** — per-sample (agree_bp, disagree_bp) and
+  per-(sample, hap) ancestry-bp bincount (for dominant-anc-per-hap).
+  Joined with the RF hard label at write time. Emits
+  ``per_sample.tsv`` and ``summary.json``.
+* **regional** — per-(window_bin, ancestry) bp counter; each site
+  contributes ``width × (sum over haps of indicator(an == anc))`` to
+  every sliding window that contains ``pos``. Emits ``windows.tsv.gz``,
+  ``significant.bed``, and ``summary.json``.
+
+A small mu-vs-global helper (formerly ``validate_structural.check_mu_agreement``)
+also writes ``model/mu_vs_global_diff.json`` from ``global.tsv`` and the
+FLARE ``.model`` text file.
+
+No ``tracts.tsv.gz`` is written at any point.
+
+Why ``bcftools query`` instead of pysam
+---------------------------------------
+
+The dominant cost in the old single-threaded pipeline was
+``rec.samples[sample]; gt.get('AN1')`` — per-cell Python wrapper
+construction at ~1 µs/cell. At 30 k samples × 587 k records that is
+~5 hours per chromosome on one core. ``bcftools query`` writes the same
+two integer arrays as text at C speed; ``np.array(..., dtype=np.int8)``
+parses one line in a single C call.
+
+Usage
+-----
+
+    python validate_per_site_metrics.py \\
+        --anc-vcf      cluster_007.chr1.anc.vcf.gz \\
+        --global-tsv   popout_format/cluster_007.chr1.global.tsv \\
+        --flare-model  cluster_007.chr1.model \\
+        --rf-ancestry  ancestry_preds.tsv \\
+        --chrom-sizes  grch38.chrom.sizes \\
+        --region-mask-bed centromere.bed \\
+        --region-mask-bed segdup.bed \\
+        --labels-json  soft_correlation/labels.json \\
+        --out-root     work/cluster_007/chr1/
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import gzip
+import json
+import subprocess
+import sys
+from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
+from scipy.stats import norm
+from statsmodels.stats.multitest import multipletests
+
+
+# ── Static-input loaders ──────────────────────────────────────────────────
+
+
+def load_rf_hard_labels(path: Path, *, mixed_threshold: float = 0.8) -> dict[str, str]:
+    """Return sample_id -> RF hard label (afr/eur/.../mixed). Mirrors the
+    semantics of the old validate_hap_disagreement.load_rf_hard_labels."""
+    out: dict[str, str] = {}
+    with open(path) as f:
+        header = f.readline().rstrip("\n").split("\t")
+        rid_col = header.index("research_id")
+        pred_col = header.index("ancestry_pred")
+        prob_col = header.index("probabilities")
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            rid = parts[rid_col]
+            pred = parts[pred_col]
+            probs = ast.literal_eval(parts[prob_col])
+            max_p = max(probs)
+            out[rid] = pred if max_p >= mixed_threshold else "mixed"
+    return out
+
+
+def load_chrom_sizes(path: Path) -> dict[str, int]:
+    out: dict[str, int] = {}
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            chrom, size = line.split("\t")
+            out[chrom] = int(size)
+    return out
+
+
+def load_region_bed(path: Path) -> list[tuple[str, int, int, str]]:
+    out: list[tuple[str, int, int, str]] = []
+    default_name = path.stem
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or line.startswith("track"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 3:
+                raise ValueError(f"BED line too short: {line!r}")
+            chrom, start, end = parts[0], int(parts[1]), int(parts[2])
+            rname = parts[3] if len(parts) >= 4 else default_name
+            out.append((chrom, start, end, rname))
+    return out
+
+
+def load_labels_json(path: Path | None) -> dict[int, str]:
+    """Return ancestry index -> display name. Empty dict when labels
+    aren't available (fallback to 'ancestry_<i>' downstream)."""
+    if path is None or not path.exists():
+        return {}
+    raw = json.loads(path.read_text())
+    ptr = raw.get("popout_to_rf_label") or {}
+    if not ptr:
+        return {}
+    mapping = {int(k): v for k, v in ptr.items()}
+    counts: dict[str, int] = {}
+    for v in mapping.values():
+        counts[v] = counts.get(v, 0) + 1
+    out: dict[int, str] = {}
+    for i, lab in mapping.items():
+        out[i] = f"{lab}.{i}" if counts[lab] > 1 else lab
+    return out
+
+
+def read_model_text(path: Path) -> dict:
+    """Light reimpl of popout.viz._loaders.read_model_text — kept local
+    so this script has no popout dependency."""
+    result: dict = {}
+    with open(path) as f:
+        for line in f:
+            key, val = line.strip().split("\t", 1)
+            if key == "n_ancestries":
+                result[key] = int(val)
+            elif key == "gen_since_admix":
+                result[key] = float(val)
+            elif key == "mu":
+                result[key] = [float(x) for x in val.split(",")]
+            else:
+                result[key] = val
+    return result
+
+
+def read_global_tsv(path: Path) -> tuple[list[str], np.ndarray]:
+    """Returns (sample_names, proportions of shape (n_samples, K))."""
+    sample_names: list[str] = []
+    rows: list[list[float]] = []
+    with open(path) as f:
+        f.readline()  # header
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            sample_names.append(parts[0])
+            rows.append([float(x) for x in parts[1:]])
+    return sample_names, np.array(rows, dtype=np.float64)
+
+
+# ── VCF header probe ──────────────────────────────────────────────────────
+
+
+def probe_vcf_header(anc_vcf: Path) -> tuple[list[str], str]:
+    """Run `bcftools view -h` once to learn the sample list. Returns
+    (samples, first_chrom_hint). The first_chrom_hint comes from a
+    follow-up `bcftools query -f '%CHROM\\n' | head -1` since the header
+    doesn't carry it."""
+    p = subprocess.run(
+        ["bcftools", "view", "-h", str(anc_vcf)],
+        check=True, capture_output=True, text=True,
+    )
+    samples: list[str] = []
+    for line in p.stdout.splitlines():
+        if line.startswith("#CHROM"):
+            cols = line.rstrip("\n").split("\t")
+            samples = cols[9:]
+            break
+    if not samples:
+        raise RuntimeError(f"no samples in VCF header of {anc_vcf}")
+
+    # First-line peek for the chrom. This task is per-chrom so the file
+    # should contain exactly one CHROM value; we re-validate during the
+    # main stream.
+    p2 = subprocess.run(
+        ["bcftools", "query", "-f", "%CHROM\\n", str(anc_vcf)],
+        check=True, capture_output=True, text=True,
+    )
+    first_line = p2.stdout.split("\n", 1)[0].strip()
+    if not first_line:
+        raise RuntimeError(f"VCF {anc_vcf} has no records")
+    return samples, first_line
+
+
+# ── Sliding-window helper ─────────────────────────────────────────────────
+
+
+def make_windows(chrom_len: int, window_bp: int, step_bp: int) -> list[tuple[int, int]]:
+    wins: list[tuple[int, int]] = []
+    s = 0
+    while s < chrom_len:
+        e = min(s + window_bp, chrom_len)
+        wins.append((s, e))
+        if e == chrom_len:
+            break
+        s += step_bp
+    return wins
+
+
+# ── mu vs global agreement (formerly check_mu_agreement) ──────────────────
+
+# FLARE's model.mu reports the post-EM converged values; the per-sample
+# global mean is over the FINAL assignments. 0.05 absorbs post-EM
+# consolidation drift without masking real issues.
+MU_DIFF_THRESHOLD = 0.05
+
+
+def write_mu_vs_global_diff(
+    global_tsv: Path, flare_model: Path, out_dir: Path, anc_names: dict[int, str],
+) -> None:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _, props = read_global_tsv(global_tsv)
+    global_mu = props.mean(axis=0)
+    model_mu = np.array(read_model_text(flare_model)["mu"], dtype=np.float64)
+    diff = np.abs(global_mu - model_mu)
+    max_diff = float(diff.max())
+    all_pass = bool(max_diff < MU_DIFF_THRESHOLD)
+    per_anc = []
+    for i in range(len(model_mu)):
+        per_anc.append({
+            "ancestry": i,
+            "name": anc_names.get(i, f"ancestry_{i}"),
+            "global_mu": float(global_mu[i]),
+            "model_mu": float(model_mu[i]),
+            "abs_diff": float(diff[i]),
+            "pass": bool(diff[i] < MU_DIFF_THRESHOLD),
+        })
+    (out_dir / "mu_vs_global_diff.json").write_text(json.dumps({
+        "max_abs_diff": max_diff,
+        "threshold": MU_DIFF_THRESHOLD,
+        "overall_pass": all_pass,
+        "per_ancestry": per_anc,
+    }, indent=2))
+
+
+# ── The fused per-site collector ──────────────────────────────────────────
+
+
+def run_collector(args: argparse.Namespace) -> None:
+    out_root: Path = args.out_root
+    structural_out = out_root / "structural"
+    hap_out = out_root / "hap_disagreement"
+    regional_out = out_root / "regional"
+    model_out = out_root / "model"
+    for d in (structural_out, hap_out, regional_out, model_out):
+        d.mkdir(parents=True, exist_ok=True)
+
+    # ── Static inputs ──
+    print(f"loading RF hard labels from {args.rf_ancestry}", flush=True)
+    rf_hard_labels = load_rf_hard_labels(args.rf_ancestry)
+    print(f"  {len(rf_hard_labels):,} samples with RF labels", flush=True)
+
+    chrom_sizes = load_chrom_sizes(args.chrom_sizes)
+
+    masks: list[tuple[str, int, int, str]] = []
+    for bed in args.region_mask_bed:
+        masks.extend(load_region_bed(bed))
+    print(f"loaded {len(masks)} mask intervals from "
+          f"{len(args.region_mask_bed)} BED(s)", flush=True)
+
+    anc_names = load_labels_json(args.labels_json)
+
+    # FLARE K is canonical from the model file.
+    model_info = read_model_text(args.flare_model)
+    K = int(model_info["n_ancestries"])
+    model_T = float(model_info.get("gen_since_admix") or 0.0) or None
+    print(f"FLARE K = {K}; model gen_since_admix = {model_T}", flush=True)
+
+    # ── mu vs global (cheap, runs first; uses global_tsv + model) ──
+    write_mu_vs_global_diff(args.global_tsv, args.flare_model, model_out, anc_names)
+    print(f"  wrote {model_out / 'mu_vs_global_diff.json'}", flush=True)
+
+    # ── Probe VCF for samples + chrom ──
+    samples, first_chrom = probe_vcf_header(args.anc_vcf)
+    n_samples = len(samples)
+    print(f"VCF samples: {n_samples}; first chrom: {first_chrom}", flush=True)
+    if first_chrom not in chrom_sizes:
+        raise RuntimeError(
+            f"chrom {first_chrom!r} not in chrom-sizes file {args.chrom_sizes}"
+        )
+
+    # Sliding-window setup (this task is per-chrom).
+    windows = make_windows(chrom_sizes[first_chrom], args.window_bp, args.step_bp)
+    n_wins = len(windows)
+    win_starts = np.array([w[0] for w in windows], dtype=np.int64)
+    win_ends = np.array([w[1] for w in windows], dtype=np.int64)
+    print(f"  {n_wins} sliding windows "
+          f"(window={args.window_bp/1e6:g} Mb, step={args.step_bp/1e6:g} Mb)",
+          flush=True)
+
+    # ── Per-sample state (int8 ancestries fits K up to 127) ──
+    if K > 127:
+        raise RuntimeError(f"FLARE K={K} exceeds int8 capacity")
+    NO_ANC = np.int8(-1)
+    cur_anc_h1 = np.full(n_samples, NO_ANC, dtype=np.int8)
+    cur_anc_h2 = np.full(n_samples, NO_ANC, dtype=np.int8)
+    tract_start_h1 = np.zeros(n_samples, dtype=np.int64)
+    tract_start_h2 = np.zeros(n_samples, dtype=np.int64)
+    tract_end_h1 = np.zeros(n_samples, dtype=np.int64)
+    tract_end_h2 = np.zeros(n_samples, dtype=np.int64)
+    tract_count_h1 = np.zeros(n_samples, dtype=np.int32)
+    tract_count_h2 = np.zeros(n_samples, dtype=np.int32)
+
+    # Per-ancestry list of finished tract lengths (bp). Use Python lists
+    # because numpy doesn't have efficient append; conversion to ndarray
+    # happens once at the end.
+    tract_lengths_bp: dict[int, list[int]] = {a: [] for a in range(K)}
+
+    # Hap-disagreement state
+    agree_bp = np.zeros(n_samples, dtype=np.int64)
+    disagree_bp = np.zeros(n_samples, dtype=np.int64)
+    bp_per_anc_h1 = np.zeros((n_samples, K), dtype=np.int64)
+    bp_per_anc_h2 = np.zeros((n_samples, K), dtype=np.int64)
+
+    # Regional state
+    bp_window_anc = np.zeros((n_wins, K), dtype=np.int64)
+
+    # ── Stream bcftools query ──
+    cmd = [
+        "bcftools", "query",
+        "-f", r"%CHROM\t%POS[\t%AN1\t%AN2]" + "\n",
+        str(args.anc_vcf),
+    ]
+    print("$ " + " ".join(cmd), flush=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, bufsize=1 << 16)
+    assert proc.stdout is not None
+
+    sample_idx = np.arange(n_samples)
+    prev_pos: int | None = None
+    n_records = 0
+    chrom_seen: str | None = None
+
+    def _close_tracts(
+        closing_anc: np.ndarray,
+        closing_starts: np.ndarray,
+        closing_ends: np.ndarray,
+    ) -> None:
+        """For every tract that just closed:
+        (a) push its length (bp) into the per-ancestry bucket (structural)
+        (b) intersect [start, end+1) with every overlapping window and
+            add the bp to bp_window_anc[wi, ancestry] (regional).
+
+        Matches the old tract-iteration semantics in validate_regional.py
+        exactly — a tract owns bp [start, end] inclusive, and its
+        contribution to each window is the half-open overlap. This is the
+        only safe way to avoid double-counting the bp gaps between
+        adjacent tracts."""
+        if closing_anc.size == 0:
+            return
+        lengths = closing_ends - closing_starts + 1
+        for a in np.unique(closing_anc):
+            mask = closing_anc == a
+            tract_lengths_bp[int(a)].extend(lengths[mask].tolist())
+            t_starts = closing_starts[mask]
+            t_ends_half_open = closing_ends[mask] + 1
+            # Per-tract window overlap. ~4 overlapping windows per tract
+            # for a 1 Mb / 250 kb sliding grid; loop is cheap.
+            for ts, te in zip(t_starts.tolist(), t_ends_half_open.tolist()):
+                # Half-open overlap with each window [ws, we).
+                # win_ends > ts AND win_starts < te.
+                lo = np.searchsorted(win_ends, ts, side="right")
+                hi = np.searchsorted(win_starts, te, side="left")
+                if hi <= lo:
+                    continue
+                ov = np.minimum(te, win_ends[lo:hi]) - np.maximum(ts, win_starts[lo:hi])
+                bp_window_anc[lo:hi, int(a)] += ov
+
+    for line in proc.stdout:
+        # Defensive: empty trailing line
+        if not line or line == "\n":
+            continue
+        parts = line.rstrip("\n").split("\t")
+        c = parts[0]
+        pos = int(parts[1])
+        # parts[2:] is flat: an1_s0, an2_s0, an1_s1, an2_s1, ...
+        flat = np.array(parts[2:], dtype=np.int8)
+        if flat.size != 2 * n_samples:
+            raise RuntimeError(
+                f"record at {c}:{pos} has {flat.size} cell-fields, "
+                f"expected {2 * n_samples} (2 × n_samples)"
+            )
+        an1 = flat[0::2]
+        an2 = flat[1::2]
+
+        if chrom_seen is None:
+            chrom_seen = c
+        elif c != chrom_seen:
+            raise RuntimeError(
+                f"per-cluster VCF expected to hold one chromosome; "
+                f"saw {chrom_seen!r} and {c!r}"
+            )
+
+        # ── Per-site bp width ──
+        # Use width = pos - prev_pos so the per-site widths sum to
+        # (last_pos - first_pos). First site of the chrom contributes
+        # nothing (no preceding interval). This matches the existing
+        # tract-based code's bp accounting to within an off-by-one per
+        # tract, which is negligible at chromosome scale.
+        if prev_pos is None:
+            width = 0
+        else:
+            width = pos - prev_pos
+
+        # ── Hap disagreement / per-hap bincount ──
+        # Per-site bp width is attributed to the ancestry at this site
+        # for every (sample, hap). This is correct for hap_disagreement
+        # because anc is constant within a (sample, hap) tract, so the
+        # per-site attribution = the per-tract attribution telescopically.
+        if width:
+            agree_mask = an1 == an2
+            agree_bp += np.where(agree_mask, width, 0)
+            disagree_bp += np.where(agree_mask, 0, width)
+            np.add.at(bp_per_anc_h1, (sample_idx, an1), width)
+            np.add.at(bp_per_anc_h2, (sample_idx, an2), width)
+
+        # ── Tract state (structural / switch rate / regional) ──
+        # Regional bp lives in _close_tracts so we respect tract-end
+        # boundaries and don't double-count the bp gaps between tracts.
+        first_h1 = cur_anc_h1 == NO_ANC
+        first_h2 = cur_anc_h2 == NO_ANC
+        change_h1 = (~first_h1) & (cur_anc_h1 != an1)
+        change_h2 = (~first_h2) & (cur_anc_h2 != an2)
+
+        if change_h1.any():
+            _close_tracts(
+                cur_anc_h1[change_h1],
+                tract_start_h1[change_h1],
+                tract_end_h1[change_h1],
+            )
+            tract_count_h1[change_h1] += 1
+            tract_start_h1[change_h1] = pos
+            tract_end_h1[change_h1] = pos
+            cur_anc_h1[change_h1] = an1[change_h1]
+        if change_h2.any():
+            _close_tracts(
+                cur_anc_h2[change_h2],
+                tract_start_h2[change_h2],
+                tract_end_h2[change_h2],
+            )
+            tract_count_h2[change_h2] += 1
+            tract_start_h2[change_h2] = pos
+            tract_end_h2[change_h2] = pos
+            cur_anc_h2[change_h2] = an2[change_h2]
+
+        # Extend (same ancestry, not first site)
+        extend_h1 = (~first_h1) & ~change_h1
+        extend_h2 = (~first_h2) & ~change_h2
+        if extend_h1.any():
+            tract_end_h1[extend_h1] = pos
+        if extend_h2.any():
+            tract_end_h2[extend_h2] = pos
+
+        # Initialise first-site samples
+        if first_h1.any():
+            tract_count_h1[first_h1] = 1
+            tract_start_h1[first_h1] = pos
+            tract_end_h1[first_h1] = pos
+            cur_anc_h1[first_h1] = an1[first_h1]
+        if first_h2.any():
+            tract_count_h2[first_h2] = 1
+            tract_start_h2[first_h2] = pos
+            tract_end_h2[first_h2] = pos
+            cur_anc_h2[first_h2] = an2[first_h2]
+
+        prev_pos = pos
+        n_records += 1
+        if n_records % 50_000 == 0:
+            print(f"  ... processed {n_records:,} records (pos={pos:,})", flush=True)
+
+    rc = proc.wait()
+    if rc != 0:
+        raise RuntimeError(f"bcftools query exited with {rc}")
+    if n_records == 0:
+        raise RuntimeError(f"no records emitted from {args.anc_vcf}")
+    print(f"  done: {n_records:,} records streamed", flush=True)
+
+    # ── End-of-chrom flush: close every still-open tract ──
+    open_h1 = cur_anc_h1 != NO_ANC
+    if open_h1.any():
+        _close_tracts(cur_anc_h1[open_h1], tract_start_h1[open_h1], tract_end_h1[open_h1])
+    open_h2 = cur_anc_h2 != NO_ANC
+    if open_h2.any():
+        _close_tracts(cur_anc_h2[open_h2], tract_start_h2[open_h2], tract_end_h2[open_h2])
+
+    # ── Write outputs ──
+    n_tracts_total = sum(len(v) for v in tract_lengths_bp.values())
+    print(f"  total tracts: {n_tracts_total:,}", flush=True)
+
+    write_structural_outputs(
+        tract_lengths_bp, tract_count_h1, tract_count_h2,
+        anc_names, model_T, K, structural_out,
+    )
+    write_hap_disagreement_outputs(
+        samples, rf_hard_labels, agree_bp, disagree_bp,
+        bp_per_anc_h1, bp_per_anc_h2, hap_out,
+    )
+    write_regional_outputs(
+        chrom_seen, windows, bp_window_anc, n_samples, K, anc_names,
+        masks, args.fdr_q, regional_out,
+    )
+
+
+# ── Output writers ────────────────────────────────────────────────────────
+
+
+def write_structural_outputs(
+    tract_lengths_bp: dict[int, list[int]],
+    tract_count_h1: np.ndarray,
+    tract_count_h2: np.ndarray,
+    anc_names: dict[int, str],
+    model_T: float | None,
+    K: int,
+    out_dir: Path,
+) -> None:
+    """Emit tract_length_summary.json + switch_rate_summary.json."""
+    # ── tract_length_summary.json ──
+    per_anc = []
+    n_tracts_total = 0
+    for a in sorted(tract_lengths_bp.keys()):
+        lengths_bp = np.array(tract_lengths_bp[a], dtype=np.float64)
+        n = int(lengths_bp.size)
+        n_tracts_total += n
+        if n == 0:
+            mean_Mb = 0.0
+            median_Mb = 0.0
+        else:
+            lengths_Mb = lengths_bp / 1e6
+            mean_Mb = float(lengths_Mb.mean())
+            median_Mb = float(np.median(lengths_Mb))
+        if n >= 100 and mean_Mb > 0:
+            exp_fit_rate = float(1.0 / mean_Mb)
+            implied_T = 100.0 / (K * mean_Mb)
+        else:
+            exp_fit_rate = None
+            implied_T = None
+        per_anc.append({
+            "ancestry": int(a),
+            "name": anc_names.get(int(a), f"ancestry_{a}"),
+            "n_tracts": n,
+            "mean_Mb": mean_Mb,
+            "median_Mb": median_Mb,
+            "exp_fit_rate": exp_fit_rate,
+            "implied_T_gen": implied_T,
+            "model_T_gen": model_T,
+        })
+
+    note = ("stats computed per-ancestry; exp_fit_rate is exponential MLE "
+            "1/mean_Mb; implied_T_gen assumes 1 cM/Mb. exp_fit_rate is null "
+            "for ancestries with n_tracts < 100.")
+    (out_dir / "tract_length_summary.json").write_text(json.dumps({
+        "n_tracts_total": n_tracts_total,
+        "per_ancestry": per_anc,
+        "note": note,
+    }, indent=2))
+    print(f"  wrote {out_dir / 'tract_length_summary.json'}", flush=True)
+
+    # ── switch_rate_summary.json ──
+    # switches per hap = tract_count - 1; only count haps that saw ≥1 site.
+    saw_h1 = tract_count_h1 > 0
+    saw_h2 = tract_count_h2 > 0
+    sw_h1 = tract_count_h1[saw_h1] - 1
+    sw_h2 = tract_count_h2[saw_h2] - 1
+    switches = np.concatenate([sw_h1, sw_h2])
+    n_haps = int(switches.size)
+    if n_haps == 0:
+        raise RuntimeError("no haplotypes saw any data; cannot compute switch rate")
+
+    max_sw = int(switches.max())
+    bins_summary = [0, 3, 10, 20, 50, 100, max_sw + 1]
+    # Deduplicate adjacent equal edges (when max_sw < 100 the +1 edge can
+    # collide with the prior fixed edges); keep ascending unique.
+    edges = sorted(set(bins_summary))
+    histogram = []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        count = int(((switches >= lo) & (switches < hi)).sum())
+        histogram.append({"bin_lo": int(lo), "bin_hi": int(hi), "count": count})
+
+    (out_dir / "switch_rate_summary.json").write_text(json.dumps({
+        "n_haplotypes": n_haps,
+        "mean": float(switches.mean()),
+        "median": float(np.median(switches)),
+        "p99": float(np.percentile(switches, 99)),
+        "min": int(switches.min()),
+        "max": int(switches.max()),
+        "histogram": histogram,
+    }, indent=2))
+    print(f"  wrote {out_dir / 'switch_rate_summary.json'}", flush=True)
+
+
+def write_hap_disagreement_outputs(
+    samples: list[str],
+    rf_hard_labels: dict[str, str],
+    agree_bp: np.ndarray,
+    disagree_bp: np.ndarray,
+    bp_per_anc_h1: np.ndarray,
+    bp_per_anc_h2: np.ndarray,
+    out_dir: Path,
+) -> None:
+    """Emit per_sample.tsv + summary.json."""
+    total_bp = agree_bp + disagree_bp
+    if (total_bp == 0).any():
+        # A sample with zero bp means the VCF held no records spanning
+        # that sample — refuse rather than emit divide-by-zero rows.
+        idx = int(np.where(total_bp == 0)[0][0])
+        raise RuntimeError(
+            f"sample {samples[idx]!r} has zero covered bp; "
+            f"hap_disagreement undefined"
+        )
+
+    # Dominant ancestry per hap (argmax over bp_per_anc).
+    dom_h1 = bp_per_anc_h1.argmax(axis=1)
+    dom_h2 = bp_per_anc_h2.argmax(axis=1)
+    disagree_frac = disagree_bp / total_bp
+    agree_frac = 1.0 - disagree_frac
+
+    # Per-sample TSV.
+    n_missing_label = 0
+    cols = ["sample_id", "rf_hard_label", "agreement_bp_frac",
+            "disagreement_bp_frac", "total_bp", "dominant_anc_h1", "dominant_anc_h2"]
+    rows: list[tuple] = []
+    per_label_dis: dict[str, list[float]] = defaultdict(list)
+    for i, sid in enumerate(samples):
+        label = rf_hard_labels.get(sid)
+        if label is None:
+            n_missing_label += 1
+            label = "unjoined"
+        rows.append((sid, label, float(agree_frac[i]), float(disagree_frac[i]),
+                     int(total_bp[i]), int(dom_h1[i]), int(dom_h2[i])))
+        per_label_dis[label].append(float(disagree_frac[i]))
+
+    with open(out_dir / "per_sample.tsv", "w") as f:
+        f.write("\t".join(cols) + "\n")
+        for r in rows:
+            f.write("\t".join(str(x) for x in r) + "\n")
+    print(f"  wrote {out_dir / 'per_sample.tsv'}", flush=True)
+
+    if n_missing_label:
+        print(f"  WARN: {n_missing_label} samples without RF labels; "
+              f"bucketed as 'unjoined'", flush=True)
+
+    cohort_mean = float(disagree_frac.mean())
+    label_order = sorted(per_label_dis.keys(),
+                         key=lambda k: (k == "mixed", k == "unjoined", k))
+    per_rf_label = []
+    for k in label_order:
+        vals = per_label_dis[k]
+        if not vals:
+            continue
+        per_rf_label.append({
+            "rf_label": k,
+            "n": int(len(vals)),
+            "mean": float(np.mean(vals)),
+            "median": float(np.median(vals)),
+        })
+
+    (out_dir / "summary.json").write_text(json.dumps({
+        "cohort_mean_disagreement": cohort_mean,
+        "n_samples": int(len(samples)),
+        "n_samples_unjoined": int(n_missing_label),
+        "per_rf_label": per_rf_label,
+    }, indent=2))
+    print(f"  wrote {out_dir / 'summary.json'}", flush=True)
+
+
+def write_regional_outputs(
+    chrom: str,
+    windows: list[tuple[int, int]],
+    bp_window_anc: np.ndarray,
+    n_samples: int,
+    K: int,
+    anc_names: dict[int, str],
+    masks: list[tuple[str, int, int, str]],
+    fdr_q: float,
+    out_dir: Path,
+) -> None:
+    """Emit windows.tsv.gz + significant.bed + summary.json."""
+    win_lens = np.array([(e - s) for s, e in windows], dtype=np.float64)
+    n_haps = 2 * n_samples
+    denom = win_lens[:, None] * n_haps  # (n_wins, 1)
+    mean_anc = bp_window_anc / denom  # (n_wins, K)
+
+    chrom_mean = mean_anc.mean(axis=0)  # (K,)
+    chrom_sd = mean_anc.std(axis=0, ddof=1)  # (K,)
+
+    rows: list[dict] = []
+    for wi, (ws, we) in enumerate(windows):
+        # Window-level mask names: any mask interval that intersects [ws, we).
+        mask_names: list[str] = []
+        for m_chrom, m_s, m_e, m_name in masks:
+            if m_chrom != chrom:
+                continue
+            if min(m_e, we) > max(m_s, ws):
+                mask_names.append(m_name)
+        mask_label = ",".join(sorted(set(mask_names))) if mask_names else ""
+        for a in range(K):
+            if chrom_sd[a] == 0 or np.isnan(chrom_sd[a]):
+                z = 0.0
+                p_raw = 1.0
+            else:
+                z = float((mean_anc[wi, a] - chrom_mean[a]) / chrom_sd[a])
+                p_raw = float(2.0 * norm.sf(abs(z)))
+            rows.append({
+                "chrom": chrom,
+                "start": ws,
+                "end": we,
+                "ancestry": a,
+                "mean_anc": float(mean_anc[wi, a]),
+                "z": z,
+                "p": p_raw,
+                "mask_region": mask_label,
+            })
+
+    # BH-FDR across all (window, ancestry) tests.
+    p_arr = np.array([r["p"] for r in rows])
+    _, q_arr, _, _ = multipletests(p_arr, alpha=fdr_q, method="fdr_bh")
+    for r, q in zip(rows, q_arr):
+        r["q"] = float(q)
+        r["ancestry_name"] = anc_names.get(r["ancestry"], f"ancestry {r['ancestry']}")
+
+    # ── windows.tsv.gz ──
+    cols = ["chrom", "start", "end", "ancestry_name", "mean_anc", "z", "p", "q", "mask_region"]
+    with gzip.open(out_dir / "windows.tsv.gz", "wt") as f:
+        f.write("\t".join(cols) + "\n")
+        for r in rows:
+            f.write(
+                f"{r['chrom']}\t{r['start']}\t{r['end']}\t{r['ancestry_name']}\t"
+                f"{r['mean_anc']:.4f}\t{r['z']:+.2f}\t{r['p']:.2e}\t{r['q']:.2e}\t"
+                f"{r['mask_region']}\n"
+            )
+    print(f"  wrote {out_dir / 'windows.tsv.gz'} ({len(rows)} rows)", flush=True)
+
+    # ── significant.bed ──
+    sig = [r for r in rows if r["q"] < fdr_q]
+    with open(out_dir / "significant.bed", "w") as f:
+        f.write("#chrom\tstart\tend\tname\n")
+        for r in sig:
+            name = f"{r['ancestry_name']}|z{r['z']:+.2f}|q{r['q']:.1e}"
+            if r["mask_region"]:
+                name += f"|{r['mask_region']}"
+            f.write(f"{r['chrom']}\t{r['start']}\t{r['end']}\t{name}\n")
+    print(f"  wrote {out_dir / 'significant.bed'} ({len(sig)} significant)", flush=True)
+
+    # ── summary.json ──
+    per_anc_summary = []
+    for a in sorted({r["ancestry"] for r in rows}):
+        a_sig = [r for r in sig if r["ancestry"] == a]
+        peak = None
+        if a_sig:
+            peak_row = max(a_sig, key=lambda r: abs(r["z"]))
+            peak = {
+                "chrom": peak_row["chrom"],
+                "start": int(peak_row["start"]),
+                "end": int(peak_row["end"]),
+                "z": float(peak_row["z"]),
+                "q": float(peak_row["q"]),
+                "mask_region": peak_row["mask_region"],
+            }
+        per_anc_summary.append({
+            "ancestry": int(a),
+            "name": anc_names.get(int(a), f"ancestry {a}"),
+            "n_significant": len(a_sig),
+            "peak_window": peak,
+        })
+
+    def _mask_count(token: str) -> int:
+        token = token.lower()
+        return sum(1 for r in sig if token in r["mask_region"].lower())
+
+    (out_dir / "summary.json").write_text(json.dumps({
+        "n_windows_total": len(rows),
+        "n_windows_significant": len(sig),
+        "fdr_q_threshold": float(fdr_q),
+        "per_ancestry": per_anc_summary,
+        "hla_overlap_n": _mask_count("hla"),
+        "centromere_overlap_n": _mask_count("centromere"),
+        "segdup_overlap_n": _mask_count("segdup"),
+        "high_ld_overlap_n": _mask_count("high"),
+        "outside_mask_n": sum(1 for r in sig if not r["mask_region"]),
+    }, indent=2))
+    print(f"  wrote {out_dir / 'summary.json'}", flush=True)
+
+
+# ── CLI ───────────────────────────────────────────────────────────────────
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    p.add_argument("--anc-vcf", type=Path, required=True,
+                   help="FLARE <prefix>.anc.vcf.gz")
+    p.add_argument("--global-tsv", type=Path, required=True,
+                   help="popout-format global ancestry TSV (for mu vs global check)")
+    p.add_argument("--flare-model", type=Path, required=True,
+                   help="FLARE <prefix>.model text file")
+    p.add_argument("--rf-ancestry", type=Path, required=True,
+                   help="RF ancestry predictions (research_id, ancestry_pred, probabilities)")
+    p.add_argument("--chrom-sizes", type=Path, required=True)
+    p.add_argument("--region-mask-bed", type=Path, action="append", default=[],
+                   help="BED of named regions to overlay (repeatable)")
+    p.add_argument("--labels-json", type=Path, default=None,
+                   help="labels.json from compare_to_rf.py for ancestry names (optional)")
+    p.add_argument("--window-bp", type=int, default=1_000_000)
+    p.add_argument("--step-bp", type=int, default=250_000)
+    p.add_argument("--fdr-q", type=float, default=0.05)
+    p.add_argument("--out-root", type=Path, required=True,
+                   help="Artifact work root; writes <out-root>/{structural,hap_disagreement,regional,model}/")
+    args = p.parse_args()
+
+    if args.step_bp > args.window_bp:
+        raise ValueError("--step-bp must be <= --window-bp")
+    for path in (args.anc_vcf, args.global_tsv, args.flare_model,
+                 args.rf_ancestry, args.chrom_sizes):
+        if not path.exists():
+            raise FileNotFoundError(path)
+
+    run_collector(args)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
