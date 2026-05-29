@@ -7,8 +7,8 @@ See `validation/SCHEMA.md` for the artifact contract this writes and
 The diagnostic sub-scripts (siblings in validation/scripts/) form a
 DAG with two independent tracks once setup completes. We execute the
 DAG via concurrent.futures.ThreadPoolExecutor sized to --max-workers so
-that, e.g., ref_target_concordance can run while compare_to_rf is
-producing labels.json.
+that, e.g., coverage can run while compare_to_rf is producing
+labels.json.
 
 Each step emits a structured stderr phase block on entry and exit,
 captures wallclock + peak RSS via resource.getrusage deltas, and
@@ -398,29 +398,6 @@ def step_compare_to_rye(args, ws: Workspace, log_dir: Path) -> None:
         shutil.move(str(png), conc / png.name)
 
 
-def step_ref_target_concordance(args, ws: Workspace, log_dir: Path) -> None:
-    """Step 5a (★ v1.1, R6): validate_ref_target_concordance.py.
-
-    Outputs route into provenance/ per SCHEMA.md §1.13.
-    """
-    scratch = ws.scratch_root / "ref_target_concordance"
-    scratch.mkdir(parents=True, exist_ok=True)
-    rc = _run_subprocess(
-        [sys.executable, str(SCRIPTS_DIR / "validate_ref_target_concordance.py"),
-         "--ref-vcf", str(args.ref_vcf),
-         "--input-vcf", str(args.input_vcf),
-         "--chrom", args.chrom,
-         "--out-dir", str(scratch)],
-        log_dir / "05a_validate_ref_target_concordance.log", step_name="ref_target_concordance",
-    )
-    _check("validate_ref_target_concordance", log_dir / "05a_validate_ref_target_concordance.log", rc)
-    prov = ws.subdir("provenance")
-    for name in ("ref_target_concordance.tsv", "ref_target_concordance_summary.json"):
-        src = scratch / name
-        if src.exists():
-            shutil.move(str(src), prov / name)
-
-
 def step_self_id(args, ws: Workspace, log_dir: Path) -> None:
     """Step 6 (optional): validate_self_id.py."""
     out = ws.subdir("self_id")
@@ -754,17 +731,6 @@ def _write_tier1_metrics(ws: Workspace, manifest: dict) -> None:
     for lab in ("afr", "amr", "eas", "eur", "sas"):
         add(f"flare_validate.ccc_{lab}", ccc_by_label[lab])
 
-    # ★ v1.1: R6 exact-overlap pct from provenance/ref_target_concordance_summary.json.
-    r6_pct = None
-    r6_summary = ws.work_root / "provenance" / "ref_target_concordance_summary.json"
-    if r6_summary.exists():
-        try:
-            d = json.loads(r6_summary.read_text())
-            r6_pct = round(float(d.get("exact_overlap_pct")), 4)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            pass
-    add("flare_validate.ref_target_exact_overlap_pct", r6_pct)
-
     # Per-step wallclock. Already in manifest.json:steps.<name>.wallclock_seconds;
     # surfacing them as tier1 rows lets the WDL replay drop them into the
     # flare-validate W&B project as step.<name>.wallclock_seconds so a
@@ -938,9 +904,6 @@ def main() -> int:
     # The WDL drives the path; --admixture-q / --admixture-fam are hard-dropped.
     p.add_argument("--rye-q", type=Path, default=None,
                    help="Rye Q TSV (★ v1.1; caller-supplied path; no default)")
-    # ★ v1.1: R6 ref/target concordance audit. Required for the new step.
-    p.add_argument("--ref-vcf", type=Path, default=None,
-                   help="FLARE reference VCF for this chrom (★ v1.1; required for R6 audit)")
     p.add_argument("--self-id", type=Path, default=None)
     p.add_argument("--popout-secondary-global", type=Path, default=None)
     p.add_argument("--popout-secondary-labels", type=Path, default=None)
@@ -995,9 +958,6 @@ def main() -> int:
         raise RuntimeError(
             "--popout-secondary-global and --popout-secondary-labels must be provided together"
         )
-    # ★ v1.1: ref-vcf is required for R6 (always runs).
-    if not args.ref_vcf:
-        raise RuntimeError("--ref-vcf is required (R6 ref/target concordance audit)")
 
     # ── DAG definition ──
     # Tract-derived metrics (structural / hap_disagreement / regional) all
@@ -1008,10 +968,6 @@ def main() -> int:
         Step(2, "to_popout_format",     (),                          step_to_popout_format),
         Step(3, "coverage",             ("to_popout_format",),       step_coverage, nonfatal=True),
         Step(4, "compare_to_rf",        ("to_popout_format", "coverage"), step_compare_to_rf),
-        # ★ v1.1: R6 has no FLARE-output dependency — only needs ref_vcf + input_vcf.
-        # Schedule at the "to_popout_format" depth so it runs in parallel with
-        # coverage / compare_to_rf instead of serializing behind them.
-        Step(5, "ref_target_concordance", ("to_popout_format",),     step_ref_target_concordance),
         # per_site_metrics waits for compare_to_rf so labels.json is ready
         # to feed ancestry names into windows.tsv.gz. compare_to_rf is
         # cheap relative to the heavy VCF pass.

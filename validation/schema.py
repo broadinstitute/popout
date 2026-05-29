@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-SCHEMA_VERSION = "1.1.0"
+SCHEMA_VERSION = "2.0.0"
 
 
 # ── Per-cluster artifact layout ───────────────────────────────────────────
@@ -74,10 +74,6 @@ REQUIRED_CLUSTER_FILES: tuple[str, ...] = (
     "provenance/input_vcf_header.txt",
     "provenance/schema_version.txt",
     # NOTE: provenance/flare_qc.tsv is v1.1 optional (gated on flare_qc_tsv).
-    # NOTE: provenance/ref_target_concordance.{tsv,json} are required v1.1
-    # additions — R6 only needs ref_vcf + input_vcf which are always provided.
-    "provenance/ref_target_concordance.tsv",     # ★ v1.1
-    "provenance/ref_target_concordance_summary.json",  # ★ v1.1
 )
 
 
@@ -158,7 +154,6 @@ REQUIRED_COHORT_FILES: tuple[str, ...] = (
     "cohort/hap_disagreement.tsv",
     "cohort/regional_windows.tsv.gz",
     "cohort/regional_meta.tsv",
-    "cohort/ref_target_concordance.tsv",   # ★ v1.1 — always emitted (R6 always runs)
 )
 
 

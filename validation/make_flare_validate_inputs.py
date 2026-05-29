@@ -60,12 +60,11 @@ WORKFLOW_NAME = "flare_validate"
 VALIDATION_DIR = Path(__file__).resolve().parent
 DEFAULT_CHROM_SIZES = VALIDATION_DIR / "data" / "grch38.chrom.sizes"
 
-# ★ v1.1: manifest gains `ref_vcf` column (R6 audit) and `flare_qc_tsv` becomes
-# optional (pre-pipeline fixtures don't have one). Required cols are those
-# every (cluster, chrom) row must populate.
+# ★ v2.0.0: ref_vcf dropped — the R6 ref/target audit it powered was
+# mothballed; see validation/scripts/_mothballed/panel_validation/.
 REQUIRED_COLS = (
     "cluster_id", "chrom", "anc_vcf", "global_anc", "flare_model",
-    "flare_log", "input_vcf", "ref_vcf",
+    "flare_log", "input_vcf",
 )
 OPTIONAL_COLS = ("flare_qc_tsv",)
 GCLOUD_CONFIG = "pmi-ops"
@@ -122,7 +121,6 @@ def build_inputs(rows: list[dict[str, str]], args: argparse.Namespace) -> dict:
             "flare_model": r["flare_model"],
             "flare_log":   r["flare_log"],
             "input_vcf":   r["input_vcf"],
-            "ref_vcf":     r["ref_vcf"],   # ★ v1.1 required
         }
         # ★ v1.1: flare_qc_tsv is optional — omit when blank so the WDL sees
         # `File?` = unset and the orchestrator falls through to SKIP-mode.
@@ -204,7 +202,7 @@ def main() -> int:
     ap.add_argument("--manifest-tsv", type=Path,
                     help="TSV with one row per (cluster_id, chrom). Required cols: "
                          "cluster_id, chrom, anc_vcf, global_anc, flare_model, flare_log, "
-                         "input_vcf, ref_vcf. Optional col: flare_qc_tsv (★ v1.1: omit to "
+                         "input_vcf. Optional col: flare_qc_tsv (★ v1.1: omit to "
                          "exercise SKIP-on-missing-qc for pre-pipeline fixtures).")
     ap.add_argument("--cromwell-dir", type=str,
                     help="(experimental) walk a Cromwell output tree")
@@ -268,7 +266,7 @@ def main() -> int:
         all_paths: set[str] = set()
         for r in rows:
             for col in ("anc_vcf", "global_anc", "flare_model", "flare_log",
-                        "input_vcf", "ref_vcf"):
+                        "input_vcf"):
                 if r[col].startswith("gs://"):
                     all_paths.add(r[col])
             qc = r.get("flare_qc_tsv", "")

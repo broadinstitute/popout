@@ -200,30 +200,6 @@ def collate_concordance_metrics(arts: list[ClusterArtifact], out_path: Path) -> 
     return any_present
 
 
-def collate_ref_target_concordance(arts: list[ClusterArtifact], out_path: Path) -> None:
-    """★ v1.1 (always emitted): flatten per-cluster R6 summary JSONs into long form."""
-    cols = ["cluster_id", "chrom", "reference_total", "exact_overlap",
-            "exact_overlap_pct", "position_match_but_alleles_differ_pct",
-            "absent_in_target_pct", "pass"]
-    _write_header_once(out_path, "\t".join(cols))
-    rows = []
-    for art in arts:
-        src = art.artifact_dir / "provenance" / "ref_target_concordance_summary.json"
-        if not src.exists():
-            continue
-        d = json.loads(src.read_text())
-        rows.append("\t".join([
-            art.cluster_id, art.chrom,
-            str(d.get("reference_total", "")),
-            str(d.get("exact_overlap", "")),
-            f"{float(d.get('exact_overlap_pct', 0)):.4f}",
-            f"{float(d.get('position_match_but_alleles_differ_pct', 0)):.4f}",
-            f"{float(d.get('absent_in_target_pct', 0)):.4f}",
-            "true" if d.get("pass") else "false",
-        ]))
-    _append_lines(out_path, rows)
-
-
 def collate_confusion_rf(arts: list[ClusterArtifact], out_path: Path) -> None:
     """Unpivot the wide rf_confusion_matrix.tsv into long (cluster, rf_label, flare_call, n)."""
     _write_header_once(out_path, "cluster_id\tchrom\trf_label\tflare_call\tn")
@@ -537,16 +513,14 @@ def build_qc_dashboard(arts: list[ClusterArtifact], thresholds: dict) -> dict:
     """
     dimensions = ("coverage", "calibration", "concordance",
                   "structural", "hap_disagreement", "regional",
-                  "rye_concordance", "ref_target_concordance")  # ★ v1.1
+                  "rye_concordance")
     cal_lo, cal_hi = thresholds.get("calibration_slope_outside", [0.85, 1.15])
     hd_threshold = thresholds.get("hap_disagreement_yellow", 0.30)
     regional_threshold = thresholds.get("regional_significant_yellow", 10)
-    # ★ v1.1: R10 + R6 thresholds (PLAN2.md §3.3 traffic-light rules).
+    # ★ v1.1: R10 thresholds (PLAN2.md §3.3 traffic-light rules).
     r10_pearson_threshold = thresholds.get("rye_pearson_pass", 0.95)
     r10_ccc_threshold = thresholds.get("rye_ccc_pass", 0.90)
     r10_yellow_margin = thresholds.get("rye_yellow_margin_pct", 0.05)
-    r6_green_threshold = thresholds.get("ref_target_green_pct", 94.5)
-    r6_yellow_threshold = thresholds.get("ref_target_yellow_pct", 90.0)
 
     by_cluster: dict[str, list[ClusterArtifact]] = defaultdict(list)
     for a in arts:
@@ -690,28 +664,6 @@ def build_qc_dashboard(arts: list[ClusterArtifact], thresholds: dict) -> dict:
         else:
             verdicts["rye_concordance"] = "green"
 
-        # ★ v1.1: ref_target_concordance traffic light per PLAN2.md §3.3.
-        worst_overlap = 100.0
-        r6_present = False
-        for g in group:
-            j = g.artifact_dir / "provenance" / "ref_target_concordance_summary.json"
-            if not j.exists():
-                continue
-            r6_present = True
-            try:
-                d = json.loads(j.read_text())
-                worst_overlap = min(worst_overlap, float(d.get("exact_overlap_pct", 100.0)))
-            except (json.JSONDecodeError, TypeError, ValueError):
-                pass
-        if not r6_present:
-            verdicts["ref_target_concordance"] = "skip"
-        elif worst_overlap < r6_yellow_threshold:
-            verdicts["ref_target_concordance"] = "red"
-        elif worst_overlap < r6_green_threshold:
-            verdicts["ref_target_concordance"] = "yellow"
-        else:
-            verdicts["ref_target_concordance"] = "green"
-
         per_cluster[cid] = verdicts
 
     return {
@@ -725,8 +677,6 @@ def build_qc_dashboard(arts: list[ClusterArtifact], thresholds: dict) -> dict:
             "rye_pearson_pass": r10_pearson_threshold,
             "rye_ccc_pass": r10_ccc_threshold,
             "rye_yellow_margin_pct": r10_yellow_margin,
-            "ref_target_green_pct": r6_green_threshold,
-            "ref_target_yellow_pct": r6_yellow_threshold,
         },
     }
 
@@ -855,8 +805,6 @@ def main() -> int:
     # ★ v1.1: Rye concordance metrics (optional, gated on rye_q per cluster).
     has_rye = collate_concordance_metrics(
         arts,                              cohort_dir / "concordance_metrics.tsv")
-    # ★ v1.1: R6 always runs, table always emitted.
-    collate_ref_target_concordance(arts,  cohort_dir / "ref_target_concordance.tsv")
     collate_confusion_rf(arts,            cohort_dir / "confusion_rf.tsv")
     collate_calibration_slope(arts,       cohort_dir / "calibration_slope.tsv")
     collate_tract_length_stats(arts,      cohort_dir / "tract_length_stats.tsv")

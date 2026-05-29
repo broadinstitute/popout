@@ -27,10 +27,7 @@ struct FlareClusterRun {
   File   flare_log
   File?  flare_qc_tsv              # ★ v1.1: optional — pre-pipeline fixtures have no qc.tsv
   File?  flare_summary             # FLARE does not emit one today; reserved
-  File   input_vcf                 # validate_ref_target_concordance auto-tabix-indexes if .tbi missing
-  File?  input_vcf_idx             # pre-built .tbi — provide it and Cromwell co-localizes, skipping auto-tabix
-  File   ref_vcf                   # ★ v1.1: per-chrom FLARE reference VCF (R6 audit); same auto-tabix
-  File?  ref_vcf_idx               # pre-built .tbi for ref_vcf, same reasoning
+  File   input_vcf                 # per-cluster gt VCF; header-only reads in coverage + provenance
 }
 
 task validate_cluster {
@@ -46,7 +43,7 @@ task validate_cluster {
 
     String run_name                # magicwand run-name prefix
     String? panel_id
-    String schema_version = "1.1.0"   # ★ v1.1 bump
+    String schema_version = "2.0.0"   # ★ v2.0.0 (R6 mothballed)
 
     # Resource overrides (auto-scaled by anc_vcf size by default).
     Int?     cpu_override
@@ -144,7 +141,6 @@ task validate_cluster {
       ~{"--flare-qc-tsv "            + cluster_run.flare_qc_tsv} \
       ~{"--flare-summary "           + cluster_run.flare_summary} \
       --input-vcf      ~{cluster_run.input_vcf} \
-      --ref-vcf        ~{cluster_run.ref_vcf} \
       --rf-ancestry    ~{rf_ancestry} \
       --chrom-sizes    ~{chrom_sizes} \
       --region-masks-dir /opt/region_masks \
@@ -198,7 +194,7 @@ task collate_cohort {
     File?       collation_config
     File?       previous_cohort_bundle    # cohort bundle to diff against
     String      run_name
-    String      schema_version = "1.1.0"     # ★ v1.1 bump
+    String      schema_version = "2.0.0"     # ★ v2.0.0 (R6 mothballed)
 
     Int     cpu          = 4
     String  memory       = "16 GB"
@@ -284,7 +280,7 @@ workflow flare_validate {
 
     String run_name
     String? panel_id
-    String schema_version = "1.1.0"     # ★ v1.1 bump
+    String schema_version = "2.0.0"     # ★ v2.0.0 (R6 mothballed)
 
     Int?     cpu_override
     String?  memory_override

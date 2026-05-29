@@ -1,9 +1,10 @@
 # FLARE validation artifact schema
 
-Schema version: **1.1.0** (semver — bump on any layout change)
+Schema version: **2.0.0** (semver — bump on any layout change)
 
 ## Version history
 
+- **2.0.0** — Mothball R6 ref/target site-concordance audit. The check was a panel-validation question, not a FLARE-output question — running it on every (cluster, chrom) was redundant once FLARE has emitted a usable .anc.vcf.gz. Removed files: `provenance/ref_target_concordance.{tsv,json}` (per-cluster) and `cohort/ref_target_concordance.tsv`. Removed Tier-1 row: `flare_validate.ref_target_exact_overlap_pct`. Removed dashboard dimension: `ref_target_concordance`. The script and baseline meta are preserved under `validation/scripts/_mothballed/panel_validation/` for a future standalone panel-validation pipeline.
 - **1.1.0** — Adopt "Rye" naming (was ADMIXTURE); admixture_q optional gate renamed to `rye_q`. Add R6 ref/target concordance audit (`provenance/ref_target_concordance.{tsv,json}`). Expand R10 concordance (`concordance/concordance_metrics.tsv`, `concordance/concordance_summary.json`, `concordance/rye_*` family) with Pearson/CCC/cosine/MAE/Jaccard@τ per ancestry. Add three Tier-1 metrics (`global_ccc`, `ccc_<label>`, `ref_target_exact_overlap_pct`). Cohort bundle gains `cohort/concordance_metrics.tsv` and `cohort/ref_target_concordance.tsv`.
 - **1.0.0** — Initial schema.
 
@@ -98,9 +99,7 @@ Produced by Stage 1. One tarball per `(cluster_id, chrom)` pair.
     ├── flare_log_tail.txt
     ├── flare_qc.tsv                                       (optional — present iff flare_qc_tsv provided)
     ├── input_vcf_header.txt
-    ├── schema_version.txt
-    ├── ref_target_concordance.tsv                         (★ v1.1 — R6 audit, wide summary form)
-    └── ref_target_concordance_summary.json                (★ v1.1 — R6 summary + pass flag)
+    └── schema_version.txt
 ```
 
 ### 1.1 `manifest.json`
@@ -156,7 +155,6 @@ flare_validate.peak_rss_gb
 flare_validate.cpu_wall_ratio
 flare_validate.global_ccc                       ★ v1.1 — cohort-wide CCC from concordance_summary.json
 flare_validate.ccc_<label>                      ★ v1.1 — one row per ancestry in {afr,amr,eas,eur,sas}; NA when cluster_mu < 0.01
-flare_validate.ref_target_exact_overlap_pct     ★ v1.1 — from R6 summary
 ```
 
 `cluster_id` and `chrom` are string-typed informational keys; the remaining rows are float/int/bool signals tuneable from the dashboard.
@@ -373,8 +371,6 @@ Object with keys: `n_samples_joined` (int), `n_self_id_classes` (int), `per_clas
 | `flare_qc.tsv` | *(optional, gated on `flare_qc_tsv`)* Copy of the in-WDL `qc.tsv`. |
 | `input_vcf_header.txt` | Output of `bcftools view -h` on the input gt= VCF. |
 | `schema_version.txt` | Plain text. One line: the schema version, mirrored from `manifest.json`. |
-| `ref_target_concordance.tsv` *(★ v1.1)* | Single-row TSV from `summarize_overlap()`. Columns: `chrom, reference_total, exact_overlap, exact_overlap_pct, position_match_but_alleles_differ, position_match_but_alleles_differ_pct, absent_in_target, absent_in_target_pct, reinspection_exact_match_found`. |
-| `ref_target_concordance_summary.json` *(★ v1.1)* | Keys: `chrom`, `reference_total`, `exact_overlap`, `exact_overlap_pct`, `position_match_but_alleles_differ_pct`, `absent_in_target_pct`, `pass` (bool: true iff `exact_overlap_pct ≥ 94.5`). |
 
 ---
 
@@ -404,7 +400,6 @@ cohort_bundle/
 │   ├── regional_windows.tsv.gz
 │   ├── regional_meta.tsv
 │   ├── concordance_metrics.tsv          (★ v1.1 — long unpivot of per-cluster concordance/concordance_metrics.tsv)
-│   ├── ref_target_concordance.tsv       (★ v1.1 — long form of per-cluster R6 summaries)
 │   ├── fst_matrix.tsv                    (optional — popout-source artifacts only)
 │   └── self_id.tsv                       (optional)
 └── per_cluster/
@@ -464,12 +459,6 @@ Long unpivot of per-cluster `concordance/concordance_metrics.tsv` with `cluster_
 `cluster_id<TAB>chrom<TAB>ancestry<TAB>cluster_mu<TAB>n_samples<TAB>pearson_r<TAB>ccc<TAB>cosine_mean<TAB>mae_mean<TAB>mae_median<TAB>mae_p95<TAB>jaccard_at_0.10<TAB>jaccard_at_0.25<TAB>jaccard_at_0.50<TAB>pass`
 
 `pass` is empty string when degenerate (cluster_mu < 0.01). Rows from clusters where rye_q wasn't provided are absent.
-
-#### `ref_target_concordance.tsv` *(★ v1.1)*
-
-Long form of per-cluster R6 summaries. Columns:
-
-`cluster_id<TAB>chrom<TAB>reference_total<TAB>exact_overlap<TAB>exact_overlap_pct<TAB>position_match_but_alleles_differ_pct<TAB>absent_in_target_pct<TAB>pass`
 
 #### `confusion_rf.tsv`
 
@@ -539,7 +528,7 @@ Columns: `cluster_id<TAB>chrom<TAB>self_id<TAB>n<TAB>ancestry<TAB>name<TAB>mean_
 The canonical consumer of the cohort bundle is `validation/scripts/build_flare_validation_report.py`. It produces one PDF rolling up:
 
 - **Cohort front-matter** — run overview, QC traffic-light dashboard (PIL-rendered widget), mean-merged-r bar, per-ancestry Rye concordance box, ref/target site-overlap bars, top-20 regional meta-analysis windows.
-- **Per-cluster sections** — header (traffic lights + manifest + Tier-1 metrics), coverage + R6 ref/target, Rye concordance (gated on `optional_inputs.rye_q`), calibration (figure grid + slope matrix), structural (tract / switch distributions + summary), hap disagreement + regional QC.
+- **Per-cluster sections** — header (traffic lights + manifest + Tier-1 metrics), coverage, Rye concordance (gated on `optional_inputs.rye_q`), calibration (figure grid + slope matrix), structural (tract / switch distributions + summary), hap disagreement + regional QC.
 - **Provenance appendix** — schema version, sha256 of every per-cluster artifact, diff-against link.
 
 Usage:
