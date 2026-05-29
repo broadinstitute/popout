@@ -63,10 +63,13 @@ from __future__ import annotations
 
 import argparse
 import ast
+import concurrent.futures
 import gzip
 import json
+import os
 import subprocess
 import sys
+import tempfile
 from collections import defaultdict
 from pathlib import Path
 
@@ -264,6 +267,235 @@ def write_mu_vs_global_diff(
 # ── The fused per-site collector ──────────────────────────────────────────
 
 
+def _collect_slice(
+    anc_vcf: str,
+    sample_names: list[str],
+    K: int,
+    win_starts_list: list[int],
+    win_ends_list: list[int],
+    worker_id: int,
+    progress_every: int,
+) -> dict:
+    """Stream the VCF for the given sample slice and return aggregated
+    state. Module-level so ProcessPoolExecutor can pickle it.
+
+    Each worker writes its sample list to a temp file and pipes
+    `bcftools query -S samples.txt -f '%CHROM\\t%POS[\\t%AN1\\t%AN2]\\n'`
+    into a per-record numpy loop. bcftools restricts the FORMAT columns
+    to the worker's samples so wire bytes and per-record parse work both
+    scale 1/N with the worker count.
+
+    Returns a dict of (per-slice) arrays plus a (n_wins, K) bp_window_anc
+    matrix that the cohort reducer SUMS across workers.
+    """
+    n_samples = len(sample_names)
+    win_starts = np.asarray(win_starts_list, dtype=np.int64)
+    win_ends = np.asarray(win_ends_list, dtype=np.int64)
+    n_wins = win_starts.size
+
+    NO_ANC = np.int8(-1)
+    cur_anc_h1 = np.full(n_samples, NO_ANC, dtype=np.int8)
+    cur_anc_h2 = np.full(n_samples, NO_ANC, dtype=np.int8)
+    tract_start_h1 = np.zeros(n_samples, dtype=np.int64)
+    tract_start_h2 = np.zeros(n_samples, dtype=np.int64)
+    tract_end_h1 = np.zeros(n_samples, dtype=np.int64)
+    tract_end_h2 = np.zeros(n_samples, dtype=np.int64)
+    tract_count_h1 = np.zeros(n_samples, dtype=np.int32)
+    tract_count_h2 = np.zeros(n_samples, dtype=np.int32)
+    tract_lengths_bp: dict[int, list[int]] = {a: [] for a in range(K)}
+    agree_bp = np.zeros(n_samples, dtype=np.int64)
+    disagree_bp = np.zeros(n_samples, dtype=np.int64)
+    bp_per_anc_h1 = np.zeros((n_samples, K), dtype=np.int64)
+    bp_per_anc_h2 = np.zeros((n_samples, K), dtype=np.int64)
+    bp_window_anc = np.zeros((n_wins, K), dtype=np.int64)
+    sample_idx = np.arange(n_samples)
+
+    def _close_tracts(
+        closing_anc: np.ndarray,
+        closing_starts: np.ndarray,
+        closing_ends: np.ndarray,
+    ) -> None:
+        if closing_anc.size == 0:
+            return
+        lengths = closing_ends - closing_starts + 1
+        for a in np.unique(closing_anc):
+            mask = closing_anc == a
+            tract_lengths_bp[int(a)].extend(lengths[mask].tolist())
+            t_starts = closing_starts[mask]
+            t_ends_half_open = closing_ends[mask] + 1
+            for ts, te in zip(t_starts.tolist(), t_ends_half_open.tolist()):
+                lo = np.searchsorted(win_ends, ts, side="right")
+                hi = np.searchsorted(win_starts, te, side="left")
+                if hi <= lo:
+                    continue
+                ov = np.minimum(te, win_ends[lo:hi]) - np.maximum(ts, win_starts[lo:hi])
+                bp_window_anc[lo:hi, int(a)] += ov
+
+    # Write the slice's sample names to a temp file for bcftools -S.
+    sl_fd, slice_path = tempfile.mkstemp(
+        prefix=f"per_site_metrics_w{worker_id}_", suffix=".samples.txt"
+    )
+    try:
+        with os.fdopen(sl_fd, "w") as f:
+            for s in sample_names:
+                f.write(s + "\n")
+
+        cmd = [
+            "bcftools", "query",
+            "-S", slice_path,
+            "-f", r"%CHROM\t%POS[\t%AN1\t%AN2]" + "\n",
+            str(anc_vcf),
+        ]
+        print(f"[worker {worker_id}] $ " + " ".join(cmd), flush=True)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, bufsize=1 << 16)
+        assert proc.stdout is not None
+
+        prev_pos: int | None = None
+        n_records = 0
+        chrom_seen: str | None = None
+
+        for line in proc.stdout:
+            if not line or line == "\n":
+                continue
+            parts = line.rstrip("\n").split("\t")
+            c = parts[0]
+            pos = int(parts[1])
+            flat = np.array(parts[2:], dtype=np.int8)
+            if flat.size != 2 * n_samples:
+                raise RuntimeError(
+                    f"[worker {worker_id}] record at {c}:{pos} has "
+                    f"{flat.size} cell-fields, expected {2 * n_samples}"
+                )
+            an1 = flat[0::2]
+            an2 = flat[1::2]
+
+            if chrom_seen is None:
+                chrom_seen = c
+            elif c != chrom_seen:
+                raise RuntimeError(
+                    f"[worker {worker_id}] per-cluster VCF expected to "
+                    f"hold one chromosome; saw {chrom_seen!r} and {c!r}"
+                )
+
+            width = 0 if prev_pos is None else (pos - prev_pos)
+
+            if width:
+                agree_mask = an1 == an2
+                agree_bp[agree_mask] += width
+                disagree_bp[~agree_mask] += width
+                bp_per_anc_h1[sample_idx, an1] += width
+                bp_per_anc_h2[sample_idx, an2] += width
+
+            first_h1 = cur_anc_h1 == NO_ANC
+            first_h2 = cur_anc_h2 == NO_ANC
+            change_h1 = (~first_h1) & (cur_anc_h1 != an1)
+            change_h2 = (~first_h2) & (cur_anc_h2 != an2)
+
+            if change_h1.any():
+                _close_tracts(
+                    cur_anc_h1[change_h1],
+                    tract_start_h1[change_h1],
+                    tract_end_h1[change_h1],
+                )
+                tract_count_h1[change_h1] += 1
+                tract_start_h1[change_h1] = pos
+                tract_end_h1[change_h1] = pos
+                cur_anc_h1[change_h1] = an1[change_h1]
+            if change_h2.any():
+                _close_tracts(
+                    cur_anc_h2[change_h2],
+                    tract_start_h2[change_h2],
+                    tract_end_h2[change_h2],
+                )
+                tract_count_h2[change_h2] += 1
+                tract_start_h2[change_h2] = pos
+                tract_end_h2[change_h2] = pos
+                cur_anc_h2[change_h2] = an2[change_h2]
+
+            extend_h1 = (~first_h1) & ~change_h1
+            extend_h2 = (~first_h2) & ~change_h2
+            if extend_h1.any():
+                tract_end_h1[extend_h1] = pos
+            if extend_h2.any():
+                tract_end_h2[extend_h2] = pos
+
+            if first_h1.any():
+                tract_count_h1[first_h1] = 1
+                tract_start_h1[first_h1] = pos
+                tract_end_h1[first_h1] = pos
+                cur_anc_h1[first_h1] = an1[first_h1]
+            if first_h2.any():
+                tract_count_h2[first_h2] = 1
+                tract_start_h2[first_h2] = pos
+                tract_end_h2[first_h2] = pos
+                cur_anc_h2[first_h2] = an2[first_h2]
+
+            prev_pos = pos
+            n_records += 1
+            if progress_every and n_records % progress_every == 0:
+                print(f"[worker {worker_id}]   ... {n_records:,} records "
+                      f"(pos={pos:,})", flush=True)
+
+        rc = proc.wait()
+        if rc != 0:
+            raise RuntimeError(
+                f"[worker {worker_id}] bcftools query exited with {rc}"
+            )
+        if n_records == 0:
+            raise RuntimeError(
+                f"[worker {worker_id}] no records emitted from {anc_vcf}"
+            )
+
+        # End-of-chrom flush
+        open_h1 = cur_anc_h1 != NO_ANC
+        if open_h1.any():
+            _close_tracts(
+                cur_anc_h1[open_h1],
+                tract_start_h1[open_h1],
+                tract_end_h1[open_h1],
+            )
+        open_h2 = cur_anc_h2 != NO_ANC
+        if open_h2.any():
+            _close_tracts(
+                cur_anc_h2[open_h2],
+                tract_start_h2[open_h2],
+                tract_end_h2[open_h2],
+            )
+    finally:
+        try:
+            os.unlink(slice_path)
+        except OSError:
+            pass
+
+    return {
+        "worker_id": worker_id,
+        "sample_names": sample_names,
+        "chrom_seen": chrom_seen,
+        "n_records": n_records,
+        "tract_lengths_bp": tract_lengths_bp,
+        "tract_count_h1": tract_count_h1,
+        "tract_count_h2": tract_count_h2,
+        "agree_bp": agree_bp,
+        "disagree_bp": disagree_bp,
+        "bp_per_anc_h1": bp_per_anc_h1,
+        "bp_per_anc_h2": bp_per_anc_h2,
+        "bp_window_anc": bp_window_anc,
+    }
+
+
+def _partition_samples(samples: list[str], n_workers: int) -> list[list[str]]:
+    """Contiguous, balanced split. Each worker gets ceil(N/W) or floor(N/W) samples."""
+    n = len(samples)
+    base, extra = divmod(n, n_workers)
+    parts: list[list[str]] = []
+    s = 0
+    for w in range(n_workers):
+        size = base + (1 if w < extra else 0)
+        parts.append(samples[s:s + size])
+        s += size
+    return parts
+
+
 def run_collector(args: argparse.Namespace) -> None:
     out_root: Path = args.out_root
     structural_out = out_root / "structural"
@@ -288,13 +520,11 @@ def run_collector(args: argparse.Namespace) -> None:
 
     anc_names = load_labels_json(args.labels_json)
 
-    # FLARE K is canonical from the model file.
     model_info = read_model_text(args.flare_model)
     K = int(model_info["n_ancestries"])
     model_T = float(model_info.get("gen_since_admix") or 0.0) or None
     print(f"FLARE K = {K}; model gen_since_admix = {model_T}", flush=True)
 
-    # ── mu vs global (cheap, runs first; uses global_tsv + model) ──
     write_mu_vs_global_diff(args.global_tsv, args.flare_model, model_out, anc_names)
     print(f"  wrote {model_out / 'mu_vs_global_diff.json'}", flush=True)
 
@@ -307,216 +537,104 @@ def run_collector(args: argparse.Namespace) -> None:
             f"chrom {first_chrom!r} not in chrom-sizes file {args.chrom_sizes}"
         )
 
-    # Sliding-window setup (this task is per-chrom).
     windows = make_windows(chrom_sizes[first_chrom], args.window_bp, args.step_bp)
     n_wins = len(windows)
-    win_starts = np.array([w[0] for w in windows], dtype=np.int64)
-    win_ends = np.array([w[1] for w in windows], dtype=np.int64)
+    win_starts_list = [w[0] for w in windows]
+    win_ends_list = [w[1] for w in windows]
     print(f"  {n_wins} sliding windows "
           f"(window={args.window_bp/1e6:g} Mb, step={args.step_bp/1e6:g} Mb)",
           flush=True)
 
-    # ── Per-sample state (int8 ancestries fits K up to 127) ──
     if K > 127:
         raise RuntimeError(f"FLARE K={K} exceeds int8 capacity")
-    NO_ANC = np.int8(-1)
-    cur_anc_h1 = np.full(n_samples, NO_ANC, dtype=np.int8)
-    cur_anc_h2 = np.full(n_samples, NO_ANC, dtype=np.int8)
-    tract_start_h1 = np.zeros(n_samples, dtype=np.int64)
-    tract_start_h2 = np.zeros(n_samples, dtype=np.int64)
-    tract_end_h1 = np.zeros(n_samples, dtype=np.int64)
-    tract_end_h2 = np.zeros(n_samples, dtype=np.int64)
-    tract_count_h1 = np.zeros(n_samples, dtype=np.int32)
-    tract_count_h2 = np.zeros(n_samples, dtype=np.int32)
 
-    # Per-ancestry list of finished tract lengths (bp). Use Python lists
-    # because numpy doesn't have efficient append; conversion to ndarray
-    # happens once at the end.
+    # ── Decide workers ──
+    # Keep at least ~300 samples per slice so the bcftools spawn +
+    # per-process numpy import isn't a larger fraction of wallclock than
+    # the work itself. Above that the per-record dominance of the
+    # numpy ops makes the speedup ~linear in `workers`.
+    MIN_SAMPLES_PER_SLICE = 300
+    workers = max(1, int(args.workers))
+    workers = min(workers, max(1, n_samples // MIN_SAMPLES_PER_SLICE))
+    print(f"  fan-out: {workers} worker(s) over {n_samples} samples", flush=True)
+
+    partitions = _partition_samples(samples, workers)
+    # Progress prints only matter for the single-worker case; in fan-out
+    # mode the per-worker tail interleaves.
+    progress_every = 50_000 if workers == 1 else 0
+
+    if workers == 1:
+        results = [_collect_slice(
+            anc_vcf=str(args.anc_vcf),
+            sample_names=partitions[0],
+            K=K,
+            win_starts_list=win_starts_list,
+            win_ends_list=win_ends_list,
+            worker_id=0,
+            progress_every=progress_every,
+        )]
+    else:
+        results = [None] * workers
+        with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(
+                    _collect_slice,
+                    str(args.anc_vcf),
+                    partitions[w],
+                    K,
+                    win_starts_list,
+                    win_ends_list,
+                    w,
+                    progress_every,
+                ): w
+                for w in range(workers)
+            }
+            for fut in concurrent.futures.as_completed(futures):
+                w = futures[fut]
+                results[w] = fut.result()
+                print(f"  worker {w} done: "
+                      f"{results[w]['n_records']:,} records, "
+                      f"{sum(len(v) for v in results[w]['tract_lengths_bp'].values()):,} "
+                      f"tracts", flush=True)
+
+    # ── Cohort-level reduction ──
+    # Sanity: every worker must agree on chrom and n_records (they all
+    # read the same per-cluster file).
+    chrom_seen = results[0]["chrom_seen"]
+    n_records = results[0]["n_records"]
+    for r in results[1:]:
+        if r["chrom_seen"] != chrom_seen:
+            raise RuntimeError(
+                f"worker chrom mismatch: {chrom_seen!r} vs {r['chrom_seen']!r}"
+            )
+        if r["n_records"] != n_records:
+            raise RuntimeError(
+                f"worker n_records mismatch: {n_records} vs {r['n_records']}"
+            )
+    print(f"  cohort: {n_records:,} records streamed across {workers} worker(s)",
+          flush=True)
+
+    # Concatenate per-sample arrays in worker order (matches the original
+    # sample order because partitions are contiguous).
+    cohort_samples = [s for r in results for s in r["sample_names"]]
+    if cohort_samples != samples:
+        raise RuntimeError(
+            "cohort sample-name concat does not match VCF header order"
+        )
+    tract_count_h1 = np.concatenate([r["tract_count_h1"] for r in results])
+    tract_count_h2 = np.concatenate([r["tract_count_h2"] for r in results])
+    agree_bp = np.concatenate([r["agree_bp"] for r in results])
+    disagree_bp = np.concatenate([r["disagree_bp"] for r in results])
+    bp_per_anc_h1 = np.concatenate([r["bp_per_anc_h1"] for r in results], axis=0)
+    bp_per_anc_h2 = np.concatenate([r["bp_per_anc_h2"] for r in results], axis=0)
+    bp_window_anc = sum(r["bp_window_anc"] for r in results)
+
+    # Per-ancestry tract length lists: extend.
     tract_lengths_bp: dict[int, list[int]] = {a: [] for a in range(K)}
+    for r in results:
+        for a, lst in r["tract_lengths_bp"].items():
+            tract_lengths_bp[a].extend(lst)
 
-    # Hap-disagreement state
-    agree_bp = np.zeros(n_samples, dtype=np.int64)
-    disagree_bp = np.zeros(n_samples, dtype=np.int64)
-    bp_per_anc_h1 = np.zeros((n_samples, K), dtype=np.int64)
-    bp_per_anc_h2 = np.zeros((n_samples, K), dtype=np.int64)
-
-    # Regional state
-    bp_window_anc = np.zeros((n_wins, K), dtype=np.int64)
-
-    # ── Stream bcftools query ──
-    cmd = [
-        "bcftools", "query",
-        "-f", r"%CHROM\t%POS[\t%AN1\t%AN2]" + "\n",
-        str(args.anc_vcf),
-    ]
-    print("$ " + " ".join(cmd), flush=True)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, bufsize=1 << 16)
-    assert proc.stdout is not None
-
-    sample_idx = np.arange(n_samples)
-    prev_pos: int | None = None
-    n_records = 0
-    chrom_seen: str | None = None
-
-    def _close_tracts(
-        closing_anc: np.ndarray,
-        closing_starts: np.ndarray,
-        closing_ends: np.ndarray,
-    ) -> None:
-        """For every tract that just closed:
-        (a) push its length (bp) into the per-ancestry bucket (structural)
-        (b) intersect [start, end+1) with every overlapping window and
-            add the bp to bp_window_anc[wi, ancestry] (regional).
-
-        Matches the old tract-iteration semantics in validate_regional.py
-        exactly — a tract owns bp [start, end] inclusive, and its
-        contribution to each window is the half-open overlap. This is the
-        only safe way to avoid double-counting the bp gaps between
-        adjacent tracts."""
-        if closing_anc.size == 0:
-            return
-        lengths = closing_ends - closing_starts + 1
-        for a in np.unique(closing_anc):
-            mask = closing_anc == a
-            tract_lengths_bp[int(a)].extend(lengths[mask].tolist())
-            t_starts = closing_starts[mask]
-            t_ends_half_open = closing_ends[mask] + 1
-            # Per-tract window overlap. ~4 overlapping windows per tract
-            # for a 1 Mb / 250 kb sliding grid; loop is cheap.
-            for ts, te in zip(t_starts.tolist(), t_ends_half_open.tolist()):
-                # Half-open overlap with each window [ws, we).
-                # win_ends > ts AND win_starts < te.
-                lo = np.searchsorted(win_ends, ts, side="right")
-                hi = np.searchsorted(win_starts, te, side="left")
-                if hi <= lo:
-                    continue
-                ov = np.minimum(te, win_ends[lo:hi]) - np.maximum(ts, win_starts[lo:hi])
-                bp_window_anc[lo:hi, int(a)] += ov
-
-    for line in proc.stdout:
-        # Defensive: empty trailing line
-        if not line or line == "\n":
-            continue
-        parts = line.rstrip("\n").split("\t")
-        c = parts[0]
-        pos = int(parts[1])
-        # parts[2:] is flat: an1_s0, an2_s0, an1_s1, an2_s1, ...
-        flat = np.array(parts[2:], dtype=np.int8)
-        if flat.size != 2 * n_samples:
-            raise RuntimeError(
-                f"record at {c}:{pos} has {flat.size} cell-fields, "
-                f"expected {2 * n_samples} (2 × n_samples)"
-            )
-        an1 = flat[0::2]
-        an2 = flat[1::2]
-
-        if chrom_seen is None:
-            chrom_seen = c
-        elif c != chrom_seen:
-            raise RuntimeError(
-                f"per-cluster VCF expected to hold one chromosome; "
-                f"saw {chrom_seen!r} and {c!r}"
-            )
-
-        # ── Per-site bp width ──
-        # Use width = pos - prev_pos so the per-site widths sum to
-        # (last_pos - first_pos). First site of the chrom contributes
-        # nothing (no preceding interval). This matches the existing
-        # tract-based code's bp accounting to within an off-by-one per
-        # tract, which is negligible at chromosome scale.
-        if prev_pos is None:
-            width = 0
-        else:
-            width = pos - prev_pos
-
-        # ── Hap disagreement / per-hap bincount ──
-        # Per-site bp width is attributed to the ancestry at this site
-        # for every (sample, hap). This is correct for hap_disagreement
-        # because anc is constant within a (sample, hap) tract, so the
-        # per-site attribution = the per-tract attribution telescopically.
-        if width:
-            agree_mask = an1 == an2
-            agree_bp[agree_mask] += width            # masked write — no temp alloc
-            disagree_bp[~agree_mask] += width        # one ~ alloc; tolerable
-            # `sample_idx` is np.arange(n_samples), so (sample_idx, an1)
-            # has no duplicate index pairs. Fancy-index += is the correct
-            # scatter-add semantics here AND is ~100× faster than
-            # np.add.at, which forces an atomic accumulation loop. At
-            # 34k samples × 587k records that single switch is the
-            # difference between minutes and hours.
-            bp_per_anc_h1[sample_idx, an1] += width
-            bp_per_anc_h2[sample_idx, an2] += width
-
-        # ── Tract state (structural / switch rate / regional) ──
-        # Regional bp lives in _close_tracts so we respect tract-end
-        # boundaries and don't double-count the bp gaps between tracts.
-        first_h1 = cur_anc_h1 == NO_ANC
-        first_h2 = cur_anc_h2 == NO_ANC
-        change_h1 = (~first_h1) & (cur_anc_h1 != an1)
-        change_h2 = (~first_h2) & (cur_anc_h2 != an2)
-
-        if change_h1.any():
-            _close_tracts(
-                cur_anc_h1[change_h1],
-                tract_start_h1[change_h1],
-                tract_end_h1[change_h1],
-            )
-            tract_count_h1[change_h1] += 1
-            tract_start_h1[change_h1] = pos
-            tract_end_h1[change_h1] = pos
-            cur_anc_h1[change_h1] = an1[change_h1]
-        if change_h2.any():
-            _close_tracts(
-                cur_anc_h2[change_h2],
-                tract_start_h2[change_h2],
-                tract_end_h2[change_h2],
-            )
-            tract_count_h2[change_h2] += 1
-            tract_start_h2[change_h2] = pos
-            tract_end_h2[change_h2] = pos
-            cur_anc_h2[change_h2] = an2[change_h2]
-
-        # Extend (same ancestry, not first site)
-        extend_h1 = (~first_h1) & ~change_h1
-        extend_h2 = (~first_h2) & ~change_h2
-        if extend_h1.any():
-            tract_end_h1[extend_h1] = pos
-        if extend_h2.any():
-            tract_end_h2[extend_h2] = pos
-
-        # Initialise first-site samples
-        if first_h1.any():
-            tract_count_h1[first_h1] = 1
-            tract_start_h1[first_h1] = pos
-            tract_end_h1[first_h1] = pos
-            cur_anc_h1[first_h1] = an1[first_h1]
-        if first_h2.any():
-            tract_count_h2[first_h2] = 1
-            tract_start_h2[first_h2] = pos
-            tract_end_h2[first_h2] = pos
-            cur_anc_h2[first_h2] = an2[first_h2]
-
-        prev_pos = pos
-        n_records += 1
-        if n_records % 50_000 == 0:
-            print(f"  ... processed {n_records:,} records (pos={pos:,})", flush=True)
-
-    rc = proc.wait()
-    if rc != 0:
-        raise RuntimeError(f"bcftools query exited with {rc}")
-    if n_records == 0:
-        raise RuntimeError(f"no records emitted from {args.anc_vcf}")
-    print(f"  done: {n_records:,} records streamed", flush=True)
-
-    # ── End-of-chrom flush: close every still-open tract ──
-    open_h1 = cur_anc_h1 != NO_ANC
-    if open_h1.any():
-        _close_tracts(cur_anc_h1[open_h1], tract_start_h1[open_h1], tract_end_h1[open_h1])
-    open_h2 = cur_anc_h2 != NO_ANC
-    if open_h2.any():
-        _close_tracts(cur_anc_h2[open_h2], tract_start_h2[open_h2], tract_end_h2[open_h2])
-
-    # ── Write outputs ──
     n_tracts_total = sum(len(v) for v in tract_lengths_bp.values())
     print(f"  total tracts: {n_tracts_total:,}", flush=True)
 
@@ -837,6 +955,12 @@ def main() -> int:
     p.add_argument("--fdr-q", type=float, default=0.05)
     p.add_argument("--out-root", type=Path, required=True,
                    help="Artifact work root; writes <out-root>/{structural,hap_disagreement,regional,model}/")
+    p.add_argument("--workers", type=int, default=1,
+                   help="Per-sample fan-out. Each worker subsets the VCF via "
+                        "`bcftools query -S` to its sample slice and streams "
+                        "independently; the master reduces. 1 = legacy single "
+                        "process. The orchestrator passes the WDL-allocated cpu "
+                        "count by default.")
     args = p.parse_args()
 
     if args.step_bp > args.window_bp:

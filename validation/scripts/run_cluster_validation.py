@@ -217,6 +217,7 @@ def step_per_site_metrics(args, ws: Workspace, log_dir: Path) -> None:
         "--flare-model", str(ws.intermediates["popout_model"]),
         "--rf-ancestry", str(args.rf_ancestry),
         "--chrom-sizes", str(args.chrom_sizes),
+        "--workers",     str(args.max_workers),
         "--out-root",    str(ws.work_root),
     ]
     if "labels_json" in ws.intermediates:
