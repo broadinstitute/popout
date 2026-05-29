@@ -206,11 +206,15 @@ def step_per_site_metrics(args, ws: Workspace, log_dir: Path) -> None:
     structural/, hap_disagreement/, regional/, model/.
     No tracts.tsv.gz is ever written.
     """
+    # NB: --flare-model is the POPOUT-format .model (written by
+    # flare_to_popout_format → keys: n_ancestries, gen_since_admix, mu),
+    # NOT the raw FLARE .model. read_model_text in the collector expects
+    # the popout layout.
     cmd = [
         sys.executable, str(SCRIPTS_DIR / "validate_per_site_metrics.py"),
         "--anc-vcf",     str(args.anc_vcf),
         "--global-tsv",  str(ws.intermediates["global_tsv"]),
-        "--flare-model", str(args.flare_model),
+        "--flare-model", str(ws.intermediates["popout_model"]),
         "--rf-ancestry", str(args.rf_ancestry),
         "--chrom-sizes", str(args.chrom_sizes),
         "--out-root",    str(ws.work_root),
