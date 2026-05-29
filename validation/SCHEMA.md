@@ -13,7 +13,7 @@ This file is the contract between the three stages of FLARE validation:
 |---|---|---|
 | 1. per-cluster validation (WDL scatter) | `validation/scripts/run_cluster_validation.py` | Stage 2, debugging, ad-hoc downloads |
 | 2. cohort collation (WDL gather) | `validation/scripts/collate_runs.py` | Stage 3, leaderboards |
-| 3. reporting (local) | `validation/scripts/build_report_pdf.py` etc. | humans |
+| 3. reporting (local) | `validation/scripts/build_flare_validation_report.py` | humans |
 
 If you change a file's columns, you bump the schema. If you add a new optional file, you bump the minor. If you remove or rename a file, you bump the major.
 
@@ -531,3 +531,30 @@ Columns: `cluster_id<TAB>chrom<TAB>self_id<TAB>n<TAB>ancestry<TAB>name<TAB>mean_
 | `dimensions` | array[str] | `["coverage", "calibration", "concordance", "structural", "hap_disagreement", "regional"]` |
 | `per_cluster` | object | `{<cluster_id>: {<dimension>: "green"|"yellow"|"red"}}` |
 | `thresholds` | object | echoed from collation config (e.g. `calibration_slope_outside: [0.85, 1.15]`) |
+
+---
+
+## 3. Stage 3 reporting
+
+The canonical consumer of the cohort bundle is `validation/scripts/build_flare_validation_report.py`. It produces one PDF rolling up:
+
+- **Cohort front-matter** — run overview, QC traffic-light dashboard (PIL-rendered widget), mean-merged-r bar, per-ancestry Rye concordance box, ref/target site-overlap bars, top-20 regional meta-analysis windows.
+- **Per-cluster sections** — header (traffic lights + manifest + Tier-1 metrics), coverage + R6 ref/target, Rye concordance (gated on `optional_inputs.rye_q`), calibration (figure grid + slope matrix), structural (tract / switch distributions + summary), hap disagreement + regional QC.
+- **Provenance appendix** — schema version, sha256 of every per-cluster artifact, diff-against link.
+
+Usage:
+
+```
+python validation/scripts/build_flare_validation_report.py \
+    --cohort-bundle <dir>                     # unpacked cohort_bundle/
+    [--tarball-dir <dir>]                     # per-cluster *.validation.*.tar.gz, used when per_cluster/ is absent
+    --out <report.pdf>
+    [--clusters cluster_001,cluster_007]
+    [--max-clusters 10]
+    [--no-per-cluster]
+    [--keep-md]
+```
+
+Architecture: builds a single markdown document (using existing per-cluster PNGs as embedded assets, PIL for the traffic-light dashboard widget, matplotlib `savefig` for cohort stat charts) and shells out to `pandoc --pdf-engine=xelatex`. The intermediate `.md` is removed unless `--keep-md` is passed; the per-asset PNGs land in `<out>.stem_assets/` next to the PDF.
+
+Required system dependencies: `pandoc`, `xelatex` (any TeX Live distribution).

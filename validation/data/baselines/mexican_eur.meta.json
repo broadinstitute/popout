@@ -1,7 +1,7 @@
 {
   "anchor": "R21 self-reported-Mexican",
   "n_samples": 416,
-  "source": "Liz Kiernan's 2026-02-24 test run (v2); see my_notes/flare_validation_notebooks_audit.md",
+  "source": "2026-02-24 test run (v2); see my_notes/flare_validation_notebooks_audit.md",
   "expected_primary_calls": {
     "flare_amr_primary_n": 38,
     "rye_amr_primary_n": 23,

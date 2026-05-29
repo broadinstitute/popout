@@ -560,7 +560,7 @@ def build_qc_dashboard(arts: list[ClusterArtifact], thresholds: dict) -> dict:
         # concordance: any merged_r < 0.7 → yellow; < 0.5 → red. Skip rows
         # where summed_mu == 0 — those are RF labels with no FLARE components
         # mapped (mid is always one for FLARE-source clusters since the FLARE
-        # basis drops it per Sharon's R4 rule, and any cohort can legitimately
+        # basis drops it per the R4 rule, and any cohort can legitimately
         # have zero samples of some ancestry). A degenerate non-test shouldn't
         # force red.
         min_r = 1.0
