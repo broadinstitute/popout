@@ -151,7 +151,7 @@ def build_fixture(root: Path) -> dict:
 
     return {
         "root": root,
-        "config": root / "dx_config.yaml",
+        "config": root / "dx_config.json",
         "bundle": bundle_path,
         "popout_run": prun,
         "rye": rye_path,
@@ -161,21 +161,21 @@ def build_fixture(root: Path) -> dict:
 
 
 def write_config(paths: dict, mode: str) -> None:
-    extras = ""
+    cfg = {
+        "run_name": f"smoke_e2e_{mode}",
+        "schema_version": "1.0.0",
+        "tools": ["popout", "flare", "rye", "rf"],
+        "flare": {"cohort_bundle": str(paths["bundle"])},
+        "rye":   {"q_path": str(paths["rye"])},
+        "rf":    {"ancestry_path": str(paths["rf"])},
+        "clusters": ["cluster_*"],
+        "chroms":   ["chr*"],
+    }
     if mode == "global_local":
-        extras = "\nlocal_sampling:\n  per_bucket_n: 5\n  threshold: 0.80\n  rng_seed: 42\n  chroms: [chr1]\n"
-    paths["config"].write_text(f"""run_name: smoke_e2e_{mode}
-schema_version: "1.0.0"
-tools: [popout, flare, rye, rf]
-flare:
-  cohort_bundle: {paths["bundle"]}
-rye:
-  q_path: {paths["rye"]}
-rf:
-  ancestry_path: {paths["rf"]}
-clusters: ['cluster_*']
-chroms: ['chr*']{extras}
-""")
+        cfg["local_sampling"] = {
+            "per_bucket_n": 5, "threshold": 0.80, "rng_seed": 42, "chroms": ["chr1"],
+        }
+    paths["config"].write_text(json.dumps(cfg, indent=2) + "\n")
 
 
 # ── Assertions ──────────────────────────────────────────────────────────

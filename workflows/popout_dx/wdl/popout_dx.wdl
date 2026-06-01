@@ -2,7 +2,7 @@ version 1.0
 
 ## popout diagnostics (DX) — discover, scatter, gather.
 ##
-## Single config-driven entry point. ``discover_runs`` reads the YAML
+## Single config-driven entry point. ``discover_runs`` reads the JSON
 ## config + the FLARE-validate cohort bundle, enumerates the
 ## ``(cluster_id, chrom)`` shards, and emits a headerless TSV the WDL
 ## scatters on directly via ``read_tsv()``. One Cromwell task per shard

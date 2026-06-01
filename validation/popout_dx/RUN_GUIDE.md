@@ -32,11 +32,9 @@ cd workflows/lai-tools
 # → us-docker.pkg.dev/broad-dsde-methods/popout/lai-tools:latest
 ```
 
-(Bumped to add `pyyaml`. If pip caches bite, re-tag.)
-
 ## 3. Generate a config
 
-Use the `make_dx_config.py` helper rather than hand-writing YAML.
+Use the `make_dx_config.py` helper rather than hand-writing JSON.
 
 ### Global mode (cheap, recommended first run)
 
@@ -44,14 +42,16 @@ Use the `make_dx_config.py` helper rather than hand-writing YAML.
 PYTHONPATH=$GPULAI python validation/popout_dx/scripts/make_dx_config.py \
   --run-name popout_dx_aou_v9_chr1 \
   --tools popout,flare,rye,rf \
-  --popout-run-dir gs://.../popout-runs/aou_v9/<date>/ \
-  --flare-cohort-bundle gs://.../flare_validate_chr1/cohort_bundle.flare_validate_chr1.v2.0.0.tar.gz \
+  --flare-cohort-bundle gs://.../cohort_bundle.flare_validate_chr1.v2.0.0.tar.gz \
   --rye-q gs://prod-drc-broad/aou-srwgs-foxtrot-aux/admixture_estimates/aou_admixture_estimates_rye_pruned_v9.Q \
   --rf-ancestry gs://prod-drc-broad/aou-srwgs-foxtrot-aux/ancestry/foxtrot_v4.ancestry_preds.tsv \
   --clusters 'cluster_*' \
   --chroms 'chr1' \
-  --out scripts/popout_dx_config.chr1_all.yaml
+  --out scripts/popout_dx_config.chr1_all.json
 ```
+
+popout's path is **not** in the config — it's the WDL input
+`popout_dx.popout_outputs`. Set it per-submission in your inputs JSON.
 
 ### Global + local mode (adds per-cluster local-ancestry sampling)
 
@@ -65,7 +65,7 @@ cohort bundle does not carry the raw `anc.vcf.gz`.
   --local-per-bucket-n 25 \
   --local-threshold 0.80 \
   --local-chroms chr1 \
-  --out scripts/popout_dx_config.chr1_all_local.yaml
+  --out scripts/popout_dx_config.chr1_all_local.json
 ```
 
 ### Cluster / chrom subsetting
@@ -74,22 +74,23 @@ The `clusters` and `chroms` config keys are glob patterns matched
 against the FLARE cohort bundle's `per_cluster/<cluster_id>/<chrom>/`
 tree. Use them to limit a run:
 
-```yaml
-clusters: ['cluster_000', 'cluster_00[1-5]']    # cluster_000 + cluster_001…005
-chroms:   ['chr1', 'chr22']
+```json
+"clusters": ["cluster_000", "cluster_00[1-5]"],
+"chroms":   ["chr1", "chr22"]
 ```
 
-## 4. Submit to Cromwell
+## 4. Submit to Cromwell / Terra
 
 Inputs JSON:
 
 ```json
 {
-  "popout_dx.config_file": "gs://.../popout_dx_config.chr1_all.yaml",
-  "popout_dx.run_name":    "popout_dx_aou_v9_chr1_2026_05_30",
-  "popout_dx.mode":        "global",
-  "popout_dx.tools":       "popout,flare,rye,rf",
-  "popout_dx.wandb_api_key": "<secret>"
+  "popout_dx.config_file":    "gs://.../popout_dx_config.chr1_all.json",
+  "popout_dx.popout_outputs": "gs://fc-secure-.../submissions/<wf>/popout/<task>/call-popout_task/",
+  "popout_dx.run_name":       "popout_dx_aou_v9_chr1_2026_06_01",
+  "popout_dx.mode":           "global",
+  "popout_dx.tools":          "popout,flare,rye,rf",
+  "popout_dx.wandb_api_key":  "<secret>"
 }
 ```
 

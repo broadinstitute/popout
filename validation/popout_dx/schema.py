@@ -49,7 +49,7 @@ REQUIRED_CLUSTER_FILES: tuple[str, ...] = (
     "global/pairwise_soft/summary.json",
     # provenance/
     "provenance/schema_version.txt",
-    "provenance/dx_config.yaml",
+    "provenance/dx_config.json",
 )
 
 

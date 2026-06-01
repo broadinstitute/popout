@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Discover popout DX scatter inputs from a YAML config.
+"""Discover popout DX scatter inputs from a JSON config.
 
 The data model is asymmetric:
 
@@ -484,7 +484,7 @@ def write_tsv(rows: Iterable[dict], path: Path) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--config", required=True, help="YAML config (localised by WDL)")
+    ap.add_argument("--config", required=True, help="JSON config (localised by WDL)")
     ap.add_argument("--popout-outputs", required=True,
                     help="GCS or local path containing one popout run's emitted files "
                          "(typically a Cromwell call-popout_task/ directory); walked recursively")
@@ -492,12 +492,11 @@ def main() -> None:
     ap.add_argument("--out-dir", required=True, help="Output dir; manifests + flare_slices/ written here")
     args = ap.parse_args()
 
-    import yaml  # imported lazily so --help works without pyyaml
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     with open(args.config) as f:
-        cfg = yaml.safe_load(f)
+        cfg = json.load(f)
 
     validate_config(cfg)
     manifest, rows = build_manifest(cfg, args.mode, args.popout_outputs, out_dir)

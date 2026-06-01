@@ -24,53 +24,36 @@ The companion document `PERFORMANCE_CONTRACT.md` lists the non-negotiable speed 
 
 ## 0. Run shape
 
-The pipeline is driven by a small YAML config — see `validation/popout_dx/scripts/make_dx_config.py` for the writer and `discover_runs.py` for the consumer.
+The pipeline is driven by a small JSON config — see `validation/popout_dx/scripts/make_dx_config.py` for the writer and `discover_runs.py` for the consumer.
 
-```yaml
-run_name: popout_dx_aou_v9_chr1
-schema_version: "1.0.0"
+popout's path is **not** in the config; it's a WDL input (`popout_dx.popout_outputs`). The config covers the comparison universe (FLARE bundle, rye / rf refs, glob filters, local-sampling knobs).
 
-tools: [popout, flare, rye, rf]      # popout MUST be present; at least one other tool required.
-
-popout:
-  # A popout run is whole-cohort (all samples, all chroms). One run_dir =
-  # one global.tsv + one tracts.tsv.gz + one model + ... Per-chrom files
-  # (decode parquets) live next to them.
-  run_dir: gs://.../popout-runs/aou_v9/2026-05-15/
-  # Future (not yet implemented):
-  #   run_name: $LAST          # resolves via the popout run catalog
-  #   catalog: gs://.../popout_catalog.json
-
-flare:
-  # The FLARE-validate cohort bundle is the source of truth for the
-  # (cluster_id, chrom) universe. Globs below select a subset.
-  cohort_bundle: gs://.../cohort_bundle.flare_validate_chr1.v3.0.0.tar.gz
-  # REQUIRED FOR mode=global_local: the GCS prefix under which FLARE
-  # pipeline emits per-cluster <cluster_id>.<chrom>.anc.vcf.gz. The
-  # cohort bundle does not carry the raw VCFs, so local-mode discovery
-  # walks this prefix separately. Ignored in mode=global.
-  anc_vcf_root: gs://.../flare_pipeline/<wf_id>/call-fit_ancestry_model/
-
-# Glob filters applied to the FLARE cohort bundle's per_cluster/ tree.
-# Defaults below select every cluster and every chrom present in the bundle.
-clusters: ['cluster_*']
-chroms:   ['chr*']
-
-rye:
-  q_path: gs://.../aou_admixture_estimates_rye_pruned_v9.Q
-
-rf:
-  ancestry_path: gs://.../foxtrot_v4.ancestry_preds.tsv
-
-local_sampling:                      # consumed only when mode == global_local
-  per_bucket_n: 25
-  buckets: [high_afr, high_amr, high_eas, high_eur, high_mid, high_sas, mixed]
-  threshold: 0.80
-  rng_seed: 42
-  chroms: [chr1]
-  views: [bp_confusion, boundary_localization, coarse_grid]
-  coarse_grid_resolutions_mb: [1, 2, 5, 10, 20]
+```json
+{
+  "run_name": "popout_dx_aou_v9_chr1",
+  "schema_version": "1.0.0",
+  "tools": ["popout", "flare", "rye", "rf"],
+  "flare": {
+    "cohort_bundle": "gs://.../cohort_bundle.flare_validate_chr1.v2.0.0.tar.gz",
+    "anc_vcf_root":  "gs://.../flare_pipeline/<wf_id>/call-fit_ancestry_model/"
+  },
+  "rye": { "q_path":        "gs://.../aou_admixture_estimates_rye_pruned_v9.Q" },
+  "rf":  { "ancestry_path": "gs://.../foxtrot_v4.ancestry_preds.tsv" },
+  "clusters": ["cluster_*"],
+  "chroms":   ["chr*"],
+  "local_sampling": {
+    "per_bucket_n": 25,
+    "threshold": 0.80,
+    "rng_seed": 42,
+    "chroms": ["chr1"],
+    "coarse_grid_resolutions_mb": [1, 2, 5, 10, 20]
+  }
+}
 ```
+
+Notes:
+- `flare.anc_vcf_root` is required only for `mode=global_local` (cohort bundle does not carry the raw VCFs).
+- `local_sampling` is consumed only when `mode=global_local`.
 
 ### Data-model asymmetry
 
@@ -123,7 +106,7 @@ Produced by Stage 1. One tarball per `(cluster_id, chrom)`.
 │       └── coarse_grid_summary.tsv
 └── provenance/
     ├── schema_version.txt
-    └── dx_config.yaml                       (the exact config file used)
+    └── dx_config.json                       (the exact config file used)
 ```
 
 ### 1.1 `manifest.json`
@@ -254,7 +237,7 @@ One row per `(sample, hap, chrom, resolution_mb)`. Columns: `sample`, `hap`, `ch
 ### 1.10 `provenance/`
 
 - `schema_version.txt` — single line `1.0.0`. Mirrors `manifest.json["schema_version"]`.
-- `dx_config.yaml` — the exact YAML config consumed by `discover_runs`, copied byte-for-byte for reproducibility.
+- `dx_config.json` — the exact JSON config consumed by `discover_runs`, copied byte-for-byte for reproducibility.
 
 ---
 

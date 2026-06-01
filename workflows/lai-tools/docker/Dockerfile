@@ -19,7 +19,7 @@ ENTRYPOINT []
 # --break-system-packages is required on Ubuntu 24.04 (PEP 668 marks the
 # system Python as externally managed).
 RUN pip3 install --break-system-packages --no-cache-dir \
-        pysam numpy scipy statsmodels matplotlib pandas pyyaml
+        pysam numpy scipy statsmodels matplotlib pandas
 
 # Diagnostic tools for throughput_probe.sh:
 #   tabix     — htslib's raw region-streamer (apt-installed, links against

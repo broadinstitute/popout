@@ -429,9 +429,9 @@ def step_local_views(args, ws: Workspace, log_dir: Path) -> None:
 def step_provenance(args, ws: Workspace, log_dir: Path) -> None:
     prov = ws.subdir("provenance")
     (prov / "schema_version.txt").write_text(dx_schema.SCHEMA_VERSION + "\n")
-    # Copy the dx config YAML through for reproducibility.
+    # Copy the dx config through for reproducibility.
     if args.config_file is not None and Path(args.config_file).exists():
-        dst = prov / "dx_config.yaml"
+        dst = prov / "dx_config.json"
         dst.write_text(Path(args.config_file).read_text())
 
 
@@ -648,7 +648,7 @@ def main() -> int:
     ap.add_argument("--tools", required=True,
                     help="comma-separated subset of popout,flare,rye,rf (anchor=popout)")
     ap.add_argument("--config-file", type=Path, default=None,
-                    help="dx_config.yaml, copied into provenance/ for reproducibility")
+                    help="dx_config.json, copied into provenance/ for reproducibility")
     ap.add_argument("--work-dir", required=True, type=Path)
     ap.add_argument("--max-workers", type=int, default=4)
 
