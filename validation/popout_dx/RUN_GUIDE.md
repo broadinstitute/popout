@@ -177,7 +177,9 @@ unpacked `cohort_dx/` tree.
   `--flare-anc-vcf-root` to `make_dx_config.py`.
 
 - **WDL fails at scatter with `Cannot coerce String to File`** — the
-  `if row[N] == "" then None else row[N]` pattern in `popout_dx.wdl`
-  relies on Cromwell's String→File coercion through an Optional. If a
-  particular Cromwell build rejects this, add explicit `String foo_s = row[N]`
-  intermediates and condition on those.
+  optional File inputs (popout_summary, rye_q_path, rf_ancestry_path)
+  come from conditionally-declared local Files: `if (row[N] != "") {
+  File foo_opt = row[N] }`. This is the WDL 1.0 idiom for "Optional[File]
+  from possibly-empty String". If your Cromwell build instead complains
+  about the conditional declaration, fall back to declaring the input as
+  String in the task and have the task script handle the empty case.

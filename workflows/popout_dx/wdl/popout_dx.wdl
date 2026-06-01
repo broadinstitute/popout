@@ -295,6 +295,15 @@ workflow popout_dx {
     #   5=popout_global_tsv 6=popout_tracts 7=popout_model
     #   8=popout_model_npz 9=popout_summary
     #   10=rye_q_path 11=rf_ancestry_path
+
+    # WDL 1.0 has no `None` literal; conditional declarations are the
+    # idiomatic way to produce an Optional[File] from a possibly-empty
+    # String. Each declaration below resolves to `File?` (defined iff
+    # the row column is non-empty).
+    if (row[9]  != "") { File popout_summary_opt   = row[9]  }
+    if (row[10] != "") { File rye_q_opt            = row[10] }
+    if (row[11] != "") { File rf_ancestry_opt      = row[11] }
+
     call popout_dx_per_cluster {
       input:
         cluster_id          = row[0],
@@ -306,9 +315,9 @@ workflow popout_dx {
         popout_tracts       = row[6],
         popout_model        = row[7],
         popout_model_npz    = row[8],
-        popout_summary      = if row[9]  == "" then None else row[9],
-        rye_q_path          = if row[10] == "" then None else row[10],
-        rf_ancestry_path    = if row[11] == "" then None else row[11],
+        popout_summary      = popout_summary_opt,
+        rye_q_path          = rye_q_opt,
+        rf_ancestry_path    = rf_ancestry_opt,
 
         config_file         = config_file,
         run_name            = run_name,
