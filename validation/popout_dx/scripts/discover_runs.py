@@ -77,6 +77,23 @@ def _is_gcs(path: str) -> bool:
     return path.startswith("gs://")
 
 
+def localize_gcs_file(uri: str, dest_dir: Path) -> Path:
+    """Download ``gs://...`` to ``dest_dir`` via gcloud storage cp; return
+    local Path. Pass-through when ``uri`` is already a local path."""
+    if not _is_gcs(uri):
+        return Path(uri)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / uri.rsplit("/", 1)[-1]
+    cmd = ["gcloud", "storage", "cp", uri, str(dest)]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except FileNotFoundError:
+        die("gcloud not found in PATH; required to localise gs:// inputs")
+    except subprocess.CalledProcessError as e:
+        die(f"gcloud storage cp failed for {uri!r}: {e.stderr.strip()}")
+    return dest
+
+
 def list_uris(root: str) -> list[str]:
     """Recursively list every URI under ``root`` (files only, sorted)."""
     if _is_gcs(root):
@@ -334,13 +351,7 @@ def build_manifest(
         )
 
     flare_cohort_bundle = cfg["flare"]["cohort_bundle"]
-    if _is_gcs(flare_cohort_bundle):
-        die(
-            "flare.cohort_bundle must be a localised file path inside the discover "
-            "task (got a gs:// URI). The WDL must declare it as File and pass the "
-            "localised path."
-        )
-    bundle_path = Path(flare_cohort_bundle)
+    bundle_path = localize_gcs_file(flare_cohort_bundle, out_dir / "localized")
 
     # Pass 1: enumerate; pass 2: extract only the selected slices.
     all_pairs = list_flare_in_cohort_bundle(bundle_path)

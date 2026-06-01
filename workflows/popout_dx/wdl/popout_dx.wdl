@@ -67,7 +67,7 @@ task popout_dx_per_cluster {
     # at the call site).
     File   flare_global_tsv
     File   flare_labels_json
-    String flare_anc_vcf            # may be empty in global mode
+    File?  flare_anc_vcf            # populated only in local mode (Cromwell-localized from gs://)
 
     # Whole-cohort singletons.
     File   popout_global_tsv
@@ -129,7 +129,7 @@ task popout_dx_per_cluster {
     mkdir -p shard_inputs
     {
       printf "%s\t" "~{cluster_id}" "~{chrom}" \
-        "~{flare_global_tsv}" "~{flare_labels_json}" "~{flare_anc_vcf}" \
+        "~{flare_global_tsv}" "~{flare_labels_json}" "~{default='' flare_anc_vcf}" \
         "~{popout_global_tsv}" "~{popout_tracts}" "~{popout_model}" \
         "~{popout_model_npz}" "~{default='' popout_summary}" \
         "~{default='' rye_q_path}" "~{default='' rf_ancestry_path}"
@@ -300,6 +300,7 @@ workflow popout_dx {
     # idiomatic way to produce an Optional[File] from a possibly-empty
     # String. Each declaration below resolves to `File?` (defined iff
     # the row column is non-empty).
+    if (row[4]  != "") { File flare_anc_vcf_opt    = row[4]  }
     if (row[9]  != "") { File popout_summary_opt   = row[9]  }
     if (row[10] != "") { File rye_q_opt            = row[10] }
     if (row[11] != "") { File rf_ancestry_opt      = row[11] }
@@ -310,7 +311,7 @@ workflow popout_dx {
         chrom               = row[1],
         flare_global_tsv    = row[2],
         flare_labels_json   = row[3],
-        flare_anc_vcf       = row[4],
+        flare_anc_vcf       = flare_anc_vcf_opt,
         popout_global_tsv   = row[5],
         popout_tracts       = row[6],
         popout_model        = row[7],
