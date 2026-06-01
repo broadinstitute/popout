@@ -106,6 +106,7 @@ def test_run_em_per_hap_T_with_block_emissions_uses_buckets(monkeypatch):
         block_size=8,
         skip_decode=True,
         rng_seed=0,
+        em_t_policy="every-iter",
     )
 
     assert len(captured_T_per_iter) >= 2, (
@@ -157,6 +158,7 @@ def test_block_em_soft_switches_are_density_invariant_not_hard_cast(monkeypatch)
         block_size=8,
         skip_decode=True,
         rng_seed=1,
+        em_t_policy="every-iter",
     )
 
     assert captured, "M-step was not called"
@@ -293,6 +295,323 @@ def test_bucketed_blocks_decode_matches_unbucketed_when_B_eq_1(tmp_path):
         np.asarray(no_bucket_decode.global_sums),
         np.asarray(bucketed_decode.global_sums),
     )
+
+
+def test_run_em_seeded_init_skips_window_refine():
+    """When seed_responsibilities is supplied, init_model_soft must NOT
+    run window-refinement — the iter-0 allele_freq must equal the
+    closed-form seed-derived value (pseudocount-smoothed, clipped).
+
+    Pre-fix: window_init_allele_freq's uniform-prior softmax perturbs
+    freq and this assertion fails. Post-fix: window_refine is gated on
+    seed_responsibilities is None, so freq matches the closed form.
+    """
+    from popout.em import run_em
+    from popout.simulate import simulate_admixed
+
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=200, n_sites=400, n_ancestries=3,
+        gen_since_admix=20, chrom_length_cm=80.0,
+        pure_fraction=0.3, rng_seed=42,
+    )
+
+    H, _T = chrom_data.geno.shape
+    A = 3
+    rng = np.random.default_rng(0)
+    labels = rng.integers(0, A, size=H)
+    seed_resp_np = np.zeros((H, A), dtype=np.float32)
+    seed_resp_np[np.arange(H), labels] = 1.0
+    seed_resp = jnp.array(seed_resp_np)
+
+    result = run_em(
+        chrom_data,
+        n_ancestries=A,
+        n_em_iter=0,
+        gen_since_admix=20.0,
+        rng_seed=42,
+        seed_responsibilities=seed_resp,
+    )
+
+    geno_f32 = jnp.asarray(chrom_data.geno).astype(jnp.float32)
+    expected_wc = seed_resp.T @ geno_f32
+    expected_totals = seed_resp.sum(axis=0)[:, None]
+    expected_freq = (expected_wc + 0.5) / (expected_totals + 1.0)
+    expected_freq = jnp.clip(expected_freq, 1e-4, 1.0 - 1e-4)
+
+    np.testing.assert_allclose(
+        np.array(result.model.allele_freq),
+        np.array(expected_freq),
+        rtol=1e-5, atol=1e-5,
+    )
+
+
+def _run_em_with_seeded_fixture(em_t_policy, n_em_iter=3, monkeypatch=None,
+                                spy_target=None):
+    """Shared fixture for em_t_policy tests. Returns (result, n_T_calls)
+    when spy_target is provided, else (result, None)."""
+    from popout.em import run_em
+    import popout.em as em_mod
+    from popout.simulate import simulate_admixed
+
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=200, n_sites=400, n_ancestries=3,
+        gen_since_admix=20, chrom_length_cm=80.0,
+        pure_fraction=0.3, rng_seed=42,
+    )
+    H = chrom_data.geno.shape[0]
+    rng = np.random.default_rng(0)
+    labels = rng.integers(0, 3, size=H)
+    seed_resp_np = np.zeros((H, 3), dtype=np.float32)
+    seed_resp_np[np.arange(H), labels] = 1.0
+    seed_resp = jnp.array(seed_resp_np)
+
+    n_T_calls = [0]
+    if spy_target is not None and monkeypatch is not None:
+        real_fn = getattr(em_mod, spy_target)
+        def spy(*args, **kwargs):
+            n_T_calls[0] += 1
+            return real_fn(*args, **kwargs)
+        monkeypatch.setattr(em_mod, spy_target, spy)
+
+    result = run_em(
+        chrom_data,
+        n_ancestries=3,
+        n_em_iter=n_em_iter,
+        gen_since_admix=20.0,
+        rng_seed=42,
+        seed_responsibilities=seed_resp,
+        em_t_policy=em_t_policy,
+    )
+    return result, n_T_calls[0] if spy_target is not None else None
+
+
+def test_em_t_policy_hold_keeps_T_fixed(monkeypatch):
+    """--em-t-policy hold: T is never updated; update_generations_* is
+    never called."""
+    result, n_T_calls = _run_em_with_seeded_fixture(
+        "hold", n_em_iter=3, monkeypatch=monkeypatch,
+        spy_target="update_generations_from_stats",
+    )
+    assert n_T_calls == 0, f"hold policy must not call T update; got {n_T_calls}"
+    assert float(result.model.gen_since_admix) == 20.0, (
+        f"hold policy must keep T at 20.0; got {result.model.gen_since_admix}"
+    )
+
+
+def test_em_t_policy_gated_fires_at_most_once(monkeypatch):
+    """--em-t-policy gated: update_generations_* is called at most once
+    across the run."""
+    result, n_T_calls = _run_em_with_seeded_fixture(
+        "gated", n_em_iter=5, monkeypatch=monkeypatch,
+        spy_target="update_generations_from_stats",
+    )
+    assert n_T_calls <= 1, (
+        f"gated policy must fire at most once; got {n_T_calls} calls"
+    )
+
+
+def test_em_t_policy_every_iter_updates_every_iter_after_zero(monkeypatch):
+    """--em-t-policy every-iter: update_generations_* is called
+    n_em_iter - 1 times (held at iter 0, updated thereafter)."""
+    n_iter = 3
+    _, n_T_calls = _run_em_with_seeded_fixture(
+        "every-iter", n_em_iter=n_iter, monkeypatch=monkeypatch,
+        spy_target="update_generations_from_stats",
+    )
+    assert n_T_calls == n_iter - 1, (
+        f"every-iter policy must call T update {n_iter - 1} times for "
+        f"n_em_iter={n_iter}; got {n_T_calls}"
+    )
+
+
+def test_em_t_policy_rejects_unknown():
+    """Unknown em_t_policy values must raise ValueError fast."""
+    import pytest
+    from popout.em import run_em
+    from popout.simulate import simulate_admixed
+
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=100, n_sites=200, n_ancestries=2,
+        gen_since_admix=20, chrom_length_cm=80.0,
+        pure_fraction=0.3, rng_seed=42,
+    )
+    with pytest.raises(ValueError, match="em_t_policy"):
+        run_em(
+            chrom_data, n_ancestries=2, n_em_iter=1,
+            gen_since_admix=20.0, rng_seed=42,
+            em_t_policy="bogus",
+        )
+
+
+def test_anchor_freeze_blend_weight_schedule(monkeypatch, caplog):
+    """Anchor-freeze blend weight schedule: for freeze_anchors_iters=N,
+    w_anchor = 1 - iteration/N for iteration in 0..N-1, branch skipped at
+    iteration N. Captures the log lines and parses w out of them.
+    """
+    import logging
+    import re
+    from popout.em import run_em
+    from popout.simulate import simulate_admixed
+
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=200, n_sites=400, n_ancestries=3,
+        gen_since_admix=20, chrom_length_cm=80.0,
+        pure_fraction=0.3, rng_seed=42,
+    )
+    H = chrom_data.geno.shape[0]
+    rng = np.random.default_rng(0)
+    labels = rng.integers(0, 3, size=H)
+    seed_resp_np = np.zeros((H, 3), dtype=np.float32)
+    seed_resp_np[np.arange(H), labels] = 1.0
+    seed_resp = jnp.array(seed_resp_np)
+
+    N = 5
+    with caplog.at_level(logging.INFO, logger="popout.em"):
+        run_em(
+            chrom_data,
+            n_ancestries=3,
+            n_em_iter=N + 1,  # one past the freeze window
+            gen_since_admix=20.0,
+            rng_seed=42,
+            seed_responsibilities=seed_resp,
+            freeze_anchors_iters=N,
+            em_t_policy="hold",
+        )
+
+    pat = re.compile(r"Anchor freeze: blend w=([\d.]+) \(iter (\d+)/(\d+)\)")
+    weights = {int(m.group(2)): float(m.group(1)) for m in
+               (pat.search(rec.message) for rec in caplog.records) if m}
+    expected = {1: 1.0, 2: 0.8, 3: 0.6, 4: 0.4, 5: 0.2}
+    assert weights == expected, f"got {weights}, expected {expected}"
+
+
+def test_anchor_freeze_frozen_freq_clipped():
+    """frozen_freq must be clipped to [1e-4, 1 - 1e-4] before blending,
+    even for sites where every kept hap in a leaf has the same allele."""
+    from popout.em import run_em
+    from popout.simulate import simulate_admixed
+
+    chrom_data, _, _ = simulate_admixed(
+        n_samples=200, n_sites=400, n_ancestries=3,
+        gen_since_admix=20, chrom_length_cm=80.0,
+        pure_fraction=0.3, rng_seed=42,
+    )
+    H = chrom_data.geno.shape[0]
+    rng = np.random.default_rng(0)
+    labels = rng.integers(0, 3, size=H)
+    seed_resp_np = np.zeros((H, 3), dtype=np.float32)
+    seed_resp_np[np.arange(H), labels] = 1.0
+    seed_resp = jnp.array(seed_resp_np)
+
+    result = run_em(
+        chrom_data,
+        n_ancestries=3,
+        n_em_iter=1,  # single iter at w=1.0 → new_freq == frozen_freq
+        gen_since_admix=20.0,
+        rng_seed=42,
+        seed_responsibilities=seed_resp,
+        freeze_anchors_iters=1,
+        em_t_policy="hold",
+    )
+    freq = np.array(result.model.allele_freq)
+    assert freq.min() >= 1e-4, f"min freq {freq.min()} < 1e-4"
+    assert freq.max() <= 1.0 - 1e-4, f"max freq {freq.max()} > 1 - 1e-4"
+
+
+def test_build_seed_resp_held_out_soft_beats_uniform():
+    """_build_seed_resp with held_out_init='soft': held-out haps get
+    non-uniform soft assignments that put most mass on the leaf whose
+    allele frequencies best explain their genotypes. With
+    held_out_init='uniform' they get exact 1/K rows."""
+    from popout.em import _build_seed_resp
+    from popout.simulate import simulate_admixed
+
+    chrom_data, true_ancestry, _ = simulate_admixed(
+        n_samples=300, n_sites=1000, n_ancestries=3,
+        gen_since_admix=20, chrom_length_cm=80.0,
+        pure_fraction=1.0, rng_seed=42,
+    )
+    H = chrom_data.geno.shape[0]
+    # Mark 20% of haps as held-out (mask=False); rest are kept.
+    rng = np.random.default_rng(0)
+    held_mask = rng.random(H) < 0.2
+    seeding_mask = ~held_mask
+
+    # Kept-hap "true" labels: use the simulator's per-hap dominant ancestry.
+    # true_ancestry is (H, T) per-site labels; with pure_fraction=1.0 they are
+    # constant per hap.
+    kept_idx = np.where(seeding_mask)[0]
+    held_idx = np.where(held_mask)[0]
+    kept_labels = np.asarray(true_ancestry[kept_idx, 0])
+    held_truth = np.asarray(true_ancestry[held_idx, 0])
+
+    # Uniform mode
+    resp_uniform = np.array(_build_seed_resp(
+        chrom_data.geno, kept_labels, 3,
+        seeding_mask=seeding_mask, held_out_init="uniform",
+    ))
+    np.testing.assert_allclose(
+        resp_uniform[held_idx], 1.0 / 3, atol=1e-6,
+        err_msg="uniform mode must put exactly 1/K on every held-out hap",
+    )
+
+    # Soft mode
+    resp_soft = np.array(_build_seed_resp(
+        chrom_data.geno, kept_labels, 3,
+        seeding_mask=seeding_mask, held_out_init="soft",
+    ))
+    # Rows must sum to 1 (softmax invariant)
+    np.testing.assert_allclose(
+        resp_soft[held_idx].sum(axis=1), 1.0, atol=1e-5,
+    )
+    # Soft assignments should NOT be uniform.
+    held_max = resp_soft[held_idx].max(axis=1)
+    assert (held_max > 0.5).mean() > 0.5, (
+        f"soft mode produced too many uniform-like rows; "
+        f"frac with max>0.5: {(held_max > 0.5).mean():.2f}"
+    )
+    # Soft assignment's argmax should match the true ancestry on most
+    # held-out haps (these are pure-ancestry haps).
+    soft_argmax = resp_soft[held_idx].argmax(axis=1)
+    acc = float((soft_argmax == held_truth).mean())
+    assert acc > 0.8, (
+        f"held-out soft assignment accuracy {acc:.2f} is too low; "
+        f"expected >0.8 on pure-ancestry haps"
+    )
+
+    # Kept rows must be exact one-hot in both modes.
+    for resp, name in [(resp_uniform, "uniform"), (resp_soft, "soft")]:
+        kept_max = resp[kept_idx].max(axis=1)
+        np.testing.assert_allclose(
+            kept_max, 1.0, atol=1e-6,
+            err_msg=f"{name}: kept rows must be exact one-hot",
+        )
+
+
+def test_build_seed_resp_rejects_unknown_held_out_init():
+    """_build_seed_resp must raise on unknown held_out_init values."""
+    import pytest
+    from popout.em import _build_seed_resp
+    geno = np.zeros((10, 5), dtype=np.uint8)
+    seeding_mask = np.array([True, True, False, True, False,
+                             True, False, True, True, True])
+    labels = np.array([0, 1, 0, 1, 0, 1, 0])  # compact (H_kept,)
+    with pytest.raises(ValueError, match="held_out_init"):
+        _build_seed_resp(geno, labels, 2,
+                         seeding_mask=seeding_mask, held_out_init="bogus")
+
+
+def test_cli_freeze_anchors_default_resolves_by_seed_method():
+    """--seed-method recursive: default → 5. --seed-method gmm: default → 0.
+    Explicit --freeze-anchors-iters always wins (including explicit 0)."""
+    from popout.cli import _resolve_freeze_anchors_default as resolve
+
+    assert resolve(None, "recursive") == 5
+    assert resolve(None, "gmm") == 0
+    assert resolve(7, "recursive") == 7
+    assert resolve(7, "gmm") == 7
+    assert resolve(0, "recursive") == 0
+    assert resolve(0, "gmm") == 0
 
 
 if __name__ == "__main__":

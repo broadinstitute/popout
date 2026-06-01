@@ -149,6 +149,19 @@ def load_seeding_exclusion_list(path: str) -> set[str]:
 _XLA_DETERMINISM_FLAG = "--xla_gpu_deterministic_ops=true"
 
 
+def _resolve_freeze_anchors_default(value: int | None, seed_method: str) -> int:
+    """Auto-resolve --freeze-anchors-iters when the user did not supply one.
+
+    Recursive seeding produces small sibling leaves whose mass can collapse
+    under EM without anchor protection, so the recursive default is 5.
+    The GMM seed already gives soft per-hap labels with no positional
+    resolution, so its default stays 0.
+    """
+    if value is not None:
+        return value
+    return 5 if seed_method == "recursive" else 0
+
+
 def _peek_reproducible(raw_args: list[str]) -> str:
     """Pre-parse --reproducible without invoking the full argparse.
 
@@ -441,10 +454,29 @@ def main(argv: list[str] | None = None) -> None:
         help="EM iterations per K=2 split (default: 3). Cheap; small values fine.",
     )
     parser.add_argument(
-        "--freeze-anchors-iters", type=int, default=0,
-        help="Freeze seed responsibilities for the first N EM iterations "
-             "(default: 0 = no freezing). With recursive seeding, try 3-5 "
-             "if small leaves are getting absorbed.",
+        "--freeze-anchors-iters", type=int, default=None,
+        help="Linear-blend seed responsibilities into the M-step for the "
+             "first N EM iterations (w=1.0 at iter 0, w=1/N at iter N-1, "
+             "w=0 thereafter). Default: 5 when --seed-method=recursive, "
+             "else 0. Pass 0 explicitly to disable.",
+    )
+    parser.add_argument(
+        "--em-t-policy",
+        choices=["hold", "gated", "every-iter"],
+        default="gated",
+        help="EM T-update policy (default: gated). 'gated' fires a single "
+             "T update the first iteration after mean Δfreq < 0.005 (or "
+             "by iter 15 as a safety valve). 'hold' keeps T fixed at "
+             "--gen-since-admix. 'every-iter' is the legacy behaviour "
+             "(T held at iter 0, updated every iter thereafter).",
+    )
+    parser.add_argument(
+        "--held-out-init",
+        choices=["uniform", "soft"],
+        default="soft",
+        help="How to seed haplotypes excluded from --exclude-seeding-samples. "
+             "'soft' (default): Bernoulli emission softmax against "
+             "kept-derived leaf allele freqs. 'uniform': 1/K per leaf (legacy).",
     )
     parser.add_argument(
         "--recursive-split-restarts", type=int, default=5,
@@ -629,6 +661,10 @@ def main(argv: list[str] | None = None) -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    args.freeze_anchors_iters = _resolve_freeze_anchors_default(
+        args.freeze_anchors_iters, args.seed_method,
+    )
 
     # --- Logging ---
     logging.basicConfig(
@@ -829,6 +865,8 @@ def main(argv: list[str] | None = None) -> None:
                 "block_emissions": args.block_emissions,
                 "block_size": args.block_size,
                 "freeze_anchors_iters": args.freeze_anchors_iters,
+                "em_t_policy": args.em_t_policy,
+                "held_out_init": args.held_out_init,
                 "probs": args.probs,
                 "per_hap_T": args.per_hap_T,
                 "n_T_buckets": args.n_T_buckets,
@@ -896,6 +934,8 @@ def main(argv: list[str] | None = None) -> None:
             seed_method=args.seed_method,
             recursive_kwargs=recursive_kwargs,
             freeze_anchors_iters=args.freeze_anchors_iters,
+            em_t_policy=args.em_t_policy,
+            held_out_init=args.held_out_init,
             out_prefix=args.out,
             stop_after_seeding=args.stop_after_seeding,
             resume_from_checkpoint=args.resume_from_checkpoint,

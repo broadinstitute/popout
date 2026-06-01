@@ -428,6 +428,7 @@ def run_em(
     max_ancestries: int = 20,
     seed_responsibilities: Optional[jnp.ndarray] = None,
     freeze_anchors_iters: int = 0,
+    em_t_policy: str = "gated",
     checkpoint_after_em: Optional[str] = None,
     ancestry_names: Optional[list[str]] = None,
     write_dense_decode: bool = False,
@@ -502,8 +503,12 @@ def run_em(
     d_morgan_j = jnp.array(d_morgan)
 
     # --- Stage 1: Init model from soft assignments + window refinement ---
+    # Skip window-refine when seeds are hard one-hot — it would erase them.
     log.info("Stage 1: Initializing model from soft assignments")
-    model = init_model_soft(geno, responsibilities, n_anc, gen_since_admix)
+    model = init_model_soft(
+        geno, responsibilities, n_anc, gen_since_admix,
+        window_refine=(seed_responsibilities is None),
+    )
     log.info("  mu = %s", np.array(model.mu).round(3))
     log.info("  T = %.1f generations", model.gen_since_admix)
 
@@ -528,9 +533,15 @@ def run_em(
         log.info("  [diag] AncestryModel with block_data built")
 
     # --- Stage 2-3: EM iterations ---
+    if em_t_policy not in ("hold", "gated", "every-iter"):
+        raise ValueError(
+            f"em_t_policy must be one of 'hold', 'gated', 'every-iter'; "
+            f"got {em_t_policy!r}"
+        )
     bucket_centers = compute_bucket_centers(n_T_buckets) if per_hap_T else None
     prev_freq = model.allele_freq
     prev_T = model.gen_since_admix
+    t_updated = False  # 'gated' policy: fires once across the run
 
     for iteration in range(n_em_iter):
         log.info("--- EM iteration %d/%d ---", iteration + 1, n_em_iter)
@@ -729,40 +740,83 @@ def run_em(
         new_freq = update_allele_freq_from_stats(em_stats)
         new_mu = update_mu_from_stats(em_stats)
 
-        # Anchor freezing: override frequencies with seed-derived values
+        # Anchor freezing: linear blend new_freq and new_mu toward seed-derived
+        # values over the first freeze_anchors_iters iterations. w_anchor goes
+        # 1.0 → 1/N → 0 across the window so EM gradually takes over rather
+        # than handing off in a discontinuous step.
         if (seed_responsibilities is not None
                 and freeze_anchors_iters > 0
                 and iteration < freeze_anchors_iters):
-            log.info("  Anchor freeze: overriding frequencies (iter %d/%d)",
-                     iteration + 1, freeze_anchors_iters)
+            w_anchor = 1.0 - (iteration / freeze_anchors_iters)
+            log.info("  Anchor freeze: blend w=%.2f (iter %d/%d)",
+                     w_anchor, iteration + 1, freeze_anchors_iters)
             _FREEZE_BATCH = 50_000
             H_f, T_f = geno.shape
             A_f = seed_responsibilities.shape[1]
             frozen_wc = jnp.zeros((A_f, T_f))
             for fs in range(0, H_f, _FREEZE_BATCH):
                 fe = min(fs + _FREEZE_BATCH, H_f)
-                frozen_wc += seed_responsibilities[fs:fe].T @ geno[fs:fe].astype(jnp.float32)
+                bg = geno[fs:fe].astype(jnp.float32)
+                frozen_wc = frozen_wc + seed_responsibilities[fs:fe].T @ bg
+                frozen_wc.block_until_ready()  # BIOBANK_SCALE.md trap #9
+                del bg
             frozen_totals = seed_responsibilities.sum(axis=0)[:, None]
-            new_freq = (frozen_wc + 0.5) / (frozen_totals + 1.0)
+            frozen_freq = (frozen_wc + 0.5) / (frozen_totals + 1.0)
+            frozen_freq = jnp.clip(frozen_freq, 1e-4, 1.0 - 1e-4)
+            new_freq = w_anchor * frozen_freq + (1.0 - w_anchor) * new_freq
 
-        # T is held fixed during iteration 0 so frequencies can stabilize from
-        # the spectral init before the switch-rate estimator kicks in. From
-        # iteration 1 onward, T is updated every iteration alongside mu and freq.
+            frozen_mu = seed_responsibilities.sum(axis=0) / float(H_f)
+            frozen_mu = frozen_mu / frozen_mu.sum()
+            new_mu = w_anchor * frozen_mu + (1.0 - w_anchor) * new_mu
+
+        # Freq delta is needed *before* the T policy decides whether to fire
+        # (the 'gated' policy keys off mean_delta from this iteration).
+        max_delta = float(jnp.abs(new_freq - prev_freq).max())
+        mean_delta = float(jnp.abs(new_freq - prev_freq).mean())
+
+        # T update policy: 'hold' freezes T, 'gated' fires once when freq
+        # stabilises (with a safety valve at iter 15), 'every-iter' is the
+        # legacy behaviour (T held at iter 0, updated every iter thereafter).
         T_per_hap = None
         bucket_assignments = None
-        should_update_T = iteration > 0
 
-        if not should_update_T:
-            new_T = model.gen_since_admix
-        elif per_hap_T and bucket_centers is not None:
-            T_per_hap, bucket_assignments, new_T = update_generations_per_hap_from_stats(
-                em_stats, d_morgan_j, model.gen_since_admix, new_mu, bucket_centers,
+        def _T_update():
+            if per_hap_T and bucket_centers is not None:
+                tph, ba, t_g = update_generations_per_hap_from_stats(
+                    em_stats, d_morgan_j, model.gen_since_admix, new_mu, bucket_centers,
+                )
+                log.info("  T (per-hap): mean=%.1f, std=%.1f",
+                         float(jnp.mean(tph)), float(jnp.std(tph)))
+                return tph, ba, t_g
+            t_g = update_generations_from_stats(
+                em_stats, d_morgan_j, model.gen_since_admix, model.mu,
             )
-            log.info("  T (per-hap): mean=%.1f, std=%.1f",
-                     float(jnp.mean(T_per_hap)), float(jnp.std(T_per_hap)))
-        else:
-            new_T = update_generations_from_stats(em_stats, d_morgan_j, model.gen_since_admix, model.mu)
-            log.info("  T: %.1f → %.1f", model.gen_since_admix, new_T)
+            log.info("  T: %.1f → %.1f", model.gen_since_admix, t_g)
+            return None, None, t_g
+
+        if em_t_policy == "hold":
+            new_T = model.gen_since_admix
+        elif em_t_policy == "gated":
+            gate_fires = (
+                not t_updated
+                and ((iteration > 0 and mean_delta < 0.005) or iteration >= 15)
+            )
+            if gate_fires:
+                T_per_hap, bucket_assignments, new_T = _T_update()
+                t_updated = True
+                log.info(
+                    "  T (gated single update): %.1f → %.1f at iter %d",
+                    model.gen_since_admix, new_T, iteration + 1,
+                )
+            else:
+                new_T = model.gen_since_admix
+        elif em_t_policy == "every-iter":
+            if iteration == 0:
+                new_T = model.gen_since_admix
+            else:
+                T_per_hap, bucket_assignments, new_T = _T_update()
+        else:  # validated above the loop, but defensive
+            raise ValueError(f"unknown em_t_policy: {em_t_policy!r}")
 
         if stats is not None:
             stats.timer_stop("m_step", chrom=chrom_data.chrom, iteration=iteration)
@@ -811,9 +865,7 @@ def run_em(
         log.info("  mu = %s", np.array(model.mu).round(3))
         log.info("  T = %.1f generations", model.gen_since_admix)
 
-        # Check convergence
-        max_delta = float(jnp.abs(new_freq - prev_freq).max())
-        mean_delta = float(jnp.abs(new_freq - prev_freq).mean())
+        # Check convergence (max_delta / mean_delta were computed pre-T-policy)
         log.info("  max Δ(freq) = %.6f, mean Δ(freq) = %.6f", max_delta, mean_delta)
 
         if stats is not None:
@@ -1628,30 +1680,90 @@ def _load_decode_workdir(wd, chrom, chrom_data):
     )
 
 
-def _labels_to_resp(labels, n_haps, n_anc, seeding_mask=None):
-    """Convert hard leaf labels to soft responsibilities matrix."""
-    if seeding_mask is not None:
-        kept_idx = np.where(seeding_mask)[0]
-        # labels may be (H_kept,) or (H_total,) with -1 for excluded
-        if len(labels) == n_haps:
-            # Full-size labels with -1 for excluded
-            seed_resp_np = np.full(
-                (n_haps, n_anc), 1.0 / n_anc, dtype=np.float32,
-            )
-            mask = labels >= 0
-            seed_resp_np[mask] = 0.0
-            seed_resp_np[mask, labels[mask]] = 1.0
-        else:
-            # Compact labels (H_kept,)
-            seed_resp_np = np.full(
-                (n_haps, n_anc), 1.0 / n_anc, dtype=np.float32,
-            )
-            seed_resp_np[kept_idx] = 0.0
-            seed_resp_np[kept_idx, labels] = 1.0
+def _build_seed_resp(
+    geno,
+    labels,
+    n_anc,
+    *,
+    seeding_mask=None,
+    held_out_init: str = "soft",
+):
+    """Build (H_total, A) seed responsibilities from per-kept-hap leaf labels.
+
+    labels may be:
+      - shape (H_kept,) — compact labels for the seeded subset.
+      - shape (H_total,) — full labels with -1 for held-out haps.
+
+    held_out_init:
+      - 'uniform': held-out rows get [1/A, ..., 1/A] (legacy).
+      - 'soft': held-out rows get softmax(Bernoulli emission LL) against
+        kept-derived per-leaf allele freqs. Concentrates mass on whichever
+        leaf best explains each held-out hap's genotype.
+    """
+    H_total = geno.shape[0]
+
+    if seeding_mask is None:
+        resp = jnp.zeros((H_total, n_anc), dtype=jnp.float32)
+        return resp.at[jnp.arange(H_total), jnp.array(labels)].set(1.0)
+
+    if held_out_init not in ("uniform", "soft"):
+        raise ValueError(
+            f"held_out_init must be 'uniform' or 'soft'; got {held_out_init!r}"
+        )
+
+    labels_np = np.asarray(labels)
+    kept_idx = np.where(seeding_mask)[0]
+    held_idx = np.where(~seeding_mask)[0]
+    kept_labels = labels_np[kept_idx] if len(labels_np) == H_total else labels_np
+
+    seed_resp_np = np.zeros((H_total, n_anc), dtype=np.float32)
+    seed_resp_np[kept_idx, kept_labels] = 1.0
+
+    if held_out_init == "uniform" or len(held_idx) == 0:
+        if held_out_init == "uniform":
+            seed_resp_np[held_idx] = 1.0 / n_anc
         return jnp.array(seed_resp_np)
-    else:
-        resp = jnp.zeros((n_haps, n_anc), dtype=jnp.float32)
-        return resp.at[jnp.arange(n_haps), jnp.array(labels)].set(1.0)
+
+    # 'soft': leaf allele freqs from kept haps via closed-form M-step,
+    # then Bernoulli emission softmax over held-out haps. Both passes
+    # batch over haps to avoid materialising a copy of geno.
+    #
+    # block_until_ready() per batch severs the lazy graph so that bg
+    # tensors don't pile up on the device. Without it the leaf_wc
+    # accumulator holds ~1.3 GB × n_batches of bg alive at biobank scale
+    # (BIOBANK_SCALE.md traps #4, #9; mirrors window_init_allele_freq).
+    _BATCH = 20_000
+    n_sites = geno.shape[1]
+    leaf_wc = jnp.zeros((n_anc, n_sites), dtype=jnp.float32)
+    for s in range(0, len(kept_idx), _BATCH):
+        e = min(s + _BATCH, len(kept_idx))
+        idx = kept_idx[s:e]
+        bg = jnp.asarray(geno[idx]).astype(jnp.float32)
+        bl = kept_labels[s:e]
+        bresp_np = np.zeros((e - s, n_anc), dtype=np.float32)
+        bresp_np[np.arange(e - s), bl] = 1.0
+        leaf_wc = leaf_wc + jnp.asarray(bresp_np).T @ bg
+        leaf_wc.block_until_ready()
+        del bg
+    leaf_totals = jnp.asarray(
+        np.bincount(kept_labels, minlength=n_anc).astype(np.float32)
+    )[:, None]
+    leaf_freq = (leaf_wc + 0.5) / (leaf_totals + 1.0)
+    leaf_freq = jnp.clip(leaf_freq, 1e-4, 1.0 - 1e-4)
+    # Sever the kept-loop graph before the held-loop reads leaf_freq.
+    leaf_freq = jnp.asarray(jax.device_get(leaf_freq))
+    log_f = jnp.log(leaf_freq)
+    log_1mf = jnp.log(1.0 - leaf_freq)
+
+    for s in range(0, len(held_idx), _BATCH):
+        e = min(s + _BATCH, len(held_idx))
+        idx = held_idx[s:e]
+        bg = jnp.asarray(geno[idx]).astype(jnp.float32)
+        ll = bg @ log_f.T + (1.0 - bg) @ log_1mf.T
+        seed_resp_np[idx] = np.asarray(jax.nn.softmax(ll, axis=1))
+        del bg, ll
+
+    return jnp.array(seed_resp_np)
 
 
 def run_em_genome(
@@ -1672,6 +1784,8 @@ def run_em_genome(
     seed_method: str = "gmm",
     recursive_kwargs: Optional[dict] = None,
     freeze_anchors_iters: int = 0,
+    em_t_policy: str = "gated",
+    held_out_init: str = "soft",
     out_prefix: Optional[str] = None,
     stop_after_seeding: bool = False,
     resume_from_checkpoint: Optional[str] = None,
@@ -1735,9 +1849,10 @@ def run_em_genome(
                 ckpt_model, ckpt_labels, leaf_info_for_ckpt = \
                     _load_seed_workdir(wd, chrom_data)
                 n_leaves = ckpt_model.n_ancestries
-                seed_resp = _labels_to_resp(
-                    ckpt_labels, chrom_data.n_haps, n_leaves,
+                seed_resp = _build_seed_resp(
+                    chrom_data.geno, ckpt_labels, n_leaves,
                     seeding_mask=seeding_mask,
+                    held_out_init=held_out_init,
                 )
                 em_n_ancestries = n_leaves
                 leaf_labels_for_ckpt = ckpt_labels
@@ -1750,8 +1865,8 @@ def run_em_genome(
                     resume_from_checkpoint, chrom_data,
                 )
                 n_leaves = ckpt_model.n_ancestries
-                seed_resp = _labels_to_resp(
-                    ckpt_labels, chrom_data.n_haps, n_leaves,
+                seed_resp = _build_seed_resp(
+                    chrom_data.geno, ckpt_labels, n_leaves,
                 )
                 em_n_ancestries = n_leaves
                 leaf_labels_for_ckpt = ckpt_labels
@@ -1776,25 +1891,17 @@ def run_em_genome(
                     n_leaves = len(leaf_info)
                     H_total = chrom_data.n_haps
 
+                    seed_resp = _build_seed_resp(
+                        chrom_data.geno, leaf_labels, n_leaves,
+                        seeding_mask=seeding_mask,
+                        held_out_init=held_out_init,
+                    )
                     if seeding_mask is not None:
                         kept_idx = np.where(seeding_mask)[0]
-                        seed_resp_np = np.full(
-                            (H_total, n_leaves), 1.0 / n_leaves,
-                            dtype=np.float32,
-                        )
-                        seed_resp_np[kept_idx] = 0.0
-                        seed_resp_np[kept_idx, leaf_labels] = 1.0
-                        seed_resp = jnp.array(seed_resp_np)
                         full_leaf_labels = np.full(H_total, -1, dtype=np.int32)
                         full_leaf_labels[kept_idx] = leaf_labels
                         leaf_labels_for_ckpt = full_leaf_labels
                     else:
-                        seed_resp = jnp.zeros(
-                            (H_total, n_leaves), dtype=jnp.float32,
-                        )
-                        seed_resp = seed_resp.at[
-                            jnp.arange(H_total), jnp.array(leaf_labels)
-                        ].set(1.0)
                         leaf_labels_for_ckpt = leaf_labels
 
                     em_n_ancestries = n_leaves
@@ -1893,6 +2000,7 @@ def run_em_genome(
                     max_ancestries=max_ancestries,
                     seed_responsibilities=seed_resp,
                     freeze_anchors_iters=freeze_anchors_iters,
+                    em_t_policy=em_t_policy,
                     skip_decode=True,
                 )
                 fitted_model = result.model

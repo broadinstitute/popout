@@ -54,7 +54,8 @@ STAGE_DEPS: dict[str, dict[str, list[str]]] = {
         "fingerprint": [],  # transitively covered by seed
         "args": [
             "gen_since_admix", "n_em_iter", "block_emissions", "block_size",
-            "freeze_anchors_iters", "per_hap_T", "n_T_buckets",
+            "freeze_anchors_iters", "em_t_policy", "held_out_init",
+            "per_hap_T", "n_T_buckets",
         ],
     },
     "decode": {

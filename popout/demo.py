@@ -76,6 +76,7 @@ def run_demo(
     pure_fraction: float = 0.3,
     seed_method: str = "gmm",
     freeze_anchors_iters: int = 0,
+    em_t_policy: str = "gated",
 ):
     import jax
     log.info("JAX devices: %s", jax.devices())
@@ -179,6 +180,7 @@ def run_demo(
         rng_seed=seed,
         seed_responsibilities=seed_resp,
         freeze_anchors_iters=freeze_anchors_iters,
+        em_t_policy=em_t_policy,
     )
     t_em = time.perf_counter() - t0
     log.info("EM pipeline (%s seed): %.1f seconds", seed_method, t_em)
@@ -395,13 +397,20 @@ def main():
                         help="Fraction of haplotypes that are single-ancestry (default: 0.3)")
     parser.add_argument("--seed-method", choices=["gmm", "recursive"], default="gmm",
                         help="Seeding strategy (default: gmm)")
-    parser.add_argument("--freeze-anchors-iters", type=int, default=0,
-                        help="Freeze seed responsibilities for first N EM iters (default: 0)")
+    parser.add_argument("--freeze-anchors-iters", type=int, default=None,
+                        help="Linear-blend seed responsibilities into the M-step for first N "
+                             "EM iters (default: 5 if --seed-method=recursive, else 0)")
+    parser.add_argument("--em-t-policy",
+                        choices=["hold", "gated", "every-iter"], default="gated",
+                        help="T-update policy during EM (default: gated)")
     parser.add_argument("--sweep", action="store_true",
                         help="Run multi-config sweep instead of single demo")
     parser.add_argument("--convert", action="store_true",
                         help="Run convert demo (simulate → popout → VCF → parse_flare)")
     args = parser.parse_args()
+
+    if args.freeze_anchors_iters is None:
+        args.freeze_anchors_iters = 5 if args.seed_method == "recursive" else 0
 
     if args.sweep:
         run_sweep()
@@ -419,6 +428,7 @@ def main():
             pure_fraction=args.pure_fraction,
             seed_method=args.seed_method,
             freeze_anchors_iters=args.freeze_anchors_iters,
+            em_t_policy=args.em_t_policy,
         )
 
 

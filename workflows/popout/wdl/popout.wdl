@@ -37,7 +37,10 @@ task popout_task {
 
     # Recursive seeding (--seed-method recursive)
     String  seed_method              = "gmm"
-    Int     freeze_anchors_iters     = 0
+    # -1 = let popout pick the default (5 for recursive, 0 for gmm). 0 = explicit off.
+    Int     freeze_anchors_iters     = -1
+    String  em_t_policy              = "gated"
+    String  held_out_init            = "soft"
     Float   recursive_merge_hellinger = 0.012
     Int     recursive_max_leaves     = 20
     Int     recursive_min_leaf_size  = 500
@@ -165,9 +168,11 @@ task popout_task {
     CMD="$CMD --recursive-merge-hellinger ~{recursive_merge_hellinger}"
     CMD="$CMD --recursive-max-leaves ~{recursive_max_leaves}"
     CMD="$CMD --recursive-min-leaf-size ~{recursive_min_leaf_size}"
-    if [ "~{freeze_anchors_iters}" -gt 0 ]; then
+    if [ "~{freeze_anchors_iters}" -ge 0 ]; then
       CMD="$CMD --freeze-anchors-iters ~{freeze_anchors_iters}"
     fi
+    CMD="$CMD --em-t-policy ~{em_t_policy}"
+    CMD="$CMD --held-out-init ~{held_out_init}"
     ~{if stop_after_seeding then 'CMD="$CMD --stop-after-seeding"' else ''}
     ~{if post_em_consolidation then '' else 'CMD="$CMD --no-post-em-consolidation"'}
     ~{if defined(exclude_seeding_samples) then 'CMD="$CMD --exclude-seeding-samples ~{exclude_seeding_samples}"' else ''}
@@ -265,7 +270,9 @@ workflow popout {
 
     # Recursive seeding
     String  seed_method              = "gmm"
-    Int     freeze_anchors_iters     = 0
+    Int     freeze_anchors_iters     = -1
+    String  em_t_policy              = "gated"
+    String  held_out_init            = "soft"
     Float   recursive_merge_hellinger = 0.012
     Int     recursive_max_leaves     = 20
     Int     recursive_min_leaf_size  = 500
@@ -312,6 +319,8 @@ workflow popout {
       ancestry_names     = ancestry_names,
       seed_method               = seed_method,
       freeze_anchors_iters      = freeze_anchors_iters,
+      em_t_policy               = em_t_policy,
+      held_out_init             = held_out_init,
       recursive_merge_hellinger = recursive_merge_hellinger,
       recursive_max_leaves      = recursive_max_leaves,
       recursive_min_leaf_size   = recursive_min_leaf_size,

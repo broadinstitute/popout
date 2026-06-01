@@ -908,11 +908,13 @@ def _run_k2_em_split(
     from ._device import fits_on_device
 
     sub_geno = _sub_geno(geno, indices)
-    if geno_j is not None:
-        if len(indices) == geno_j.shape[0]:
-            sub_geno_j = geno_j  # root node — no copy needed
-        else:
-            sub_geno_j = geno_j[jnp.asarray(indices)]
+    if geno_j is not None and len(indices) == geno_j.shape[0]:
+        sub_geno_j = geno_j  # root node — no copy needed
+    elif geno_j is not None and fits_on_device(sub_geno.nbytes * 2):
+        # Parent geno_j is still resident; the fancy-index slice would
+        # allocate a *new* (H_sub, T) device buffer alongside it. 2×
+        # headroom covers slice + forward_backward working state.
+        sub_geno_j = geno_j[jnp.asarray(indices)]
     elif fits_on_device(sub_geno.nbytes * 2):
         # 2× headroom: geno + forward_backward working state (emissions,
         # forward/backward arrays, intermediates) is roughly equal to geno.

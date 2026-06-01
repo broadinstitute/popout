@@ -42,6 +42,8 @@ def _args():
         "block_emissions": False,
         "block_size": 8,
         "freeze_anchors_iters": 0,
+        "em_t_policy": "gated",
+        "held_out_init": "soft",
         "probs": False,
         "per_hap_T": False,
         "n_T_buckets": 20,
