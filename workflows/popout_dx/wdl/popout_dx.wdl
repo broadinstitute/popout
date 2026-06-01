@@ -40,15 +40,13 @@ task discover_runs {
   >>>
 
   output {
-    File runs_manifest_json        = "out/runs_manifest.json"
-    File runs_manifest_tsv         = "out/runs_manifest.tsv"   # headerless; for read_tsv()
-    File runs_manifest_with_header = "out/runs_manifest.tsv.with_header.tsv"
-    # The cohort bundle, localized once per workflow run. Re-passed to
-    # each scatter shard so the shard can tar out its own slice — this
-    # keeps every downstream File path addressable as a gs:// URI
-    # (Cromwell delocalizes Files emitted from a task before the next
-    # task can localize them).
-    File cohort_bundle_localized   = "out/cohort_bundle.tar.gz"
+    File   runs_manifest_json        = "out/runs_manifest.json"
+    File   runs_manifest_tsv         = "out/runs_manifest.tsv"   # headerless; for read_tsv()
+    File   runs_manifest_with_header = "out/runs_manifest.tsv.with_header.tsv"
+    # The cohort bundle URI (gs://...). Cromwell localizes per shard from
+    # this String when it flows into the scatter task's File input — no
+    # copy of the bundle goes through discover's output.
+    String cohort_bundle_uri         = read_string("out/cohort_bundle_uri.txt")
   }
 
   runtime {
@@ -139,19 +137,19 @@ task popout_dx_per_cluster {
       "*/per_cluster/~{cluster_id}/~{chrom}/soft_correlation/labels.json"
 
     # ---- build a fake manifest TSV with just this shard --------------
-    # The orchestrator looks rows up by (cluster_id, chrom). For the WDL
-    # shard's needs, a single-row TSV is enough.
+    # Explicit %s\t...%s\n: 12 fields, 11 tabs, 1 newline. The "%s\t"-
+    # repeated form would emit a trailing tab and split to 13 elements,
+    # which then mismatches the orchestrator's TSV_COLUMNS contract.
     mkdir -p shard_inputs
-    {
-      printf "%s\t" "~{cluster_id}" "~{chrom}" \
-        "slices/per_cluster/~{cluster_id}/~{chrom}/global.tsv" \
-        "slices/per_cluster/~{cluster_id}/~{chrom}/soft_correlation/labels.json" \
-        "~{default='' flare_anc_vcf}" \
-        "~{popout_global_tsv}" "~{popout_tracts}" "~{popout_model}" \
-        "~{popout_model_npz}" "~{default='' popout_summary}" \
-        "~{default='' rye_q_path}" "~{default='' rf_ancestry_path}"
-      printf "\n"
-    } > shard_inputs/manifest.tsv
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "~{cluster_id}" "~{chrom}" \
+      "slices/per_cluster/~{cluster_id}/~{chrom}/global.tsv" \
+      "slices/per_cluster/~{cluster_id}/~{chrom}/soft_correlation/labels.json" \
+      "~{default='' flare_anc_vcf}" \
+      "~{popout_global_tsv}" "~{popout_tracts}" "~{popout_model}" \
+      "~{popout_model_npz}" "~{default='' popout_summary}" \
+      "~{default='' rye_q_path}" "~{default='' rf_ancestry_path}" \
+      > shard_inputs/manifest.tsv
 
     # ---- run the orchestrator ----------------------------------------
     python3 /opt/validation/popout_dx/scripts/run_dx_cluster.py \
@@ -326,7 +324,7 @@ workflow popout_dx {
       input:
         cluster_id          = row[0],
         chrom               = row[1],
-        cohort_bundle       = discover_runs.cohort_bundle_localized,
+        cohort_bundle       = discover_runs.cohort_bundle_uri,
         flare_anc_vcf       = flare_anc_vcf_opt,
         popout_global_tsv   = row[5],
         popout_tracts       = row[6],

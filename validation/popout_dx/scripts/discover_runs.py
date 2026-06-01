@@ -77,29 +77,6 @@ def _is_gcs(path: str) -> bool:
     return path.startswith("gs://")
 
 
-def localize_gcs_file(uri: str, dest_path: Path) -> Path:
-    """Materialize ``uri`` at ``dest_path`` (gcloud storage cp for gs://,
-    file copy for local sources). Return ``dest_path``. The fixed
-    destination lets the WDL declare a static output File path
-    regardless of input source."""
-    dest_path.parent.mkdir(parents=True, exist_ok=True)
-    if _is_gcs(uri):
-        cmd = ["gcloud", "storage", "cp", uri, str(dest_path)]
-        try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-        except FileNotFoundError:
-            die("gcloud not found in PATH; required to localise gs:// inputs")
-        except subprocess.CalledProcessError as e:
-            die(f"gcloud storage cp failed for {uri!r}: {e.stderr.strip()}")
-    else:
-        import shutil
-        src = Path(uri)
-        if not src.is_file():
-            die(f"local source {uri!r} is not a file")
-        shutil.copyfile(src, dest_path)
-    return dest_path
-
-
 def list_uris(root: str) -> list[str]:
     """Recursively list every URI under ``root`` (files only, sorted)."""
     if _is_gcs(root):
@@ -218,14 +195,42 @@ FLARE_BUNDLE_WANTED_RESTS: dict[str, str] = {
 }
 
 
-def list_flare_in_cohort_bundle(bundle_path: Path) -> set[tuple[str, str]]:
-    """Stream the bundle once; return every ``(cluster_id, chrom)`` pair
-    that has a per_cluster ``global.tsv`` member.
+def list_flare_in_cohort_bundle(bundle_uri: str) -> set[tuple[str, str]]:
+    """Enumerate every ``(cluster_id, chrom)`` pair in the bundle without
+    leaving a local copy. Streams ``gcloud storage cat`` (or a local file)
+    into Python's tarfile in r|* mode; reads member names only.
     """
-    if not bundle_path.is_file():
-        die(f"flare.cohort_bundle {bundle_path} is not a local file")
-    pairs: set[tuple[str, str]] = set()
-    with tarfile.open(bundle_path, "r|*") as tar:   # streaming
+    if _is_gcs(bundle_uri):
+        proc = subprocess.Popen(
+            ["gcloud", "storage", "cat", bundle_uri],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        assert proc.stdout is not None
+        pairs: set[tuple[str, str]] = set()
+        try:
+            with tarfile.open(fileobj=proc.stdout, mode="r|*") as tar:
+                for m in tar:
+                    if not m.isfile():
+                        continue
+                    mm = _FLARE_MEMBER_RE.search(m.name)
+                    if mm and mm.group("rest") == "global.tsv":
+                        pairs.add((mm.group("cluster_id"), mm.group("chrom")))
+        finally:
+            # Drain & close so gcloud storage cat can exit even if tar bailed early.
+            if proc.stdout is not None:
+                proc.stdout.close()
+            proc.wait()
+        if proc.returncode != 0:
+            stderr = proc.stderr.read().decode("utf-8", "replace") if proc.stderr else ""
+            die(f"gcloud storage cat {bundle_uri!r} failed: {stderr.strip()}")
+        return pairs
+
+    path = Path(bundle_uri)
+    if not path.is_file():
+        die(f"flare.cohort_bundle {bundle_uri!r} is not a local file")
+    pairs = set()
+    with tarfile.open(path, "r|*") as tar:
         for m in tar:
             if not m.isfile():
                 continue
@@ -357,17 +362,14 @@ def build_manifest(
         )
 
     flare_cohort_bundle = cfg["flare"]["cohort_bundle"]
-    # Fixed filename so the WDL can declare it as a static output path.
-    bundle_path = localize_gcs_file(
-        flare_cohort_bundle, out_dir / "cohort_bundle.tar.gz",
-    )
-
-    # Pass 1: enumerate; pass 2: extract only the selected slices.
-    all_pairs = list_flare_in_cohort_bundle(bundle_path)
+    # Enumerate by streaming; never materialize the bundle locally. Cromwell
+    # localizes it once per shard from the URI we expose to the WDL.
+    all_pairs = list_flare_in_cohort_bundle(flare_cohort_bundle)
     if not all_pairs:
         die(
-            f"flare.cohort_bundle {bundle_path} contained no per_cluster/<cid>/<chrom>/global.tsv "
-            "members; not a v3.x FLARE-validate cohort bundle?"
+            f"flare.cohort_bundle {flare_cohort_bundle!r} contained no "
+            "per_cluster/<cid>/<chrom>/global.tsv members; not a v2.x "
+            "FLARE-validate cohort bundle?"
         )
     selected = {
         (cid, chrom) for (cid, chrom) in all_pairs
@@ -387,10 +389,9 @@ def build_manifest(
             file=sys.stderr,
         )
     # Per-cluster slice extraction is deferred to the per-shard task: each
-    # shard receives the localized cohort bundle and tars out its own
-    # global.tsv + labels.json. That keeps every File path in the manifest
-    # TSV addressable as a gs:// URI (Cromwell can localize), avoiding the
-    # "local path from a different task" failure mode.
+    # shard receives the cohort bundle Cromwell-localized from its gs:// URI
+    # and tars out its own global.tsv + labels.json. discover never makes
+    # a copy of the bundle — it just streams to enumerate members.
 
     # Local mode requires FLARE per-cluster .anc.vcf.gz too. Discover those
     # alongside the cohort bundle slices when the user supplies anc_vcf_root.
@@ -531,6 +532,12 @@ def main() -> None:
         json.dump(manifest, f, indent=2, sort_keys=False)
         f.write("\n")
     write_tsv(rows, tsv_path)
+
+    # Expose the cohort bundle URI to the WDL as a one-line String output
+    # (no copy is made; Cromwell localizes per shard from this URI).
+    (out_dir / "cohort_bundle_uri.txt").write_text(
+        manifest["flare_cohort_bundle"] + "\n"
+    )
 
     print(
         f"discover_runs: wrote {json_path} and {tsv_path} ({len(rows)} runs, "

@@ -234,7 +234,10 @@ def run(work: Path, mode: str) -> None:
 
     tarballs_dir = work / "tarballs"
     tarballs_dir.mkdir(parents=True, exist_ok=True)
-    bundle_path = discover_out / "cohort_bundle.tar.gz"
+    # discover no longer materializes the bundle — read its URI from the
+    # cohort_bundle_uri.txt sidecar and use it directly (in the WDL Cromwell
+    # localizes per shard; here we just open the original fixture file).
+    bundle_path = Path((discover_out / "cohort_bundle_uri.txt").read_text().strip())
     for cid in paths["clusters"]:
         # Simulate what the WDL per-shard task does: extract this shard's
         # slice from the cohort bundle, then build a one-row manifest with
