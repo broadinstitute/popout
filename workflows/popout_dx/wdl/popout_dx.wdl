@@ -129,12 +129,14 @@ task popout_dx_per_cluster {
       popout_dx.tools="~{tools}"
 
     # ---- extract this shard's FLARE slice from the cohort bundle -----
-    # The bundle's per_cluster/<cid>/<chrom>/ tree carries the global.tsv
-    # + soft_correlation/labels.json the orchestrator needs.
+    # FLARE-validate v2.0.0 packs `cohort_bundle/per_cluster/<cid>/<chrom>/`.
+    # --strip-components=1 drops the cohort_bundle/ prefix so the
+    # extracted layout matches the manifest paths below regardless of any
+    # future top-level renaming (we just need exactly one prefix component).
     mkdir -p slices
-    tar -xzf ~{cohort_bundle} -C slices \
-      per_cluster/~{cluster_id}/~{chrom}/global.tsv \
-      per_cluster/~{cluster_id}/~{chrom}/soft_correlation/labels.json
+    tar -xzf ~{cohort_bundle} -C slices --strip-components=1 --wildcards \
+      "*/per_cluster/~{cluster_id}/~{chrom}/global.tsv" \
+      "*/per_cluster/~{cluster_id}/~{chrom}/soft_correlation/labels.json"
 
     # ---- build a fake manifest TSV with just this shard --------------
     # The orchestrator looks rows up by (cluster_id, chrom). For the WDL

@@ -114,11 +114,12 @@ def build_fixture(root: Path) -> dict:
             "correlations": [], "n_overlapping_sites": 0,
         }
         (cdir / "soft_correlation" / "labels.json").write_text(json.dumps(labels))
+    # Match the real FLARE-validate cohort bundle layout: per_cluster/
+    # nested under a single cohort_bundle/ top-level prefix. Use Python's
+    # tarfile so this works on both BSD and GNU tar.
     bundle_path = root / "cohort_bundle.v3.0.0.tar.gz"
-    subprocess.run(
-        ["tar", "czf", str(bundle_path), "-C", str(bsrc), "."],
-        check=True,
-    )
+    with tarfile.open(bundle_path, "w:gz") as tar:
+        tar.add(bsrc, arcname="cohort_bundle")
 
     # popout run_dir (whole-cohort)
     prun = root / "popout_run"
@@ -241,11 +242,26 @@ def run(work: Path, mode: str) -> None:
         shard_work = work / "per_cluster_work" / cid
         slices_dir = shard_work / "slices"
         slices_dir.mkdir(parents=True, exist_ok=True)
-        subprocess.run([
-            "tar", "-xzf", str(bundle_path), "-C", str(slices_dir),
+        # Simulate the WDL's `tar -xzf ... --strip-components=1 --wildcards
+        # */per_cluster/...` extraction, but via Python's tarfile so the
+        # test is portable across BSD and GNU tar.
+        want_suffixes = (
             f"per_cluster/{cid}/chr1/global.tsv",
             f"per_cluster/{cid}/chr1/soft_correlation/labels.json",
-        ], check=True)
+        )
+        with tarfile.open(bundle_path, "r:gz") as tar:
+            for m in tar.getmembers():
+                if not m.isfile():
+                    continue
+                # Strip the single leading prefix component (cohort_bundle/...)
+                stripped = m.name.split("/", 1)[1] if "/" in m.name else m.name
+                if stripped in want_suffixes:
+                    dest = slices_dir / stripped
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    src = tar.extractfile(m)
+                    if src is None:
+                        raise AssertionError(f"failed to extract {m.name}")
+                    dest.write_bytes(src.read())
         shard_manifest = shard_work / "manifest.tsv"
         from validation.popout_dx.scripts.discover_runs import TSV_COLUMNS
         # Pull the popout/rye/rf paths from the discover-emitted manifest.
