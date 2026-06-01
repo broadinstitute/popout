@@ -57,3 +57,7 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /workflows/popout/wdl/popout_build_panel.wdl
     topic: Build per-population allele-frequency panel TSV from 1KG or gnomAD VCFs
+  - name: popout-dx
+    subclass: WDL
+    primaryDescriptorPath: /workflows/popout_dx/wdl/popout_dx.wdl
+    topic: popout diagnostics — per-cluster comparison of popout against any subset of {flare, rye, rf}

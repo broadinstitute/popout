@@ -11,5 +11,6 @@ run.sh
 scripts/
 !workflows/lai-tools/scripts/
 !validation/scripts/
+!validation/popout_dx/scripts/
 !validation/data/
 workflows/bcftools/data/
