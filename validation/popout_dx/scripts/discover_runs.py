@@ -77,21 +77,27 @@ def _is_gcs(path: str) -> bool:
     return path.startswith("gs://")
 
 
-def localize_gcs_file(uri: str, dest_dir: Path) -> Path:
-    """Download ``gs://...`` to ``dest_dir`` via gcloud storage cp; return
-    local Path. Pass-through when ``uri`` is already a local path."""
-    if not _is_gcs(uri):
-        return Path(uri)
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / uri.rsplit("/", 1)[-1]
-    cmd = ["gcloud", "storage", "cp", uri, str(dest)]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except FileNotFoundError:
-        die("gcloud not found in PATH; required to localise gs:// inputs")
-    except subprocess.CalledProcessError as e:
-        die(f"gcloud storage cp failed for {uri!r}: {e.stderr.strip()}")
-    return dest
+def localize_gcs_file(uri: str, dest_path: Path) -> Path:
+    """Materialize ``uri`` at ``dest_path`` (gcloud storage cp for gs://,
+    file copy for local sources). Return ``dest_path``. The fixed
+    destination lets the WDL declare a static output File path
+    regardless of input source."""
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    if _is_gcs(uri):
+        cmd = ["gcloud", "storage", "cp", uri, str(dest_path)]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except FileNotFoundError:
+            die("gcloud not found in PATH; required to localise gs:// inputs")
+        except subprocess.CalledProcessError as e:
+            die(f"gcloud storage cp failed for {uri!r}: {e.stderr.strip()}")
+    else:
+        import shutil
+        src = Path(uri)
+        if not src.is_file():
+            die(f"local source {uri!r} is not a file")
+        shutil.copyfile(src, dest_path)
+    return dest_path
 
 
 def list_uris(root: str) -> list[str]:
@@ -351,7 +357,10 @@ def build_manifest(
         )
 
     flare_cohort_bundle = cfg["flare"]["cohort_bundle"]
-    bundle_path = localize_gcs_file(flare_cohort_bundle, out_dir / "localized")
+    # Fixed filename so the WDL can declare it as a static output path.
+    bundle_path = localize_gcs_file(
+        flare_cohort_bundle, out_dir / "cohort_bundle.tar.gz",
+    )
 
     # Pass 1: enumerate; pass 2: extract only the selected slices.
     all_pairs = list_flare_in_cohort_bundle(bundle_path)
@@ -377,9 +386,11 @@ def build_manifest(
             f"(cluster, chrom) pairs ({rejected} rejected)",
             file=sys.stderr,
         )
-    flare_map = extract_flare_slices_from_cohort_bundle(
-        bundle_path, selected, out_dir / "flare_slices",
-    )
+    # Per-cluster slice extraction is deferred to the per-shard task: each
+    # shard receives the localized cohort bundle and tars out its own
+    # global.tsv + labels.json. That keeps every File path in the manifest
+    # TSV addressable as a gs:// URI (Cromwell can localize), avoiding the
+    # "local path from a different task" failure mode.
 
     # Local mode requires FLARE per-cluster .anc.vcf.gz too. Discover those
     # alongside the cohort bundle slices when the user supplies anc_vcf_root.
@@ -424,13 +435,15 @@ def build_manifest(
     # for self-containment (WDL read_tsv passes one row per shard).
     rows: list[dict] = []
     for cid, chrom in selected_keys:
-        f = flare_map[(cid, chrom)]
         p = popout_by_chrom[chrom]
         rows.append({
             "cluster_id": cid,
             "chrom": chrom,
-            "flare_global_tsv": f.get("global_tsv", ""),
-            "flare_labels_json": f.get("labels_json", ""),
+            # flare_global_tsv / flare_labels_json are emitted empty here —
+            # the per-shard WDL task extracts them from the cohort bundle
+            # and populates the orchestrator's shard-local TSV directly.
+            "flare_global_tsv": "",
+            "flare_labels_json": "",
             "flare_anc_vcf": flare_anc_vcf.get((cid, chrom), ""),
             "popout_global_tsv": p.get("global_tsv", ""),
             "popout_tracts": p.get("tracts", ""),

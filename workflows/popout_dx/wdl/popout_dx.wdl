@@ -40,12 +40,15 @@ task discover_runs {
   >>>
 
   output {
-    File        runs_manifest_json = "out/runs_manifest.json"
-    File        runs_manifest_tsv  = "out/runs_manifest.tsv"   # headerless; for read_tsv()
-    File        runs_manifest_with_header = "out/runs_manifest.tsv.with_header.tsv"
-    # The per-cluster FLARE slices extracted from the cohort bundle.
-    # Each scatter shard picks its slice by basename match.
-    Array[File] flare_slices = glob("out/flare_slices/**/*")
+    File runs_manifest_json        = "out/runs_manifest.json"
+    File runs_manifest_tsv         = "out/runs_manifest.tsv"   # headerless; for read_tsv()
+    File runs_manifest_with_header = "out/runs_manifest.tsv.with_header.tsv"
+    # The cohort bundle, localized once per workflow run. Re-passed to
+    # each scatter shard so the shard can tar out its own slice — this
+    # keeps every downstream File path addressable as a gs:// URI
+    # (Cromwell delocalizes Files emitted from a task before the next
+    # task can localize them).
+    File cohort_bundle_localized   = "out/cohort_bundle.tar.gz"
   }
 
   runtime {
@@ -63,10 +66,12 @@ task popout_dx_per_cluster {
     String cluster_id
     String chrom
 
+    # FLARE cohort bundle (workflow-level singleton; localized once in
+    # discover_runs, re-passed here). Shard extracts its own slice.
+    File   cohort_bundle
+
     # Per-shard files (Cromwell auto-localizes via String → File coercion
     # at the call site).
-    File   flare_global_tsv
-    File   flare_labels_json
     File?  flare_anc_vcf            # populated only in local mode (Cromwell-localized from gs://)
 
     # Whole-cohort singletons.
@@ -123,13 +128,23 @@ task popout_dx_per_cluster {
       popout_dx.mode="~{mode}" \
       popout_dx.tools="~{tools}"
 
+    # ---- extract this shard's FLARE slice from the cohort bundle -----
+    # The bundle's per_cluster/<cid>/<chrom>/ tree carries the global.tsv
+    # + soft_correlation/labels.json the orchestrator needs.
+    mkdir -p slices
+    tar -xzf ~{cohort_bundle} -C slices \
+      per_cluster/~{cluster_id}/~{chrom}/global.tsv \
+      per_cluster/~{cluster_id}/~{chrom}/soft_correlation/labels.json
+
     # ---- build a fake manifest TSV with just this shard --------------
     # The orchestrator looks rows up by (cluster_id, chrom). For the WDL
     # shard's needs, a single-row TSV is enough.
     mkdir -p shard_inputs
     {
       printf "%s\t" "~{cluster_id}" "~{chrom}" \
-        "~{flare_global_tsv}" "~{flare_labels_json}" "~{default='' flare_anc_vcf}" \
+        "slices/per_cluster/~{cluster_id}/~{chrom}/global.tsv" \
+        "slices/per_cluster/~{cluster_id}/~{chrom}/soft_correlation/labels.json" \
+        "~{default='' flare_anc_vcf}" \
         "~{popout_global_tsv}" "~{popout_tracts}" "~{popout_model}" \
         "~{popout_model_npz}" "~{default='' popout_summary}" \
         "~{default='' rye_q_path}" "~{default='' rf_ancestry_path}"
@@ -309,8 +324,7 @@ workflow popout_dx {
       input:
         cluster_id          = row[0],
         chrom               = row[1],
-        flare_global_tsv    = row[2],
-        flare_labels_json   = row[3],
+        cohort_bundle       = discover_runs.cohort_bundle_localized,
         flare_anc_vcf       = flare_anc_vcf_opt,
         popout_global_tsv   = row[5],
         popout_tracts       = row[6],

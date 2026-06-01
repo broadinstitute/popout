@@ -233,18 +233,47 @@ def run(work: Path, mode: str) -> None:
 
     tarballs_dir = work / "tarballs"
     tarballs_dir.mkdir(parents=True, exist_ok=True)
+    bundle_path = discover_out / "cohort_bundle.tar.gz"
     for cid in paths["clusters"]:
+        # Simulate what the WDL per-shard task does: extract this shard's
+        # slice from the cohort bundle, then build a one-row manifest with
+        # the local extracted paths in the flare_* columns.
+        shard_work = work / "per_cluster_work" / cid
+        slices_dir = shard_work / "slices"
+        slices_dir.mkdir(parents=True, exist_ok=True)
+        subprocess.run([
+            "tar", "-xzf", str(bundle_path), "-C", str(slices_dir),
+            f"per_cluster/{cid}/chr1/global.tsv",
+            f"per_cluster/{cid}/chr1/soft_correlation/labels.json",
+        ], check=True)
+        shard_manifest = shard_work / "manifest.tsv"
+        from validation.popout_dx.scripts.discover_runs import TSV_COLUMNS
+        # Pull the popout/rye/rf paths from the discover-emitted manifest.
+        discover_manifest = (discover_out / "runs_manifest.tsv").read_text().splitlines()
+        row_parts: list[str] | None = None
+        for line in discover_manifest:
+            parts = line.split("\t")
+            if len(parts) == len(TSV_COLUMNS) and parts[0] == cid and parts[1] == "chr1":
+                row_parts = parts
+                break
+        if row_parts is None:
+            raise AssertionError(f"discover manifest missing row for {cid}/chr1")
+        row = dict(zip(TSV_COLUMNS, row_parts))
+        row["flare_global_tsv"] = str(slices_dir / f"per_cluster/{cid}/chr1/global.tsv")
+        row["flare_labels_json"] = str(slices_dir / f"per_cluster/{cid}/chr1/soft_correlation/labels.json")
+        shard_manifest.write_text("\t".join(row[c] for c in TSV_COLUMNS) + "\n")
+
         out_tar = tarballs_dir / f"{cid}.chr1.popout_dx.v1.0.0.tar.gz"
         _run([
             sys.executable, str(SCRIPTS / "run_dx_cluster.py"),
-            "--runs-manifest-tsv", str(discover_out / "runs_manifest.tsv"),
+            "--runs-manifest-tsv", str(shard_manifest),
             "--cluster-id", cid,
             "--chrom", "chr1",
             "--mode", mode,
             "--run-name", f"smoke_e2e_{mode}",
             "--tools", "popout,flare,rye,rf",
             "--config-file", str(paths["config"]),
-            "--work-dir", str(work / "per_cluster_work" / cid),
+            "--work-dir", str(shard_work),
             "--max-workers", "4",
             "--emit-tarball", str(out_tar),
         ])
