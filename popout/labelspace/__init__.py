@@ -24,7 +24,9 @@ The submodules export the operational primitives:
 
 from __future__ import annotations
 
-from . import assignment, matching, naming, project, registry, shorthand  # noqa: F401
+from . import (                                                # noqa: F401
+    assignment, matching, metrics, naming, project, registry, shorthand,
+)
 from .assignment import Assignment
 from .matching import (
     by_name,
@@ -33,15 +35,25 @@ from .matching import (
     manual,
     posterior_slope,
 )
+from .metrics import (
+    adjusted_rand_index,
+    cluster_eval,
+    mutual_information,
+    normalized_mutual_info,
+    v_measure,
+)
 from .naming import name_components, ordered_subcomponent_names
 from .project import collapse, project_proportions, project_tracts
 from .registry import LabelSpace, get
 
 __all__ = [
     "Assignment", "LabelSpace",
-    "assignment", "matching", "naming", "project", "registry", "shorthand",
+    "assignment", "matching", "metrics", "naming", "project",
+    "registry", "shorthand",
     "by_name", "confusion_hungarian", "corr_hungarian", "manual",
     "posterior_slope", "get",
     "name_components", "ordered_subcomponent_names",
     "collapse", "project_proportions", "project_tracts",
+    "adjusted_rand_index", "cluster_eval", "mutual_information",
+    "normalized_mutual_info", "v_measure",
 ]

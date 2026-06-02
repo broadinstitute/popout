@@ -494,6 +494,27 @@ def md_frontmatter(bundle: CohortBundle) -> str:
     )
 
 
+def _resolve_figure_tag(bundle: CohortBundle) -> str | None:
+    """Return the canonical figure-shorthand tag for this cohort, or None.
+
+    Phase 5 of the label-space retrofit. Looks for ``provenance.tag`` in
+    ``cohort_manifest.json``, then in ``cohort_summary.json``. Falls back
+    to a synthesised SP6 tag if neither carries one (which keeps reports
+    on pre-Phase-5 bundles readable).
+    """
+    for src in (bundle.manifest, bundle.summary):
+        prov = (src or {}).get("provenance") or {}
+        tag = prov.get("tag")
+        if isinstance(tag, str) and tag:
+            return tag
+    tools = [t for t in bundle.tools if t != ANCHOR_TOOL]
+    if not tools:
+        return None
+    return ("L=SP6/MID+ | " + " | ".join(
+        ["popout=>postS"] + [f"{t}=>name" for t in tools]
+    ))
+
+
 def section_cover(bundle: CohortBundle) -> str:
     m = bundle.manifest
     s = bundle.summary
@@ -507,11 +528,16 @@ def section_cover(bundle: CohortBundle) -> str:
         f"**Tools:** {', '.join(bundle.tools)}  ",
         f"**Scale:** {m.get('n_clusters', '?')} clusters × {m.get('n_chroms', '?')} chroms "
         f"({m.get('n_artifacts', '?')} artifacts)  ",
+    ]
+    tag = _resolve_figure_tag(bundle)
+    if tag:
+        lines.append(f"**Label space:** `{tag}`  ")
+    lines.extend([
         "",
         "Cluster ids: `" + ", ".join(bundle.cluster_ids) + "`  ",
         "Chroms: `" + ", ".join(bundle.chroms) + "`  ",
         "",
-    ]
+    ])
     n_pairs = len(s.get("pairs", []))
     if n_pairs:
         lines.append(f"`cohort_summary.json` carries **{n_pairs}** (tool × RF-label) pair "

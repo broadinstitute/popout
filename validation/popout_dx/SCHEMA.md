@@ -161,7 +161,23 @@ Verbatim copy of the popout-side `.global.tsv` for this cluster. Columns: `sampl
 
 ### 1.4 `labels.json`
 
-Output of the label-alignment step. Same shape as the FLARE-side `soft_correlation/labels.json` so downstream code can read either. Keys: `tool` (`"popout"`), `rf_ref_labels`, `popout_to_rf_label`, `rf_to_popout_components`, `correlations`, `slope_matrix`, `max_cal_matrix`, `merge_group_stats`, `n_overlapping_sites`.
+Output of the label-alignment step. Phase 5 of the label-space retrofit
+emits a **dual v1+v2 format**: the legacy keys remain for back-compat
+readers, and the new v2 schema adds `schema`, `target_space`,
+`target_members`, `source`, `method`, `input_space`,
+`component_to_label`, `label_to_components`, `subcomponent_names`,
+`diagnostics`, and `provenance`. The figure-tag shorthand lives at
+`provenance.tag` (e.g.
+`L=SP6/MID+ | popout=>postS | flare=>name | rye=>name | rf=>name | v=ab12cd`).
+
+Legacy keys (unchanged): `tool` (`"popout"`), `rf_ref_labels`,
+`popout_to_rf_label`, `rf_to_popout_components`, `correlations`,
+`slope_matrix`, `max_cal_matrix`, `merge_group_stats`,
+`n_overlapping_sites`.
+
+The canonical (de)serializer is `popout.labelspace.Assignment` —
+`dump_v1_compatible` writes both blocks; `load` reads either. See
+`my_notes/labels/LABEL_SPACE.md` §5 for the design.
 
 ### 1.5 `global/pairwise_hard/popout_vs_<tool>.confusion.tsv`
 

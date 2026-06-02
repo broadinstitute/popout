@@ -117,9 +117,42 @@ class Assignment:
             "provenance": _canonical(self.provenance),
         }
 
+    def to_v1_compatible_dict(self) -> dict[str, Any]:
+        """v1+v2 merged dict: legacy keys for back-compat readers, v2 keys
+        for new consumers. The v2 ``component_to_label`` and
+        ``label_to_components`` mirror the v1 ``popout_to_rf_label`` and
+        ``rf_to_popout_components`` exactly; consumers can read either.
+        """
+        v2 = self.to_dict()
+        v1 = {
+            "tool": self.source.get("tool", "popout"),
+            "rf_ref_labels": list(self.target_space.members),
+            "popout_to_rf_label": {str(k): v for k, v in
+                                   sorted(self.component_to_label.items())},
+            "rf_to_popout_components": {k: list(v) for k, v in
+                                         sorted(self.label_to_components.items())},
+            "n_overlapping_sites": int(
+                self.diagnostics.get("n_overlapping_units", 0)
+            ),
+            "correlations": self.diagnostics.get("correlations"),
+        }
+        if "slope_matrix" in self.diagnostics:
+            v1["slope_matrix"] = self.diagnostics["slope_matrix"]
+        if "max_cal_matrix" in self.diagnostics:
+            v1["max_cal_matrix"] = self.diagnostics["max_cal_matrix"]
+        if "merge_group_stats" in self.diagnostics:
+            v1["merge_group_stats"] = self.diagnostics["merge_group_stats"]
+        return {**v1, **v2}
+
     def dump(self, path: str | Path) -> None:
         Path(path).write_text(json.dumps(self.to_dict(), indent=2,
                                          sort_keys=False) + "\n")
+
+    def dump_v1_compatible(self, path: str | Path) -> None:
+        """Phase 5 writer: merged v1+v2 keys so legacy readers still work."""
+        Path(path).write_text(json.dumps(
+            self.to_v1_compatible_dict(), indent=2, sort_keys=False
+        ) + "\n")
 
     @classmethod
     def load(cls, path: str | Path) -> "Assignment":

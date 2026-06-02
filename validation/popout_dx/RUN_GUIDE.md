@@ -157,6 +157,31 @@ tar tzf cohort_dx.popout_dx_aou_v9_chr1_2026_05_30.v1.0.0.tar.gz
 # (+ local/* tables when mode=global_local)
 ```
 
+## 6.5 Reading a figure tag
+
+Every PDF carries a one-line tag on the cover (Phase 5 of the
+label-space retrofit), e.g.
+
+```
+L=SP6/MID+ | popout=>postS | flare=>name | rye=>name | rf=>name | v=ab12cd
+```
+
+Grammar (`my_notes/labels/LABEL_SPACE.md` §6):
+
+- `L=<target>/<MID flag>` — the target label space (`SP6` = 6-way superpop;
+  `SP5` = without MID; `SP6.sub` = subcontinental).
+- `<tool>=><method>` — one clause per program with the matching method:
+  `corrH` (correlation + Hungarian), `postS` (posterior + calibration
+  slope), `confH` (confusion-matrix Hungarian), `name` (exact-name match),
+  `manual` (analyst CSV).
+- `v=<hash>` — short hash over (target_space, every per-tool map, params).
+  Two figures with the same `v=` are guaranteed identical mapped label
+  spaces; two figures with different `v=` are *not* directly comparable.
+
+The tag is sourced from `cohort_manifest.json`'s `provenance.tag` when
+the cohort was built with the v2 schema; legacy bundles get a
+synthesised SP6 tag without a `v=` hash.
+
 ## 7. Render a PDF
 
 ```bash

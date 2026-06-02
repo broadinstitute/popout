@@ -262,24 +262,53 @@ def rewrite_tracts_tsv(
 
 
 def write_label_report(out_path: str | Path, label_result: LabelResult) -> None:
-    """Write labeling metadata as JSON.
+    """Write labeling metadata as labels.json (v1+v2 dual-format).
 
-    Key contract (see diagnostics/GLOSSARY.md):
-      rf_ref_labels           — reference label ordering (e.g. RF classifier class names)
-      popout_to_rf_label      — popout component index (str) → reference label
-      rf_to_popout_components — reference label → list of popout component indices
+    Phase 5 of the label-space retrofit: this writer emits both the
+    legacy keys (popout_to_rf_label, rf_to_popout_components,
+    rf_ref_labels, …) and the new v2 schema keys (target_space, source,
+    method, input_space, component_to_label, …). Existing v1 readers
+    continue to work; new v2 readers see provenance and the canonical
+    figure tag under ``provenance.tag``.
     """
+    from popout.labelspace import (
+        Assignment, name_components, get as _get_space,
+    )
+    from popout.labelspace.registry import make_native_space
+    from popout.labelspace.shorthand import format as _format_tag
+
     out_path = Path(out_path)
-    report = {
-        "popout_to_rf_label": {str(k): v for k, v in label_result.label_map.items()},
-        "rf_to_popout_components": label_result.merge_map,
-        "rf_ref_labels": label_result.ref_names,
-        "n_overlapping_sites": label_result.n_overlapping_sites,
+    ref_names = tuple(label_result.ref_names)
+    target = _get_space("SP6") if ref_names == _get_space("SP6").members \
+        else make_native_space("ref", ref_names)
+
+    subcomponent_names = name_components(
+        label_result.merge_map,
+        correlations=label_result.correlations.tolist(),
+        target_members=ref_names,
+    )
+    diagnostics = {
         "correlations": label_result.correlations.tolist(),
+        "n_overlapping_units": int(label_result.n_overlapping_sites),
+        "unit": "sites",
     }
-    with open(out_path, "w") as f:
-        json.dump(report, f, indent=2)
-    log.info("Wrote label report to %s", out_path)
+    provenance = {
+        "produced_by": "popout.label",
+        "method": "corrH",
+    }
+    assignment = Assignment(
+        target_space=target,
+        source={"tool": "popout"},
+        method="corrH", input_space="allele_freq",
+        component_to_label=dict(label_result.label_map),
+        label_to_components={k: list(v) for k, v in label_result.merge_map.items()},
+        subcomponent_names=subcomponent_names,
+        diagnostics=diagnostics,
+        provenance=provenance,
+    )
+    assignment.provenance["tag"] = _format_tag(target, [assignment])
+    assignment.dump_v1_compatible(out_path)
+    log.info("Wrote label report (v1+v2) to %s", out_path)
 
 
 def label_main(argv: list[str] | None = None) -> None:

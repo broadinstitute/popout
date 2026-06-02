@@ -603,34 +603,36 @@ RF hard label (rows) vs {TOOL} hard call (columns). The legacy "mixed" pseudo-ro
 
 # ── 6. Write labels.json ──────────────────────────────────────────────────
 
-print("\n=== 6. Writing labels.json ===")
+print("\n=== 6. Writing labels.json (v1+v2 dual-format) ===")
 
-popout_to_rf_label_str = {str(k): v for k, v in popout_to_rf_label.items()}
+# Phase 5 of the label-space retrofit: writer emits both the legacy
+# keys and the new v2 schema. Existing readers keep working; new
+# readers consume the v2 block + provenance.tag (the figure shorthand).
+from popout.labelspace.naming import name_components as _name_components
+from popout.labelspace.shorthand import format as _format_tag
 
-labels_json = {
-    "tool": TOOL,  # "FLARE" or "popout" — used by downstream scripts for axis labels.
-    "rf_ref_labels": list(rf_ref_labels),
-    "popout_to_rf_label": popout_to_rf_label_str,
-    "rf_to_popout_components": rf_to_popout_components,
-    "n_overlapping_sites": n,  # number of matched samples used for correlation
-    "correlations": corr.tolist(),
-    "slope_matrix": np.where(np.isnan(slope_matrix), None, slope_matrix).tolist(),
-    "max_cal_matrix": np.where(np.isnan(max_cal_matrix), None, max_cal_matrix).tolist(),
-    "merge_group_stats": {
-        name: {
-            "indices": ms["indices"],
-            "names": ms["names"],
-            "merged_r": ms["merged_r"],
-            "summed_mu": ms["summed_mu"],
-        }
-        for name, ms in merged_stats.items()
-    },
+_subcomponent_names = _name_components(
+    rf_to_popout_components,
+    correlations=corr.tolist(),
+    target_members=list(rf_ref_labels),
+)
+_assignment.subcomponent_names = _subcomponent_names
+_assignment.diagnostics["merge_group_stats"] = {
+    name: {
+        "indices": ms["indices"],
+        "names": ms["names"],
+        "merged_r": ms["merged_r"],
+        "summed_mu": ms["summed_mu"],
+    }
+    for name, ms in merged_stats.items()
 }
-
+_assignment.provenance["produced_by"] = "validation/scripts/compare_to_rf.py"
+_assignment.provenance["tag"] = _format_tag(
+    _assignment.target_space, [_assignment],
+)
 labels_path = args.out_dir / "labels.json"
-with open(labels_path, "w") as f:
-    json.dump(labels_json, f, indent=2)
-print(f"  saved {labels_path.name}")
+_assignment.dump_v1_compatible(labels_path)
+print(f"  saved {labels_path.name}  tag: {_assignment.provenance['tag']}")
 
 
 print(f"\nAll outputs saved to {args.out_dir}/")

@@ -37,6 +37,12 @@ EXPECTED_SECTIONS = (
     "# Provenance",
 )
 
+# Phase 5 of the label-space retrofit: the cover carries the figure-tag
+# shorthand sourced from the cohort's labels.json provenance.tag.
+EXPECTED_TOKENS = (
+    "**Label space:** `L=SP6/",
+)
+
 
 def _run(cmd: list[str]) -> None:
     print(f"$ {' '.join(cmd)}", flush=True)
@@ -68,6 +74,11 @@ def main() -> int:
         if missing:
             raise SystemExit(
                 f"markdown report missing expected headings: {missing}"
+            )
+        missing_tokens = [t for t in EXPECTED_TOKENS if t not in md]
+        if missing_tokens:
+            raise SystemExit(
+                f"markdown report missing expected tokens: {missing_tokens}"
             )
 
         assets = workdir / "report_assets"
