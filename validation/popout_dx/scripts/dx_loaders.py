@@ -4,10 +4,10 @@ All loaders subset to the cluster's sample roster (intersection with the
 tool's universe). Missing samples are an error — silent drops would mask
 upstream sample-id drift (CLAUDE.md: never silently drop exceptions).
 
-Projection target is the canonical six-label RF basis
-:data:`RF_LABELS_CANONICAL` = ``("afr", "amr", "eas", "eur", "mid", "sas")``.
-Tools that lack a label (Rye and FLARE typically don't have ``mid``)
-contribute a zero column for that label.
+Projection target is the canonical six-label RF basis SP6 from
+``popout.labelspace.registry`` — aliased as :data:`RF_LABELS_CANONICAL`
+in this module. Tools that lack a label (Rye and FLARE typically don't
+have ``mid``) contribute a zero column for that label.
 
 Popout components are not natively named; the popout-side ``labels.json``
 (computed by ``step_align_labels`` in the DX collector) carries
@@ -29,7 +29,11 @@ import numpy as np
 from popout.viz._loaders import read_global_tsv, read_labels_json
 
 
-RF_LABELS_CANONICAL: tuple[str, ...] = ("afr", "amr", "eas", "eur", "mid", "sas")
+# Phase 4 of the label-space retrofit: SP6 is the canonical superpop
+# space from popout.labelspace.registry. RYE_LABELS is the *native*
+# column order of rye Q files (not alphabetical) — distinct from SP5.
+from popout.labelspace.registry import SP6 as _SP6
+RF_LABELS_CANONICAL: tuple[str, ...] = _SP6.members
 RYE_LABELS: tuple[str, ...] = ("eur", "eas", "amr", "afr", "sas")
 
 

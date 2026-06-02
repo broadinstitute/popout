@@ -29,10 +29,12 @@ import matplotlib.pyplot as plt
 
 # ── Canonical RF reference labels ────────────────────────────────────────
 #
-# This is the class-index order of the RF classifier. It is fixed for the
-# entire AoU v9 work. Other scripts that need the same ordering re-declare
-# this tuple locally with a comment pointing back here.
-RF_LABEL_ORDER: tuple[str, ...] = ("afr", "amr", "eas", "eur", "mid", "sas")
+# Phase 4 of the label-space retrofit: this is the SP6 superpop space
+# (popout.labelspace.registry.SP6). The local name is preserved for the
+# rest of this script; downstream code that imports it sees the same
+# tuple as before.
+from popout.labelspace.registry import SP6 as _SP6
+RF_LABEL_ORDER: tuple[str, ...] = _SP6.members
 
 
 def detect_tool_name(prefix: Path) -> str:
@@ -292,20 +294,21 @@ print("\n=== 1. Confusion Matrix ===")
 # Tool hard call = argmax of posteriors.
 popout_hard = np.argmax(popout_mat, axis=1)
 
-# RF hard label, with "mixed" for samples where max RF prob < 0.8.
+# Phase 4 of the label-space retrofit: "mixed" is no longer a 7th category
+# baked into the confusion matrix. Low-confidence samples (RF max prob < 0.8)
+# are counted separately and reported as a footer, so the CM rows stay in
+# the canonical SP6 space.
 rf_max_prob = rf_prob_matrix.max(axis=1)
-rf_hard_for_cm = np.where(rf_max_prob < 0.8, "mixed", rf_hard_calls)
+_LOW_CONF_THRESHOLD = 0.8
+low_conf_mask = rf_max_prob < _LOW_CONF_THRESHOLD
+n_low_confidence = int(low_conf_mask.sum())
 
-rf_cm_labels = sorted(set(rf_hard_for_cm))
-if "mixed" in rf_cm_labels:
-    rf_cm_labels.remove("mixed")
-    rf_cm_labels.append("mixed")
-
+rf_cm_labels = sorted(set(rf_hard_calls))
 popout_cm_labels = list(range(n_popout_anc))
 
 cm = np.zeros((len(rf_cm_labels), len(popout_cm_labels)), dtype=int)
 for i in range(n):
-    row = rf_cm_labels.index(rf_hard_for_cm[i])
+    row = rf_cm_labels.index(rf_hard_calls[i])
     col = popout_hard[i]
     cm[row, col] += 1
 
@@ -322,6 +325,10 @@ col_totals = cm.sum(axis=0)
 vals = "\t".join(str(v) for v in col_totals)
 print(f"{'total':>12}\t{vals}\t{col_totals.sum()}")
 cm_lines.append(f"total\t{vals}\t{col_totals.sum()}")
+
+print(f"\nLow-confidence samples (RF max prob < {_LOW_CONF_THRESHOLD}): "
+      f"{n_low_confidence:,} ({100 * n_low_confidence / n:.2f}%)")
+cm_lines.append(f"# n_low_confidence\t{n_low_confidence}\t{_LOW_CONF_THRESHOLD}")
 
 with open(args.out_dir / "confusion_matrix.tsv", "w") as f:
     f.write("\n".join(cm_lines) + "\n")
@@ -512,6 +519,10 @@ for r, label in enumerate(rf_cm_labels):
     cm_md += f"| {label} | {vals} | {cm[r].sum()} |\n"
 vals = " | ".join(str(v) for v in col_totals)
 cm_md += f"| **total** | {vals} | {col_totals.sum()} |\n"
+cm_md += (f"\n*Low-confidence samples (RF max prob &lt; {_LOW_CONF_THRESHOLD}): "
+          f"{n_low_confidence:,} ({100 * n_low_confidence / n:.2f}%). "
+          f"These are counted in the matrix under their RF hard call; the "
+          f"former 'mixed' pseudo-row has been retired.*\n")
 
 comp_md = ""
 for a in range(n_popout_anc):
@@ -578,7 +589,7 @@ Mean RF soft probability vector over samples with {TOOL} posterior > 0.8:
 
 ## 4. Confusion Matrix — Supplementary
 
-RF hard label (rows) vs {TOOL} hard call (columns). "mixed" = RF max prob < 0.8.
+RF hard label (rows) vs {TOOL} hard call (columns). The legacy "mixed" pseudo-row has been retired (Phase 4 of the label-space retrofit); the low-confidence sample count is reported as a footnote instead.
 
 {cm_md}
 

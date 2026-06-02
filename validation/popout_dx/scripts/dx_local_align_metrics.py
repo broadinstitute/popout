@@ -47,7 +47,10 @@ from popout.benchmark.metrics import (
 from popout.viz._loaders import read_labels_json
 
 
-RF_LABELS_CANONICAL: tuple[str, ...] = ("afr", "amr", "eas", "eur", "mid", "sas")
+# Phase 4 of the label-space retrofit: SP6 is the canonical superpop
+# space from popout.labelspace.registry.
+from popout.labelspace.registry import SP6 as _SP6
+RF_LABELS_CANONICAL: tuple[str, ...] = _SP6.members
 RF_NAME_TO_CODE: dict[str, int] = {n: i for i, n in enumerate(RF_LABELS_CANONICAL)}
 
 

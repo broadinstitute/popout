@@ -43,7 +43,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / ".." / "popout"))
 from popout.viz._loaders import read_global_tsv
 
 
-# Canonical Rye column order (PLAN2.md §2.1; MID dropped per the R4 rule).
+# Rye's *native* column order (NOT alphabetical — distinct from SP5). The
+# MID category is dropped per the R4 rule; Phase 4 of the label-space
+# retrofit makes that drop an explicit collapse declared on the harness side.
 RYE_LABELS: tuple[str, ...] = ("eur", "eas", "amr", "afr", "sas")
 JACCARD_THRESHOLDS: tuple[float, ...] = (0.10, 0.25, 0.50)
 MU_GATE = 0.01           # below this, an ancestry is a degenerate non-test

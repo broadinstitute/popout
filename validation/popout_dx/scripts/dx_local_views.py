@@ -46,7 +46,10 @@ from popout.benchmark.common import MISSING_LABEL, TractSet
 from popout.viz._loaders import read_labels_json
 
 
-RF_LABEL_ORDER: tuple[str, ...] = ("afr", "amr", "eas", "eur", "mid", "sas")
+# Phase 4 of the label-space retrofit: SP6 is the canonical superpop
+# space from popout.labelspace.registry.
+from popout.labelspace.registry import SP6 as _SP6
+RF_LABEL_ORDER: tuple[str, ...] = _SP6.members
 RF_INDEX: dict[str, int] = {lbl: i for i, lbl in enumerate(RF_LABEL_ORDER)}
 
 DEFAULT_COARSE_GRIDS_MB: tuple[int, ...] = (1, 2, 5, 10, 20)

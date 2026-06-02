@@ -46,7 +46,10 @@ except ImportError:
 
 SCHEMA_VERSION = "1.0.0"
 ANCHOR_TOOL = "popout"
-RF_LABELS: tuple[str, ...] = ("afr", "amr", "eas", "eur", "mid", "sas")
+# Phase 4 of the label-space retrofit: SP6 is the canonical superpop
+# space from popout.labelspace.registry.
+from popout.labelspace.registry import SP6 as _SP6
+RF_LABELS: tuple[str, ...] = _SP6.members
 RF_LABEL_COLOR: dict[str, str] = {
     "afr": ANCESTRY_PALETTE[0],
     "amr": ANCESTRY_PALETTE[1],

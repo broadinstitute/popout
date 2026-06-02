@@ -75,7 +75,9 @@ from popout.viz._style import (  # noqa: E402
 # in the report. RF labels appear first; numbered sub-ancestries (afr.1,
 # eur.3, …) inherit their parent label's color.
 
-ANCESTRY_ORDER: tuple[str, ...] = ("afr", "amr", "eas", "eur", "mid", "sas")
+# Phase 4 of the label-space retrofit: SP6 from popout.labelspace.registry.
+from popout.labelspace.registry import SP6 as _SP6
+ANCESTRY_ORDER: tuple[str, ...] = _SP6.members
 ANCESTRY_COLOR: dict[str, str] = {
     "afr": ANCESTRY_PALETTE[0],
     "amr": ANCESTRY_PALETTE[1],
@@ -1830,7 +1832,7 @@ def section_hap_disagreement(bundle: CohortBundle, assets_dir: Path) -> str:
     plt.close(fig)
 
     # In-this-run: highest disagreement on pure-ancestry labels (proxy for phasing noise).
-    pure_labels = {"afr", "amr", "eas", "eur", "mid", "sas"}
+    pure_labels = set(_SP6.members)
     pure_hits: list[tuple[str, float]] = []
     for rf in pure_labels:
         if rf not in by_rf:
