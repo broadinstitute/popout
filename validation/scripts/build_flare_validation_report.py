@@ -105,6 +105,62 @@ def cluster_color(idx: int) -> str:
 _DPI = 240
 
 
+# ── Label-space tag (Phase 5 of the label-space retrofit) ────────────────
+#
+# The tag is computed once per report run from the cohort bundle's
+# provenance (when present) or synthesized from the FLARE-validate
+# defaults. Every chart gets stamped with the tag in the bottom-strip
+# footer via _save_fig_with_tag() so a reader who sees `afr.1` on a
+# scatterplot can trace it back to the exact mapped label space.
+
+_LABEL_SPACE_TAG: str = ""
+
+
+def set_label_space_tag(tag: str) -> None:
+    """Set the module-level figure tag (called once from build_markdown)."""
+    global _LABEL_SPACE_TAG
+    _LABEL_SPACE_TAG = tag or ""
+
+
+def get_label_space_tag() -> str:
+    return _LABEL_SPACE_TAG
+
+
+def resolve_label_space_tag(bundle: "CohortBundle") -> str:
+    """Pick the canonical figure tag for a FLARE-validate cohort.
+
+    Reads ``provenance.tag`` from ``cohort_manifest.json`` when the
+    bundle was built post-Phase-5; otherwise synthesises the SP6 tag
+    that matches FLARE-validate's default pipeline (corrH against the
+    1KG reference; name matches for the RF and Rye comparators).
+    """
+    for src in (bundle.manifest, bundle.summary):
+        prov = (src or {}).get("provenance") or {}
+        tag = prov.get("tag")
+        if isinstance(tag, str) and tag:
+            return tag
+    return "L=SP6/MID+ | flare=>corrH | rf=>name | rye=>name"
+
+
+def _stamp_tag(fig) -> None:
+    """Inject the figure-tag shorthand as a bottom-strip footer."""
+    tag = get_label_space_tag()
+    if not tag:
+        return
+    fig.text(
+        0.5, 0.005, tag,
+        ha="center", va="bottom",
+        fontsize=6.5, color="#666",
+        family="monospace", alpha=0.85,
+    )
+
+
+def _save_fig_with_tag(fig, out_png: Path, **kwargs) -> None:
+    """Wrap fig.savefig: stamp the label-space footer first."""
+    _stamp_tag(fig)
+    fig.savefig(out_png, **kwargs)
+
+
 def cluster_codes(pairs: list[tuple[str, str]]) -> tuple[dict[str, str], list[tuple[str, str]]]:
     """Return a (cc → "c1"/"c2"/…) map and a sorted (code, cc) legend list.
 
@@ -472,11 +528,13 @@ def section_cover(bundle: CohortBundle) -> str:
         "structure and a cross-cluster regional scan."
     )
 
+    tag = get_label_space_tag() or resolve_label_space_tag(bundle)
     identity_rows = [
         ("run name",        manifest.get("run_name", "?")),
         ("schema version",  manifest.get("schema_version", "?")),
         ("generated",       manifest.get("generated_at", "?")),
         ("collation mode",  manifest.get("collation_mode", "?")),
+        ("label space",     f"`{tag}`"),
     ]
     scale_rows = [
         ("clusters",          summary.get("n_clusters", "?")),
@@ -575,6 +633,85 @@ cluster is the single best summary of calibration drift.
 
 def section_reading_guide() -> str:
     return READING_GUIDE_MD
+
+
+# ── §2.5 Label-space conventions ─────────────────────────────────────────
+
+
+LABEL_SPACE_CONVENTIONS_MD = """# Label-space conventions
+
+Every figure in this report carries a one-line *figure tag* in the
+bottom-strip footer, e.g.
+
+```
+L=SP6/MID+ | flare=>corrH | rf=>name | rye=>name
+```
+
+The tag is the **complete answer** to the question "what label space is
+this graph in, and how did each tool get there?" Two charts with
+identical tags are directly comparable; two charts with different tags
+are *not* — even if they share the same axis labels.
+
+## The five label spaces in play
+
+| Space | Members (ordered) | Where it lives natively |
+|---|---|---|
+| `SP6` | afr, amr, eas, eur, mid, sas | the RF classifier's six classes; the canonical superpop target most figures live in |
+| `SP5` | afr, amr, eas, eur, sas      | SP6 with MID removed; Rye's native target |
+| `SP6.sub` | afr.1, afr.2, eur.1, …      | a subcontinental refinement of SP6, used when one tool's components fold into one SP6 label |
+| `TRUTH` | anc_0, anc_1, … (per-run)  | simulator classes; not in production reports |
+| `<tool>.native` | tool-defined              | FLARE panel codes, popout indices, Rye column names |
+
+The shared space is named `SP` (for *superpopulation*) — deliberately
+*not* after any single tool. The RF classifier is just one tool that
+maps into `SP6` like any other; the old `RF_LABEL_ORDER` convention
+wrongly implied ownership.
+
+## How each tool gets into the target space
+
+Each clause `<tool>=><method>` in the tag names the **matching method**
+that produced that tool's mapping:
+
+| Code | Algorithm | Operates on | Cardinality |
+|---|---|---|---|
+| `corrH` | Pearson correlation + Hungarian assignment | inferred allele frequencies vs reference frequencies | bijective; merges when K_inf > K_ref |
+| `postS` | correlation argmax + calibration-slope override | per-sample posterior proportions vs RF probabilities | many-to-one |
+| `confH` | Hungarian on a hard-call confusion matrix | per-site hard calls | bijective |
+| `name`  | exact-name match (case-insensitive) | declared names | bijective |
+| `manual` | analyst-supplied CSV | — | arbitrary |
+
+In this report FLARE's components reach SP6 via **corrH** against the
+1KG superpop reference. RF and Rye reach SP6 via **name** because both
+already carry the canonical labels in their column / class headers.
+
+## How label spaces are surfaced in the report
+
+- **Cover.** The "Run identity" sub-table carries a `label_space` row
+  with the full tag, the target space, and the MID flag.
+- **Figure footers.** Every chart (cohort composition, concordance
+  strip, calibration heatmap, confusion matrix, tract length, switch
+  rate, hap-disagreement, regional Manhattan, all per-cluster figures)
+  prints the tag at the bottom in a small monospace strip.
+- **Subcomponent suffixes.** When a tool's K is larger than the target
+  space's |L|, multiple components fold into one continental label and
+  pick up dense **rank** suffixes: `afr.1` is the component most
+  strongly correlated with AFR, `afr.2` the next, regardless of the raw
+  EM index or the seed. (Pre-Phase-3 reports used the raw global
+  index, so `afr.0 / afr.5` instead of `afr.1 / afr.2`. If you are
+  cross-referencing an older PDF, the rank-based names are stable
+  across reseeds; the index-based ones are not.)
+- **MID handling.** Comparisons against Rye live in `SP5` and the tag
+  reads `MID-`. Going from `SP6` to `SP5` is an explicit collapse with
+  a declared rule (currently `drop`), never an implicit zero-fill.
+
+The grammar, registry, naming rule, and version hash are defined in
+`popout.labelspace` (`my_notes/labels/LABEL_SPACE.md`). A figure that
+you cannot trace back to a specific tag is a figure you cannot defend.
+"""
+
+
+def section_label_space_conventions() -> str:
+    return LABEL_SPACE_CONVENTIONS_MD
 
 
 # ── §3. Cohort composition ────────────────────────────────────────────────
@@ -721,7 +858,7 @@ def section_cohort_composition(bundle: CohortBundle, assets_dir: Path) -> str:
     )
 
     out_png = assets_dir / "cohort_composition.png"
-    fig.savefig(out_png, dpi=_DPI, bbox_inches="tight")
+    _save_fig_with_tag(fig, out_png, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
 
     # In-this-run callout: dominant cohort ancestry, second, and any cluster
@@ -911,7 +1048,7 @@ def section_concordance(bundle: CohortBundle, assets_dir: Path) -> str:
     )
 
     out_png = assets_dir / "concordance_strip.png"
-    fig.savefig(out_png, dpi=_DPI, bbox_inches="tight")
+    _save_fig_with_tag(fig, out_png, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
 
     # In-this-run callout (uses cohort-pooled values).
@@ -1167,7 +1304,7 @@ def section_calibration(bundle: CohortBundle, assets_dir: Path) -> str:
     fig.colorbar(im, cax=ax_cbar, label="max_cal (0–1)")
 
     out_png = assets_dir / "calibration.png"
-    fig.savefig(out_png, dpi=_DPI, bbox_inches="tight")
+    _save_fig_with_tag(fig, out_png, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
 
     # In-this-run: largest off-diagonal cohort-pooled cells.
@@ -1339,7 +1476,7 @@ def section_confusion(bundle: CohortBundle, assets_dir: Path) -> str:
                  fontsize=11)
     ax.set_xlabel("FLARE hard call", fontsize=10)
     out_png = assets_dir / "confusion.png"
-    fig.savefig(out_png, dpi=_DPI)
+    _save_fig_with_tag(fig, out_png, dpi=_DPI)
     plt.close(fig)
 
     diag_recall = {rf_labels[i]: recall[i, i] for i in range(min(M.shape))}
@@ -1502,7 +1639,7 @@ def section_tract_length(bundle: CohortBundle, assets_dir: Path) -> str:
     )
 
     out_png = assets_dir / "tract_length.png"
-    fig.savefig(out_png, dpi=_DPI, bbox_inches="tight")
+    _save_fig_with_tag(fig, out_png, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
 
     # Supporting table.
@@ -1684,7 +1821,7 @@ def section_switch_rate(bundle: CohortBundle, assets_dir: Path) -> str:
     )
 
     out_png = assets_dir / "switch_rate.png"
-    fig.savefig(out_png, dpi=_DPI, bbox_inches="tight")
+    _save_fig_with_tag(fig, out_png, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
 
     # Supporting table.
@@ -1828,7 +1965,7 @@ def section_hap_disagreement(bundle: CohortBundle, assets_dir: Path) -> str:
     )
 
     out_png = assets_dir / "hap_disagreement.png"
-    fig.savefig(out_png, dpi=_DPI, bbox_inches="tight")
+    _save_fig_with_tag(fig, out_png, dpi=_DPI, bbox_inches="tight")
     plt.close(fig)
 
     # In-this-run: highest disagreement on pure-ancestry labels (proxy for phasing noise).
@@ -2049,7 +2186,7 @@ def section_regional(bundle: CohortBundle, assets_dir: Path) -> str:
     ax.legend(handles=legend_handles, title="ancestry", fontsize=8,
               title_fontsize=9, loc="upper right", frameon=False)
     out_png = assets_dir / "regional_manhattan.png"
-    fig.savefig(out_png, dpi=_DPI)
+    _save_fig_with_tag(fig, out_png, dpi=_DPI)
     plt.close(fig)
 
     # Top-20 table for the supporting detail.
@@ -2358,11 +2495,16 @@ def build_markdown(
     assets_dir: Path,
     include_per_cluster: bool,
 ) -> str:
+    # Resolve and stash the label-space tag once per run; every chart
+    # picks it up via _save_fig_with_tag.
+    set_label_space_tag(resolve_label_space_tag(bundle))
+
     page_break = "\n\\newpage\n"
     sections: list[str] = [
         md_frontmatter(bundle),
         section_cover(bundle),
         page_break, section_reading_guide(),
+        page_break, section_label_space_conventions(),
         page_break, section_cohort_composition(bundle, assets_dir),
         page_break, section_concordance(bundle, assets_dir),
         page_break, section_calibration(bundle, assets_dir),
