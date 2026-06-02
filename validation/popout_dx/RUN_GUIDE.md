@@ -27,7 +27,7 @@ into `lai-tools`. The Dockerfile already copies `validation/` from the
 no Dockerfile change — just rebuild.
 
 ```bash
-cd workflows/lai-tools
+cd workflows/lai-tools/docker
 ./push.sh
 # → us-docker.pkg.dev/broad-dsde-methods/popout/lai-tools:latest
 ```
@@ -55,13 +55,16 @@ popout's path is **not** in the config — it's the WDL input
 
 ### Global + local mode (adds per-cluster local-ancestry sampling)
 
-Add the extra fields. `--flare-anc-vcf-root` is required because the
-cohort bundle does not carry the raw `anc.vcf.gz`.
+Add the extra fields. `--flare-anc-vcf-tsv` is required because the
+cohort bundle does not carry the raw `.anc.vcf.gz`; the TSV (columns
+`cluster_id<TAB>chrom<TAB>anc_vcf`) is inlined into the config as
+`flare.anc_vcf = {"<cluster_id>.<chrom>": "gs://..."}`. The canonical
+AoU v9 table lives at `scripts/cluster_chrom.tsv`.
 
 ```bash
 ... \
   --mode global_local \
-  --flare-anc-vcf-root gs://.../flare_pipeline/<wf_id>/call-fit_ancestry_model/ \
+  --flare-anc-vcf-tsv scripts/cluster_chrom.tsv \
   --local-per-bucket-n 25 \
   --local-threshold 0.80 \
   --local-chroms chr1 \
@@ -154,8 +157,23 @@ tar tzf cohort_dx.popout_dx_aou_v9_chr1_2026_05_30.v1.0.0.tar.gz
 # (+ local/* tables when mode=global_local)
 ```
 
-The off-line renderer (separate tooling, on the laptop) consumes the
-unpacked `cohort_dx/` tree.
+## 7. Render a PDF
+
+```bash
+PYTHONPATH=$GPULAI:$POPOUT python \
+  validation/popout_dx/scripts/build_popout_dx_report.py \
+  --cohort-bundle cohort_dx.<run>.v1.0.0.tar.gz \
+  --out report.pdf \
+  [--clusters cluster_000,cluster_007] \
+  [--max-clusters 10] \
+  [--per-cluster]    # appends one page per (cluster, chrom); off by default
+  [--keep-md]        # leaves the intermediate .md next to the PDF
+```
+
+The renderer accepts either an unpacked `cohort_dx/` directory or the
+raw `.tar.gz`. Requires `pandoc` and `xelatex` on PATH (Homebrew:
+`brew install pandoc basictex`). Plot styling reuses
+`popout.viz._style.ANCESTRY_PALETTE` when `popout` is importable.
 
 ## Troubleshooting
 
@@ -173,9 +191,17 @@ unpacked `cohort_dx/` tree.
   (cluster, chrom) pairs. The clusters/chroms globs over-selected; tighten
   them or regenerate the cohort bundle.
 
-- **`mode=global_local requires config.flare.anc_vcf_root`** — local mode
+- **`mode=global_local requires config.flare.anc_vcf`** — local mode
   needs the raw FLARE `.anc.vcf.gz` (the bundle doesn't carry it). Pass
-  `--flare-anc-vcf-root` to `make_dx_config.py`.
+  `--flare-anc-vcf-tsv scripts/cluster_chrom.tsv` to `make_dx_config.py`,
+  which inlines the per-pair map into the config.
+
+- **`config.flare.anc_vcf_root is no longer supported`** — the old GCS-prefix
+  field was replaced by an inline `flare.anc_vcf` dict (per-pair URIs). The
+  prefix approach can't represent maps that span multiple FLARE submissions,
+  which is the common case at AoU scale. Migrate by reading the Terra
+  `cluster_chrom` data table and rerunning `make_dx_config.py` with
+  `--flare-anc-vcf-tsv`.
 
 - **WDL fails at scatter with `Cannot coerce String to File`** — the
   optional File inputs (popout_summary, rye_q_path, rf_ancestry_path)
