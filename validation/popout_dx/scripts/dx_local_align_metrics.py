@@ -101,7 +101,10 @@ def load_popout_tracts_subset(
             parts = line.rstrip("\n").split("\t")
             if len(parts) <= max_col:
                 continue
-            if parts[ic] != chrom:
+            file_chrom = parts[ic]
+            if not file_chrom.startswith("chr"):
+                file_chrom = "chr" + file_chrom
+            if file_chrom != chrom:
                 continue
             sam = parts[isa]
             if sam not in selected_set:

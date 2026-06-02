@@ -138,14 +138,17 @@ def stream_popout_tract_lists(
             parts = line.rstrip("\n").split("\t")
             if len(parts) <= max_col:
                 continue
-            if parts[ic] != chrom:
+            file_chrom = parts[ic]
+            if not file_chrom.startswith("chr"):
+                file_chrom = "chr" + file_chrom
+            if file_chrom != chrom:
                 continue
             sam = parts[isa]
             if sam not in sample_filter:
                 continue
             hap = int(parts[ihp])
             out[sam][hap].append((
-                parts[ic],
+                file_chrom,
                 int(parts[isb]),
                 int(parts[ieb]),
                 int(parts[ian]),
