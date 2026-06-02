@@ -27,8 +27,20 @@ their respective phases.
 
 from __future__ import annotations
 
-from . import assignment, registry, shorthand  # noqa: F401
+from . import assignment, matching, registry, shorthand  # noqa: F401
 from .assignment import Assignment
+from .matching import (
+    by_name,
+    confusion_hungarian,
+    corr_hungarian,
+    manual,
+    posterior_slope,
+)
 from .registry import LabelSpace, get
 
-__all__ = ["Assignment", "LabelSpace", "assignment", "get", "registry", "shorthand"]
+__all__ = [
+    "Assignment", "LabelSpace",
+    "assignment", "matching", "registry", "shorthand",
+    "by_name", "confusion_hungarian", "corr_hungarian", "manual",
+    "posterior_slope", "get",
+]

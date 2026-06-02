@@ -25,7 +25,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment
 
 from .fetch_ref import load_ref_frequencies, resolve_ref_path
 
@@ -119,19 +118,10 @@ def label_ancestries(
 def _correlation_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Pearson correlation between rows of a and rows of b.
 
-    Parameters
-    ----------
-    a : (M, T) array
-    b : (N, T) array
-
-    Returns
-    -------
-    corr : (M, N) array of Pearson correlations
+    Thin shim around :func:`popout.labelspace.matching._pearson_corr_matrix`.
     """
-    combined = np.vstack([a, b])  # (M+N, T)
-    full_corr = np.corrcoef(combined)  # (M+N, M+N)
-    M = a.shape[0]
-    return full_corr[:M, M:]  # (M, N)
+    from popout.labelspace.matching import _pearson_corr_matrix
+    return _pearson_corr_matrix(a, b)
 
 
 def _assign_labels(
@@ -140,37 +130,10 @@ def _assign_labels(
 ) -> tuple[dict[int, str], dict[str, list[int]]]:
     """Assign population labels to inferred ancestries.
 
-    Uses Hungarian algorithm for optimal 1-to-1 matching when K_inf <= K_ref.
-    When K_inf > K_ref, maps each inferred ancestry to its best-correlated
-    reference (multiple inferred may map to the same reference = merge).
-
-    Returns
-    -------
-    label_map : {inferred_idx: pop_name}
-    merge_map : {pop_name: [inferred_idx, ...]}
+    Thin shim around :func:`popout.labelspace.matching._hungarian_or_merge`.
     """
-    K_inf, K_ref = corr.shape
-
-    if K_inf <= K_ref:
-        # Hungarian algorithm on cost = -correlation
-        row_ind, col_ind = linear_sum_assignment(-corr)
-        label_map = {int(r): ref_names[int(c)] for r, c in zip(row_ind, col_ind)}
-    else:
-        # More inferred than reference: each inferred gets its max-corr ref
-        best_ref = np.argmax(corr, axis=1)
-        label_map = {int(i): ref_names[int(best_ref[i])] for i in range(K_inf)}
-
-    # Build merge map
-    merge_map: dict[str, list[int]] = {}
-    for idx, name in sorted(label_map.items()):
-        merge_map.setdefault(name, []).append(idx)
-
-    # Sort each merge group by correlation strength (strongest first)
-    for name, indices in merge_map.items():
-        ref_col = ref_names.index(name)
-        indices.sort(key=lambda i: -corr[i, ref_col])
-
-    return label_map, merge_map
+    from popout.labelspace.matching import _hungarian_or_merge
+    return _hungarian_or_merge(corr, ref_names)
 
 
 def rewrite_global_tsv(

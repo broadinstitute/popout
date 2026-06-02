@@ -218,68 +218,31 @@ print(f"  Aligned {n:,} samples")
 
 
 # ── Compute correlation and popout ancestry names ────────────────────────
+#
+# Routed through popout.labelspace.matching.posterior_slope (Phase 2 of the
+# label-space retrofit). The slope threshold (-0.05) and binning params
+# match the legacy values pinned in the Phase-0 golden.
+from popout.labelspace import get as _ls_get
+from popout.labelspace.matching import posterior_slope as _posterior_slope
 
-# (popout_K × n_rf_labels) Pearson r matrix.
-corr = np.zeros((n_popout_anc, n_rf_labels))
-for pa in range(n_popout_anc):
-    for ri in range(n_rf_labels):
-        corr[pa, ri] = np.corrcoef(popout_mat[:, pa], rf_prob_matrix[:, ri])[0, 1]
-
-# Calibration slope matrix: per (popout idx, RF label), OLS slope of mean
-# popout proportion vs RF probability across bins. Slope captures magnitude
-# (r captures only direction).
-N_SLOPE_BINS = 20
-MIN_BIN_N = 100
-MIN_POPULATED_BINS = 5
-
-slope_edges = np.linspace(0.0, 1.0, N_SLOPE_BINS + 1)
-slope_matrix = np.full((n_popout_anc, n_rf_labels), np.nan)
-max_cal_matrix = np.full((n_popout_anc, n_rf_labels), np.nan)
-
-for ri in range(n_rf_labels):
-    x = rf_prob_matrix[:, ri]
-    bin_idx = np.clip(np.digitize(x, slope_edges) - 1, 0, N_SLOPE_BINS - 1)
-    for pa in range(n_popout_anc):
-        y = popout_mat[:, pa]
-        bx, by = [], []
-        max_val = 0.0
-        for b in range(N_SLOPE_BINS):
-            mask = bin_idx == b
-            if mask.sum() < MIN_BIN_N:
-                continue
-            m = float(y[mask].mean())
-            bx.append(0.5 * (slope_edges[b] + slope_edges[b + 1]))
-            by.append(m)
-            if m > max_val:
-                max_val = m
-        max_cal_matrix[pa, ri] = max_val
-        if len(bx) < MIN_POPULATED_BINS:
-            continue
-        slope, _ = np.polyfit(bx, by, 1)
-        slope_matrix[pa, ri] = slope
-
-# Map each popout ancestry to its best-matching RF label (by Pearson r),
-# then override with slope when the r-assigned label has negative slope.
-popout_to_rf_label: dict[int, str] = {}
-overrides = []
-for pa in range(n_popout_anc):
-    best_ri = int(np.argmax(corr[pa]))
-    r_label = rf_ref_labels[best_ri]
-    r_slope = slope_matrix[pa, best_ri]
-
-    # If slope against the r-assigned label is meaningfully negative, the
-    # ancestry is anti-correlated in calibration — reassign to the label
-    # with the highest positive slope. -0.05 threshold avoids noise.
-    if not np.isnan(r_slope) and r_slope < -0.05:
-        slope_best_ri = int(np.nanargmax(slope_matrix[pa, :]))
-        slope_best_val = slope_matrix[pa, slope_best_ri]
-        if not np.isnan(slope_best_val) and slope_best_val > 0:
-            slope_label = rf_ref_labels[slope_best_ri]
-            overrides.append((pa, r_label, slope_label, float(r_slope),
-                              float(slope_best_val)))
-            popout_to_rf_label[pa] = slope_label
-            continue
-    popout_to_rf_label[pa] = r_label
+_assignment = _posterior_slope(
+    popout_mat, rf_prob_matrix, _ls_get("SP6"),
+    source={"tool": TOOL},
+)
+corr = np.array(_assignment.diagnostics["correlations"])
+slope_matrix = np.array(
+    [[np.nan if v is None else v for v in row]
+     for row in _assignment.diagnostics["slope_matrix"]]
+)
+max_cal_matrix = np.array(
+    [[np.nan if v is None else v for v in row]
+     for row in _assignment.diagnostics["max_cal_matrix"]]
+)
+popout_to_rf_label = dict(_assignment.component_to_label)
+overrides = [
+    (o["component"], o["from_label"], o["to_label"], o["from_slope"], o["to_slope"])
+    for o in _assignment.diagnostics["overrides"]
+]
 
 if overrides:
     print(f"\nSlope-based label overrides:")
