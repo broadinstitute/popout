@@ -37,21 +37,25 @@ def ancestry_colors(n: int) -> list[str]:
 def ancestry_names(n: int, labels: dict | None = None) -> list[str]:
     """Return human-readable ancestry names.
 
-    If *labels* (from ``read_labels_json``) is provided and contains a
-    ``popout_to_rf_label``, uses population names (e.g. ``"eur"``). When
-    multiple indices share the same label, appends the index for
-    disambiguation (e.g. ``"afr.0"``, ``"afr.2"``). Otherwise falls back
-    to ``"Ancestry 0"``, ``"Ancestry 1"``, etc.
+    Phase 3 of the label-space retrofit: subcomponent suffixes are now
+    1-based dense by descending correlation with the reference label
+    (``afr.1, afr.2`` instead of legacy ``afr.0, afr.5``). Singletons
+    keep the bare label name.
     """
     if labels and "popout_to_rf_label" in labels:
         lm = labels["popout_to_rf_label"]
-        raw = [lm.get(i, lm.get(str(i), f"Ancestry {i}")) for i in range(n)]
-        from collections import Counter
-        counts = Counter(raw)
-        if any(c > 1 for c in counts.values()):
-            return [f"{name}.{i}" if counts[name] > 1 else name
-                    for i, name in enumerate(raw)]
-        return raw
+        component_to_label = {
+            i: lm.get(i, lm.get(str(i), f"Ancestry {i}"))
+            for i in range(n)
+        }
+        from popout.labelspace.naming import ordered_subcomponent_names
+        correlations = labels.get("correlations")
+        target_members = labels.get("rf_ref_labels")
+        return ordered_subcomponent_names(
+            component_to_label,
+            correlations=correlations,
+            target_members=target_members,
+        )
     return [f"Ancestry {i}" for i in range(n)]
 
 

@@ -1,0 +1,27 @@
+{
+  "afr_split_with_gap": [
+    "afr.1",
+    "amr",
+    "eas",
+    "eur",
+    "mid",
+    "afr.2",
+    "sas"
+  ],
+  "all_singletons": [
+    "afr",
+    "amr",
+    "eas",
+    "eur",
+    "mid",
+    "sas"
+  ],
+  "eur_three_way": [
+    "eur.1",
+    "eur.2",
+    "afr",
+    "amr",
+    "eur.3",
+    "sas"
+  ]
+}

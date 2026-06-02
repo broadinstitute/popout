@@ -196,44 +196,89 @@ def test_golden_remap_to_rf_codes():
     assert MISSING_LABEL == 65535   # pins the constant we baked into the fixture
 
 
-# ── G5. subcomponent naming (today: two divergent rules) ─────────────────
+# ── G5. subcomponent naming ───────────────────────────────────────────────
+#
+# Phase 3 of the label-space retrofit replaces the legacy global-index
+# rule (``afr.0``, ``afr.5`` with index gaps) with a 1-based, dense rule
+# (``afr.1``, ``afr.2`` ranked by descending correlation). Both the
+# legacy and the new rule are exercised here so any future drift is
+# caught.
 
 
-def _compare_to_rf_subcomp_names(
-    popout_to_rf_label: dict[int, str], n_anc: int,
-) -> list[str]:
-    """Replica of validation/scripts/compare_to_rf.py:291-295."""
-    counts = Counter(popout_to_rf_label.values())
+def _legacy_global_index_names(p2rf: dict[int, str], n_anc: int) -> list[str]:
+    """The pre-Phase-3 rule from compare_to_rf.py:291 — kept as the diff anchor."""
+    counts = Counter(p2rf.values())
     return [
-        f"{popout_to_rf_label[i]}.{i}" if counts[popout_to_rf_label[i]] > 1
-        else popout_to_rf_label[i]
+        f"{p2rf[i]}.{i}" if counts[p2rf[i]] > 1 else p2rf[i]
         for i in range(n_anc)
     ]
 
 
-def test_golden_subcomponent_names():
-    # Three cases that together exercise: singletons, two-way splits with
-    # gap (0 and 5 → afr.0 / afr.5), and three-way splits.
-    cases = {
-        "all_singletons": (
-            {0: "afr", 1: "amr", 2: "eas", 3: "eur", 4: "mid", 5: "sas"}, 6,
-        ),
-        "afr_split_with_gap": (
-            {0: "afr", 1: "amr", 2: "eas", 3: "eur", 4: "mid", 5: "afr", 6: "sas"}, 7,
-        ),
-        "eur_three_way": (
-            {0: "eur", 1: "eur", 2: "afr", 3: "amr", 4: "eur", 5: "sas"}, 6,
-        ),
+_NAMING_CASES = {
+    "all_singletons": (
+        {0: "afr", 1: "amr", 2: "eas", 3: "eur", 4: "mid", 5: "sas"}, 6,
+    ),
+    "afr_split_with_gap": (
+        {0: "afr", 1: "amr", 2: "eas", 3: "eur", 4: "mid", 5: "afr", 6: "sas"}, 7,
+    ),
+    "eur_three_way": (
+        {0: "eur", 1: "eur", 2: "afr", 3: "amr", 4: "eur", 5: "sas"}, 6,
+    ),
+}
+
+
+def test_golden_subcomponent_names_legacy_v1():
+    """Snapshot the pre-Phase-3 global-index rule for documentation."""
+    snapshot = {
+        case: _legacy_global_index_names(p2rf, n)
+        for case, (p2rf, n) in _NAMING_CASES.items()
     }
+    _snapshot_json("subcomponent_names_legacy_v1", snapshot)
+
+
+def test_golden_subcomponent_names_stable_rank_v2():
+    """Snapshot the post-Phase-3 stable-rank rule.
+
+    Two ways the new rule is reached today:
+      * popout/viz/_style.py::ancestry_names (consumer-facing)
+      * popout.labelspace.naming.ordered_subcomponent_names (canonical)
+    Both must produce the same list for the same input.
+    """
+    from popout.labelspace.naming import ordered_subcomponent_names
+
     snapshot = {}
-    for case_name, (p2rf, n) in cases.items():
-        snapshot[case_name] = {
-            # compare_to_rf.py:291 — index-suffix naming (the "global index" rule)
-            "compare_to_rf": _compare_to_rf_subcomp_names(p2rf, n),
-            # popout/viz/_style.py:52 — same global-index rule, accessed
-            # via ancestry_names(labels=...). Both should agree TODAY.
-            "viz_style": ancestry_names(
-                n, labels={"popout_to_rf_label": {int(k): v for k, v in p2rf.items()}},
-            ),
-        }
-    _snapshot_json("subcomponent_names_current", snapshot)
+    for case, (p2rf, n) in _NAMING_CASES.items():
+        via_style = ancestry_names(
+            n, labels={"popout_to_rf_label": {int(k): v for k, v in p2rf.items()}},
+        )
+        via_canonical = ordered_subcomponent_names(p2rf)
+        assert via_style == via_canonical, (
+            f"{case}: viz._style and labelspace.naming disagree:\n"
+            f"  viz._style: {via_style}\n  canonical:  {via_canonical}"
+        )
+        snapshot[case] = via_style
+    _snapshot_json("subcomponent_names_stable_rank_v2", snapshot)
+
+
+def test_phase3_renumbering_diff_documented():
+    """Pin the *expected* diff between v1 (legacy) and v2 (stable-rank)."""
+    from popout.labelspace.naming import ordered_subcomponent_names
+
+    legacy = {
+        case: _legacy_global_index_names(p2rf, n)
+        for case, (p2rf, n) in _NAMING_CASES.items()
+    }
+    new = {
+        case: ordered_subcomponent_names(p2rf)
+        for case, (p2rf, n) in _NAMING_CASES.items()
+    }
+    # all_singletons: identical (no splits → no suffix change)
+    assert legacy["all_singletons"] == new["all_singletons"]
+    # afr_split_with_gap: legacy yields afr.0/afr.5, new yields afr.1/afr.2
+    assert legacy["afr_split_with_gap"][0] == "afr.0"
+    assert legacy["afr_split_with_gap"][5] == "afr.5"
+    assert new["afr_split_with_gap"][0] == "afr.1"
+    assert new["afr_split_with_gap"][5] == "afr.2"
+    # eur_three_way: legacy yields eur.0/eur.1/eur.4, new yields eur.1/eur.2/eur.3
+    assert sorted(s for s in legacy["eur_three_way"] if s.startswith("eur.")) == ["eur.0", "eur.1", "eur.4"]
+    assert sorted(s for s in new["eur_three_way"] if s.startswith("eur.")) == ["eur.1", "eur.2", "eur.3"]

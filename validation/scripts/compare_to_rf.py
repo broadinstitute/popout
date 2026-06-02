@@ -250,12 +250,16 @@ if overrides:
         print(f"  ancestry {pa}: {old} (slope={old_slope:+.3f}) → "
               f"{new} (slope={new_slope:+.3f})")
 
-# Disambiguated names: afr.0, afr.2, amr.1, ... (singleton → just "mid")
-_label_counts = Counter(popout_to_rf_label.values())
-popout_names = [
-    f"{popout_to_rf_label[i]}.{i}" if _label_counts[popout_to_rf_label[i]] > 1 else popout_to_rf_label[i]
-    for i in range(n_popout_anc)
-]
+# Disambiguated names: 1-based dense rank by descending correlation
+# (afr.1, afr.2, ...). Phase 3 of the label-space retrofit replaces the
+# legacy global-index naming (afr.0, afr.5) with the stable rule from
+# popout.labelspace.naming.
+from popout.labelspace.naming import ordered_subcomponent_names as _osc_names
+popout_names = _osc_names(
+    popout_to_rf_label,
+    correlations=corr.tolist(),
+    target_members=rf_ref_labels,
+)
 print(f"\n{TOOL} ancestry names: {popout_names}")
 
 # RF label → list of popout ancestry indices (sorted by r against that label)

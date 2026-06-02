@@ -20,14 +20,11 @@ The submodules export the operational primitives:
 ``project``       the single proportions + tract-code projector (Phase 3).
 ``naming``        the stable correlation-rank subcomponent namer (Phase 3).
 ``metrics``       ARI / NMI / V-measure for honest-floor accuracy (Phase 5).
-
-Phase 1 only the first three are implemented; the rest are no-ops until
-their respective phases.
 """
 
 from __future__ import annotations
 
-from . import assignment, matching, registry, shorthand  # noqa: F401
+from . import assignment, matching, naming, project, registry, shorthand  # noqa: F401
 from .assignment import Assignment
 from .matching import (
     by_name,
@@ -36,11 +33,15 @@ from .matching import (
     manual,
     posterior_slope,
 )
+from .naming import name_components, ordered_subcomponent_names
+from .project import collapse, project_proportions, project_tracts
 from .registry import LabelSpace, get
 
 __all__ = [
     "Assignment", "LabelSpace",
-    "assignment", "matching", "registry", "shorthand",
+    "assignment", "matching", "naming", "project", "registry", "shorthand",
     "by_name", "confusion_hungarian", "corr_hungarian", "manual",
     "posterior_slope", "get",
+    "name_components", "ordered_subcomponent_names",
+    "collapse", "project_proportions", "project_tracts",
 ]

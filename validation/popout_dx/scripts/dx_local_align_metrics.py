@@ -156,57 +156,42 @@ def load_popout_tracts_subset(
 
 def remap_to_rf_codes(ts: TractSet, labels_json: dict) -> TractSet:
     """Translate ``ts.calls`` from tool-native integer codes to canonical
-    RF integer codes (0=afr, 1=amr, ..., 5=sas) via the popout/FLARE
-    ``popout_to_rf_label`` mapping.
+    RF integer codes via the popout/FLARE ``popout_to_rf_label`` mapping.
 
-    Multiple source codes may map to the same RF label (popout often has
-    several components per RF label). MISSING_LABEL passes through.
-    Source codes that don't appear in the mapping are an error — silent
-    drops would mask schema drift.
+    Phase 3 of the label-space retrofit routes through
+    :func:`popout.labelspace.project.project_tracts`.
     """
     p2rf = labels_json.get("popout_to_rf_label")
     if not isinstance(p2rf, dict) or not p2rf:
         die("labels.json missing or empty popout_to_rf_label")
 
-    # popout_to_rf_label keys are str or int depending on the producer;
-    # normalise.
-    src_to_rfcode: dict[int, int] = {}
+    # Build a transient Assignment that mirrors the legacy mapping shape.
+    from popout.labelspace import Assignment, get as _get_space, project_tracts
+    target = _get_space("SP6")
+    component_to_label: dict[int, str] = {}
     for k, v in p2rf.items():
         try:
             src = int(k)
         except (TypeError, ValueError):
             die(f"labels.json popout_to_rf_label key {k!r} is not int-coercible")
-        if v not in RF_NAME_TO_CODE:
+        if v not in target.members:
             die(f"labels.json popout_to_rf_label[{src}] = {v!r} is not a canonical RF label")
-        src_to_rfcode[src] = RF_NAME_TO_CODE[v]
+        component_to_label[src] = v
+    label_to_components: dict[str, list[int]] = {}
+    for k, v in component_to_label.items():
+        label_to_components.setdefault(v, []).append(k)
 
-    src_codes_in_calls = set(np.unique(ts.calls).tolist()) - {MISSING_LABEL}
-    unknown = src_codes_in_calls - set(src_to_rfcode)
-    if unknown:
-        die(
-            f"TractSet {ts.tool_name!r} contains label code(s) {sorted(unknown)} "
-            f"not present in labels.json popout_to_rf_label"
-        )
-
-    max_src = max(src_to_rfcode) if src_to_rfcode else 0
-    lut_size = max(max_src + 1, MISSING_LABEL + 1)
-    lut = np.full(lut_size, MISSING_LABEL, dtype=np.uint16)
-    for src, dst in src_to_rfcode.items():
-        lut[src] = dst
-    lut[MISSING_LABEL] = MISSING_LABEL
-
-    new_calls = lut[ts.calls]   # vectorised remap
-
-    new_label_map = {RF_NAME_TO_CODE[n]: n for n in RF_LABELS_CANONICAL}
-    return TractSet(
-        tool_name=ts.tool_name,
-        chrom=ts.chrom,
-        hap_ids=ts.hap_ids.copy(),
-        site_positions=ts.site_positions.copy(),
-        calls=new_calls,
-        label_map=new_label_map,
-        metadata=dict(ts.metadata),
+    assignment = Assignment(
+        target_space=target, source={"tool": ts.tool_name},
+        method="postS", input_space="hard_call",
+        component_to_label=component_to_label,
+        label_to_components=label_to_components,
+        subcomponent_names={}, diagnostics={}, provenance={},
     )
+    try:
+        return project_tracts(ts, assignment, missing_label=MISSING_LABEL)
+    except ValueError as e:
+        die(str(e))
 
 
 # ── TractSet loader from dx_local_parse_flare's npz ──────────────────────

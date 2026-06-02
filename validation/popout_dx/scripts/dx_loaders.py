@@ -181,6 +181,9 @@ def project_to_rf_basis(
     For ``popout`` / ``flare`` ``labels`` is required and must carry
     ``rf_to_popout_components``. For ``rye`` and ``rf`` the columns are
     named natively and ``labels`` is ignored.
+
+    Phase 3 of the label-space retrofit routes the popout/flare path
+    through :func:`popout.labelspace.project.project_proportions`.
     """
     n = q.shape[0]
     out = np.zeros((n, len(RF_LABELS_CANONICAL)), dtype=np.float64)
@@ -194,12 +197,22 @@ def project_to_rf_basis(
                 f"project_to_rf_basis: labels.rf_to_popout_components missing or empty "
                 f"(source={source!r})"
             )
-        for j, rf_label in enumerate(RF_LABELS_CANONICAL):
-            comp_idxs = mapping.get(rf_label) or []
-            if not comp_idxs:
-                continue
-            out[:, j] = q[:, list(comp_idxs)].sum(axis=1)
-        return out
+        # Build a transient Assignment so project_proportions can drive
+        # the sum. component_to_label is the inverse of mapping.
+        from popout.labelspace import Assignment, get as _get_space, project_proportions
+        target = _get_space("SP6")
+        component_to_label: dict[int, str] = {}
+        for lab, idxs in mapping.items():
+            for i in idxs:
+                component_to_label[int(i)] = lab
+        a = Assignment(
+            target_space=target, source={"tool": source},
+            method="corrH", input_space="allele_freq",
+            component_to_label=component_to_label,
+            label_to_components={k: list(map(int, v)) for k, v in mapping.items()},
+            subcomponent_names={}, diagnostics={}, provenance={},
+        )
+        return project_proportions(q, a)
 
     if source == "rye":
         if q.shape[1] != len(RYE_LABELS):
@@ -208,7 +221,8 @@ def project_to_rf_basis(
             if rf_label in RYE_LABELS:
                 j_rye = RYE_LABELS.index(rf_label)
                 out[:, j_rf] = q[:, j_rye]
-            # else: mid → 0 (Rye does not track mid)
+            # else: mid → 0 (Rye does not track mid; Phase 4 makes this
+            # an explicit SP6 → SP5 collapse declared on the harness side.)
         return out
 
     if source == "rf":
