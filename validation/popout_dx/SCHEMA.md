@@ -35,7 +35,11 @@ popout's path is **not** in the config; it's a WDL input (`popout_dx.popout_outp
   "tools": ["popout", "flare", "rye", "rf"],
   "flare": {
     "cohort_bundle": "gs://.../cohort_bundle.flare_validate_chr1.v2.0.0.tar.gz",
-    "anc_vcf_root":  "gs://.../flare_pipeline/<wf_id>/call-fit_ancestry_model/"
+    "anc_vcf": {
+      "cluster_000.chr1":  "gs://.../cluster_000.chr1.anc.vcf.gz",
+      "cluster_000.chr10": "gs://.../cluster_000.chr10.anc.vcf.gz",
+      "...":                "..."
+    }
   },
   "rye": { "q_path":        "gs://.../aou_admixture_estimates_rye_pruned_v9.Q" },
   "rf":  { "ancestry_path": "gs://.../foxtrot_v4.ancestry_preds.tsv" },
@@ -52,7 +56,7 @@ popout's path is **not** in the config; it's a WDL input (`popout_dx.popout_outp
 ```
 
 Notes:
-- `flare.anc_vcf_root` is required only for `mode=global_local` (cohort bundle does not carry the raw VCFs).
+- `flare.anc_vcf` is an inline `{"<cluster_id>.<chrom>": "gs://...anc.vcf.gz"}` map. Required only for `mode=global_local` (cohort bundle does not carry the raw VCFs); every selected `(cluster_id, chrom)` pair must have an entry. Build it from the Terra `cluster_chrom` data table — see `scripts/cluster_chrom.tsv` for the AoU v9 canonical version and `make_dx_config.py --flare-anc-vcf-tsv` for the inliner.
 - `local_sampling` is consumed only when `mode=global_local`.
 
 ### Data-model asymmetry

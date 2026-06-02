@@ -310,11 +310,19 @@ def validate_config(cfg: dict) -> None:
         flare = cfg["flare"]
         if not isinstance(flare, dict) or not flare.get("cohort_bundle"):
             die("config.flare.cohort_bundle is required when flare is in tools (v1.0.0)")
-        # anc_vcf_root is optional; required only for local mode. The validator
-        # here just type-checks the field; the build_manifest step enforces
-        # the local-mode requirement.
-        if "anc_vcf_root" in flare and not isinstance(flare["anc_vcf_root"], str):
-            die("config.flare.anc_vcf_root must be a string (GCS prefix)")
+        if "anc_vcf_root" in flare:
+            die(
+                "config.flare.anc_vcf_root is no longer supported; inline the per-pair "
+                "map as config.flare.anc_vcf = {\"<cluster_id>.<chrom>\": \"gs://...anc.vcf.gz\"}"
+            )
+        # anc_vcf is the per-(cluster, chrom) URI map. Required only for
+        # mode=global_local; build_manifest enforces presence + completeness.
+        if "anc_vcf" in flare:
+            anc = flare["anc_vcf"]
+            if not isinstance(anc, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in anc.items()
+            ):
+                die("config.flare.anc_vcf must be a {\"<cluster_id>.<chrom>\": str} mapping")
 
     if "rye" in tools:
         if not isinstance(cfg.get("rye"), dict) or not cfg["rye"].get("q_path"):
@@ -393,32 +401,28 @@ def build_manifest(
     # and tars out its own global.tsv + labels.json. discover never makes
     # a copy of the bundle — it just streams to enumerate members.
 
-    # Local mode requires FLARE per-cluster .anc.vcf.gz too. Discover those
-    # alongside the cohort bundle slices when the user supplies anc_vcf_root.
+    # Local mode requires FLARE per-cluster .anc.vcf.gz too. The config carries
+    # an inline map keyed by "<cluster_id>.<chrom>"; we just look up each
+    # selected pair. No GCS globbing — the map is the source of truth.
     flare_anc_vcf: dict[tuple[str, str], str] = {}
-    anc_vcf_root = cfg["flare"].get("anc_vcf_root", "") if "flare" in tools else ""
+    anc_vcf_map = cfg["flare"].get("anc_vcf", {}) if "flare" in tools else {}
     if mode == "global_local":
-        if not anc_vcf_root:
+        if not anc_vcf_map:
             die(
-                "mode=global_local requires config.flare.anc_vcf_root (the GCS prefix "
-                "where FLARE pipeline emits per-cluster <cluster_id>.<chrom>.anc.vcf.gz). "
-                "The cohort bundle does not carry the raw VCFs."
+                "mode=global_local requires config.flare.anc_vcf — an inline "
+                "{\"<cluster_id>.<chrom>\": \"gs://...anc.vcf.gz\"} mapping. The "
+                "cohort bundle does not carry the raw VCFs; build the map from the "
+                "Terra cluster_chrom data table (see scripts/cluster_chrom.tsv)."
             )
-        anc_uris = list_uris(anc_vcf_root)
-        idx = _index_by_id_chrom(anc_uris, "anc.vcf.gz")
-        if not idx:
-            die(
-                f"flare.anc_vcf_root {anc_vcf_root!r} contained no files matching "
-                f"<cluster_id>.<chrom>.anc.vcf.gz (listed {len(anc_uris)} files total)"
-            )
-        for key, siblings in idx.items():
-            anc = siblings.get("anc.vcf.gz")
-            if anc is not None:
-                flare_anc_vcf[key] = anc
+        for cid, chrom in selected:
+            key = f"{cid}.{chrom}"
+            uri = anc_vcf_map.get(key)
+            if uri:
+                flare_anc_vcf[(cid, chrom)] = uri
         missing = sorted(k for k in selected if k not in flare_anc_vcf)
         if missing:
             die(
-                f"flare.anc_vcf_root missing .anc.vcf.gz for {len(missing)} selected "
+                f"config.flare.anc_vcf missing entries for {len(missing)} selected "
                 f"(cluster, chrom) pairs; first: {missing[:5]}"
             )
 

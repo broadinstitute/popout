@@ -17,8 +17,13 @@ Example
       --chroms 'chr1' \\
       --out scripts/popout_dx_config.chr1_all.json
 
-For local-mode runs add ``--mode global_local --flare-anc-vcf-root gs://...``
-and (optionally) ``--local-per-bucket-n``, ``--local-threshold``,
+For local-mode runs add ``--mode global_local --flare-anc-vcf-tsv <path>``
+where the TSV has columns ``cluster_id<TAB>chrom<TAB>anc_vcf`` (one row
+per pair, every row populated). The map gets inlined into the config as
+``flare.anc_vcf = {"<cluster_id>.<chrom>": "gs://..."}``. See
+``scripts/cluster_chrom.tsv`` for the canonical AoU v9 table.
+
+Optional local-mode tuning: ``--local-per-bucket-n``, ``--local-threshold``,
 ``--local-chroms``, ``--local-coarse-grids-mb``.
 
 popout's run path is a WDL input (``popout_dx.popout_outputs``), not a
@@ -41,6 +46,33 @@ def die(msg: str) -> "NoReturn":  # type: ignore[name-defined]
     sys.exit(1)
 
 
+def _read_anc_vcf_tsv(path: Path) -> dict[str, str]:
+    """Read a cluster_id<TAB>chrom<TAB>anc_vcf TSV; return ``{"cid.chrom": uri}``."""
+    if not path.is_file():
+        die(f"--flare-anc-vcf-tsv {path} is not a file")
+    lines = path.read_text().splitlines()
+    if not lines:
+        die(f"--flare-anc-vcf-tsv {path} is empty")
+    header = lines[0].split("\t")
+    required = ("cluster_id", "chrom", "anc_vcf")
+    if tuple(header[:3]) != required:
+        die(f"--flare-anc-vcf-tsv {path} header must be {required!r}, got {header!r}")
+    idx = {h: i for i, h in enumerate(header)}
+    out: dict[str, str] = {}
+    for n, ln in enumerate(lines[1:], start=2):
+        f = ln.split("\t")
+        cid = f[idx["cluster_id"]]
+        chrom = f[idx["chrom"]]
+        uri = f[idx["anc_vcf"]]
+        if not (cid and chrom and uri):
+            die(f"--flare-anc-vcf-tsv {path} line {n}: empty field in {f!r}")
+        key = f"{cid}.{chrom}"
+        if key in out:
+            die(f"--flare-anc-vcf-tsv {path} duplicate key {key!r} at line {n}")
+        out[key] = uri
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--run-name", required=True)
@@ -50,9 +82,9 @@ def main() -> None:
 
     ap.add_argument("--flare-cohort-bundle",
                     help="path to a FLARE-validate cohort_bundle tarball (required when 'flare' in --tools)")
-    ap.add_argument("--flare-anc-vcf-root",
-                    help="GCS prefix where FLARE pipeline emits per-cluster .anc.vcf.gz "
-                         "(required when --mode global_local)")
+    ap.add_argument("--flare-anc-vcf-tsv", type=Path,
+                    help="TSV with columns cluster_id<TAB>chrom<TAB>anc_vcf; inlined as "
+                         "flare.anc_vcf in the config (required when --mode global_local)")
 
     ap.add_argument("--rye-q",
                     help="path to Rye Q TSV (required when 'rye' in --tools)")
@@ -91,8 +123,12 @@ def main() -> None:
         die("--rye-q is required when 'rye' is in --tools")
     if "rf" in tools and not args.rf_ancestry:
         die("--rf-ancestry is required when 'rf' is in --tools")
-    if args.mode == "global_local" and not args.flare_anc_vcf_root:
-        die("--flare-anc-vcf-root is required when --mode global_local")
+    if args.mode == "global_local" and not args.flare_anc_vcf_tsv:
+        die("--flare-anc-vcf-tsv is required when --mode global_local")
+
+    anc_vcf_map: dict[str, str] = {}
+    if args.flare_anc_vcf_tsv is not None:
+        anc_vcf_map = _read_anc_vcf_tsv(args.flare_anc_vcf_tsv)
 
     cfg: dict = {
         "run_name": args.run_name,
@@ -101,8 +137,8 @@ def main() -> None:
     }
     if "flare" in tools:
         flare: dict = {"cohort_bundle": args.flare_cohort_bundle}
-        if args.flare_anc_vcf_root:
-            flare["anc_vcf_root"] = args.flare_anc_vcf_root
+        if anc_vcf_map:
+            flare["anc_vcf"] = anc_vcf_map
         cfg["flare"] = flare
     if "rye" in tools:
         cfg["rye"] = {"q_path": args.rye_q}
