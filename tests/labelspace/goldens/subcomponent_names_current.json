@@ -1,0 +1,58 @@
+{
+  "afr_split_with_gap": {
+    "compare_to_rf": [
+      "afr.0",
+      "amr",
+      "eas",
+      "eur",
+      "mid",
+      "afr.5",
+      "sas"
+    ],
+    "viz_style": [
+      "afr.0",
+      "amr",
+      "eas",
+      "eur",
+      "mid",
+      "afr.5",
+      "sas"
+    ]
+  },
+  "all_singletons": {
+    "compare_to_rf": [
+      "afr",
+      "amr",
+      "eas",
+      "eur",
+      "mid",
+      "sas"
+    ],
+    "viz_style": [
+      "afr",
+      "amr",
+      "eas",
+      "eur",
+      "mid",
+      "sas"
+    ]
+  },
+  "eur_three_way": {
+    "compare_to_rf": [
+      "eur.0",
+      "eur.1",
+      "afr",
+      "amr",
+      "eur.4",
+      "sas"
+    ],
+    "viz_style": [
+      "eur.0",
+      "eur.1",
+      "afr",
+      "amr",
+      "eur.4",
+      "sas"
+    ]
+  }
+}
