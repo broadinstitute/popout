@@ -6,7 +6,6 @@ import warnings
 from copy import deepcopy
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment
 
 from popout.benchmark.common import MISSING_LABEL, TractSet
 
@@ -131,17 +130,10 @@ def match_labels(
 ) -> dict[int, int]:
     """Find best label mapping from src to ref.
 
-    Uses Hungarian assignment to maximize agreement.
-
-    Parameters
-    ----------
-    tracts_src : TractSet with arbitrary labels (e.g. popout)
-    tracts_ref : TractSet with semantic labels (e.g. truth, flare)
-    method : "hungarian" (only supported method currently)
-
-    Returns
-    -------
-    dict mapping src_label -> ref_label
+    Phase 6 of the label-space retrofit: routed through
+    :func:`popout.labelspace.confusion_hungarian`. The returned dict
+    shape (``{src_label: ref_label}`` with integer ref-label codes) is
+    preserved for back-compat.
     """
     if method != "hungarian":
         raise ValueError(f"Unknown method: {method!r}")
@@ -149,26 +141,30 @@ def match_labels(
     src_labels = sorted(k for k in tracts_src.label_map if k != MISSING_LABEL)
     ref_labels = sorted(k for k in tracts_ref.label_map if k != MISSING_LABEL)
 
-    K_src = len(src_labels)
-    K_ref = len(ref_labels)
-    K = max(K_src, K_ref)
+    # Build a transient SP6-ish target whose members are the *names* of
+    # the ref label_map values (in ref-label order). confusion_hungarian
+    # returns string-valued component_to_label; we invert via the
+    # ref_label_map to get back integer ref codes.
+    from popout.labelspace.matching import confusion_hungarian
+    from popout.labelspace.registry import make_native_space
 
-    # Build confusion matrix
-    C = np.zeros((K, K), dtype=np.int64)
-    for i, src_lab in enumerate(src_labels):
-        src_mask = tracts_src.calls == src_lab
-        for j, ref_lab in enumerate(ref_labels):
-            ref_mask = tracts_ref.calls == ref_lab
-            C[i, j] = int((src_mask & ref_mask).sum())
+    ref_name_for_int = {int(k): str(v) for k, v in tracts_ref.label_map.items()
+                        if k != MISSING_LABEL}
+    ref_names_ordered = [ref_name_for_int[r] for r in ref_labels]
+    target = make_native_space("ref", tuple(ref_names_ordered))
+    a = confusion_hungarian(
+        tracts_src.calls, tracts_ref.calls, target,
+        src_labels=src_labels, ref_labels=ref_labels,
+        missing_label=MISSING_LABEL,
+    )
 
-    # Hungarian: minimize cost = maximize agreement
-    row_ind, col_ind = linear_sum_assignment(-C)
-
-    mapping = {}
-    for r, c in zip(row_ind, col_ind):
-        if r < K_src and c < K_ref:
-            mapping[src_labels[r]] = ref_labels[c]
-
+    name_to_ref_int = {name: int(r) for r, name in
+                       zip(ref_labels, ref_names_ordered)}
+    mapping: dict[int, int] = {}
+    for src_int, label in a.component_to_label.items():
+        if label == "unassigned" or label not in name_to_ref_int:
+            continue
+        mapping[int(src_int)] = name_to_ref_int[label]
     return mapping
 
 
