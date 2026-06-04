@@ -1,0 +1,26 @@
+{# Render the run-identity block under the cover title.
+
+   Caller supplies `cover_title`, `subtitle`, and a dict of identity
+   key/value pairs via `ctx.bundle`. The label-space tag (if any)
+   gets its own line under the table. #}
+{%- set b = ctx.bundle -%}
+{%- set tag = ctx.tag(section.id) -%}
+
+# {{ cover_title }}
+
+### `{{ b.get("run_name", "") }}`
+
+| key | value |
+|---|---|
+| schema_version | {{ b.get("schema_version", "?") }} |
+| generated_at   | {{ b.get("generated_at", "?") }} |
+| n_clusters     | {{ b.get("n_clusters", "?") }} |
+| n_chroms       | {{ b.get("n_chroms", "?") }} |
+| n_artifacts    | {{ b.get("n_artifacts", "?") }} |
+
+{%- if tag %}
+
+**Label space** &nbsp; `{{ tag }}`
+{%- endif %}
+
+*Source: `{{ ctx.bundle_dir }}`*

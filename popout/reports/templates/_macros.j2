@@ -1,0 +1,41 @@
+{# Shared markdown helpers used by every section template.
+
+   Usage in a section template:
+       {% from "_macros.j2" import figure, table, tag_footer %}
+       {{ figure(path="...png", caption="...", tag=ctx.tag(section.id)) }}
+       {{ table(["lab", "ccc"], rows) }}
+       {{ tag_footer(ctx.tag(section.id)) }}
+#}
+
+{%- macro figure(path, caption="", tag="", width="95%") -%}
+![]({{ path }}){ width={{ width }} }
+{%- if caption %}
+
+*{{ caption }}*
+{%- endif %}
+{%- if tag %}
+
+`{{ tag }}`
+{% endif %}
+{% endmacro -%}
+
+
+{%- macro table(header, rows, caption="") -%}
+| {{ header | join(" | ") }} |
+|{{ ["---"] * (header | length) | join("|") }}|
+{% for r in rows %}
+| {{ r | join(" | ") }} |
+{% endfor %}
+{%- if caption %}
+
+*{{ caption }}*
+{% endif %}
+{% endmacro -%}
+
+
+{%- macro tag_footer(tag) -%}
+{%- if tag %}
+
+`{{ tag }}`
+{% endif %}
+{% endmacro -%}

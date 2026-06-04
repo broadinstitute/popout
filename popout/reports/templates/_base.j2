@@ -1,0 +1,21 @@
+{# Document frontmatter — pandoc consumes the YAML block at the top.
+   Section templates should *not* re-emit a frontmatter; this file is
+   only used by `cover.j2` per-report. #}
+---
+title: "{{ ctx.config.title }}"
+date: "{{ now() }}"
+geometry: margin={{ ctx.config.style.margin }}
+fontsize: {{ ctx.config.style.fontsize }}
+mainfont: {{ ctx.config.style.mainfont }}
+monofont: {{ ctx.config.style.monofont }}
+colorlinks: true
+{% raw %}header-includes:
+  - \usepackage{adjustbox}
+  - \usepackage{longtable}
+  - \usepackage{array}
+  - \usepackage{ragged2e}
+  - \let\oldtable\table
+  - \let\endoldtable\endtable
+  - \renewenvironment{table}[1][]{\oldtable[#1]\adjustbox{max width=\textwidth}\bgroup}{\egroup\endoldtable}
+---{% endraw %}
+

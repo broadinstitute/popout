@@ -1,0 +1,72 @@
+# FLARE validation report — NIH deliverable.
+#
+# Sections list runs in order. Each section names its template and (when
+# the section compares two tools) its pair + mid_rule. The `defaults:`
+# block applies when a section omits the relevant key.
+#
+# Phase 2 skeleton: only the four spine sections (cover, reading guide,
+# label-space conventions, provenance). Phase 3 adds the rest.
+
+title: FLARE validation report
+
+style:
+  pdf_engine: xelatex
+  margin: 0.75in
+  fontsize: 10pt
+  mainfont: Helvetica
+  monofont: Menlo
+  highlight_style: tango
+
+defaults:
+  target_space: SP5
+  mid_rule: drop
+
+sections:
+  - id: cover
+    template: flare_validation/cover.j2
+
+  - id: label_space_conventions
+    template: _components/label_space_conventions.j2
+
+  - id: reading_guide
+    template: _components/reading_guide_metrics.j2
+
+  # ── Phase 3 will insert the FLARE / Rye / RF sections here ───────────
+  #
+  # - id: cohort_composition
+  #   template: flare_validation/cohort_composition.j2
+  #   pair: [flare]
+  #
+  # - id: flare_vs_rye_concordance
+  #   template: flare_validation/concordance.j2
+  #   pair: [flare, rye]
+  #
+  # - id: flare_vs_rf_calibration
+  #   template: flare_validation/calibration.j2
+  #   pair: [flare, rf]
+  #   mid_rule: fold_to_eur
+  #
+  # - id: flare_vs_rf_confusion
+  #   template: flare_validation/confusion.j2
+  #   pair: [flare, rf]
+  #   mid_rule: fold_to_eur
+  #
+  # - id: tract_length
+  #   template: flare_validation/tract_length.j2
+  #   pair: [flare]
+  #
+  # - id: switch_rate
+  #   template: flare_validation/switch_rate.j2
+  #   pair: [flare]
+  #
+  # - id: hap_disagreement
+  #   template: flare_validation/hap_disagreement.j2
+  #   pair: [flare, rf]
+  #   mid_rule: fold_to_eur
+  #
+  # - id: regional
+  #   template: flare_validation/regional.j2
+  #   pair: [flare]
+
+  - id: provenance
+    template: _components/provenance_appendix.j2

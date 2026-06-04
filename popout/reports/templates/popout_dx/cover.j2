@@ -1,0 +1,24 @@
+{# popout DX report cover. #}
+{% include "_base.j2" with context %}
+
+{% set tag = ctx.tag(section.id) %}
+
+# popout DX report (experimental)
+
+### `{{ ctx.bundle.get("run_name", "") }}`
+
+This is a diagnostic report on popout's experimental ancestry
+estimates, compared against FLARE / Rye / RF as available in the
+bundle. See the next page for the label-space conventions used
+throughout.
+
+| key | value |
+|---|---|
+| schema_version | {{ ctx.bundle.get("schema_version", "?") }} |
+| mode           | `{{ ctx.bundle.get("mode", "?") }}` |
+| tools          | {{ ctx.bundle.get("tools", "?") | join(", ") if ctx.bundle.get("tools") is iterable and ctx.bundle.get("tools") is not string else ctx.bundle.get("tools", "?") }} |
+| n_clusters     | {{ ctx.bundle.get("n_clusters", "?") }} |
+| n_chroms       | {{ ctx.bundle.get("n_chroms", "?") }} |
+| n_artifacts    | {{ ctx.bundle.get("n_artifacts", "?") }} |
+
+*Source: `{{ ctx.bundle_dir }}`*

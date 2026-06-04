@@ -1,0 +1,23 @@
+{# Per-artifact SHA-256 list + run metadata. Shared between reports. #}
+{% set b = ctx.bundle %}
+
+# Provenance
+
+| key | value |
+|---|---|
+| run_name       | `{{ b.get("run_name", "?") }}` |
+| schema_version | `{{ b.get("schema_version", "?") }}` |
+| generated_at   | `{{ b.get("generated_at", "?") }}` |
+| n_artifacts    | {{ b.get("n_artifacts", "?") }} |
+
+{% set s256 = b.get("sha256_per_artifact", {}) %}
+{% if s256 %}
+
+## Per-artifact SHA-256
+
+| artifact | sha256 (first 12) |
+|---|---|
+{% for k, v in s256.items() | sort %}
+| `{{ k }}` | `{{ v[:12] }}` |
+{% endfor %}
+{% endif %}

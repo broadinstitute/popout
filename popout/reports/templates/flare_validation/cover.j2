@@ -1,0 +1,24 @@
+{# FLARE validation report cover. The report header (Jinja2 frontmatter)
+   is rendered separately; this template provides the title page only. #}
+{% include "_base.j2" with context %}
+
+{% set tag = ctx.tag(section.id) %}
+
+# FLARE validation report
+
+### `{{ ctx.bundle.get("run_name", "") }}`
+
+This report compares FLARE against Rye and the upstream RF classifier
+on the AoU cohort. Each section's figure footer carries the **label
+space tag** for that section — see the next page for the conventions
+used throughout.
+
+| key | value |
+|---|---|
+| schema_version | {{ ctx.bundle.get("schema_version", "?") }} |
+| generated_at   | {{ ctx.bundle.get("generated_at", "?") }} |
+| n_clusters     | {{ ctx.bundle.get("n_clusters", "?") }} |
+| n_chroms       | {{ ctx.bundle.get("n_chroms", "?") }} |
+| n_artifacts    | {{ ctx.bundle.get("n_artifacts", "?") }} |
+
+*Source: `{{ ctx.bundle_dir }}`*

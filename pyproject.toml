@@ -17,6 +17,8 @@ dependencies = [
     "scipy>=1.10",
     "psutil>=5.9",
     "pyarrow>=14.0",
+    "Jinja2>=3.1",
+    "PyYAML>=6.0",
 ]
 
 [project.optional-dependencies]
@@ -31,3 +33,4 @@ include = ["popout*"]
 
 [tool.setuptools.package-data]
 "popout.configs" = ["*.json"]
+"popout.reports" = ["templates/**/*.j2"]

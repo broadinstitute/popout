@@ -1,0 +1,65 @@
+# popout DX report — experimental diagnostic on popout vs other tools.
+
+title: popout DX report
+
+style:
+  pdf_engine: xelatex
+  margin: 0.75in
+  fontsize: 10pt
+  mainfont: Helvetica
+  monofont: Menlo
+  highlight_style: tango
+
+defaults:
+  target_space: SP5
+  mid_rule: drop
+
+sections:
+  - id: cover
+    template: popout_dx/cover.j2
+
+  - id: label_space_conventions
+    template: _components/label_space_conventions.j2
+
+  - id: reading_guide
+    template: _components/reading_guide_metrics.j2
+
+  # ── Phase 4 will insert the popout DX sections here ─────────────────
+  #
+  # - id: traffic_light_grid
+  #   template: popout_dx/traffic_light.j2
+  #   pair: [popout]
+  #
+  # - id: popout_vs_flare_concordance
+  #   template: popout_dx/per_tool_concordance.j2
+  #   pair: [popout, flare]
+  #
+  # - id: per_sample_mae
+  #   template: popout_dx/per_sample_mae.j2
+  #
+  # - id: popout_vs_rf_confusion
+  #   template: popout_dx/confusion.j2
+  #   pair: [popout, rf]
+  #   mid_rule: fold_to_eur
+  #
+  # - id: per_cluster_grid
+  #   template: popout_dx/per_cluster_grid.j2
+  #
+  # - id: local_summary
+  #   template: popout_dx/local_summary.j2
+  #   when: bundle.get("mode") == "global_local"
+  #
+  # - id: bp_confusion
+  #   template: popout_dx/bp_confusion.j2
+  #   when: bundle.get("mode") == "global_local"
+  #
+  # - id: boundary_localization
+  #   template: popout_dx/boundary_localization.j2
+  #   when: bundle.get("mode") == "global_local"
+  #
+  # - id: coarse_grid
+  #   template: popout_dx/coarse_grid.j2
+  #   when: bundle.get("mode") == "global_local"
+
+  - id: provenance
+    template: _components/provenance_appendix.j2

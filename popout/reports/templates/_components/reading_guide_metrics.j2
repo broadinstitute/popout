@@ -1,0 +1,67 @@
+{# Shared reading-guide page describing the concordance metrics every
+   report uses. Each report includes this verbatim. No tool-specific
+   wording — it explains Pearson r vs CCC, MAE, Jaccard@τ, and
+   μ-gating without mentioning FLARE / popout / Rye / RF. #}
+
+# How to read the metrics
+
+## Pearson r vs Lin's Concordance Correlation Coefficient (CCC)
+
+**Pearson r** measures co-variation: if two estimates rise and fall
+together across samples, r ≈ 1, even when one is systematically
+shifted (e.g. half the magnitude of the other). It answers "do the
+two estimates rank samples the same way?"
+
+**Lin's CCC** measures agreement around the y = x line. A systematic
+bias — for example, one tool reporting consistently 10 percentage
+points higher than another — drops CCC even when r is near 1. It
+answers "are the two estimates *the same number*?"
+
+The largest gap between r and CCC for a label is the single best
+summary of calibration drift.
+
+## MAE quantiles
+
+**MAE** is the mean of the per-sample absolute differences in
+proportion (units of 0–1). We report the mean (`mae_mean`), the
+median (`mae_median`, robust to outliers), and the 95th percentile
+(`mae_p95`, the tail).
+
+## Jaccard@τ
+
+For a threshold τ ∈ {0.10, 0.25, 0.50}, **Jaccard@τ** is the
+intersection-over-union of the two estimates' "this sample has at
+least τ proportion of ancestry X" sets. Robust to small per-sample
+floating-point differences; sensitive to whether the two tools agree
+on which samples cross a meaningful threshold.
+
+## μ-gating
+
+`cluster_mu` is the mean proportion of an ancestry across the
+cluster's samples. When `cluster_mu < 0.01`, there is essentially no
+signal for that ancestry in that cluster, and any metric computed
+on it is degenerate. The report **gates** these pairs:
+
+- they appear with `pass = null` (μ-gated, neither pass nor fail);
+- they contribute to a `μ·∅` column in summary grids;
+- they are excluded from aggregate "fraction passing" rolls-up.
+
+## Pass criterion
+
+A (cluster, label) pair **passes** when both of the following hold:
+
+- `pearson_r ≥ 0.95`
+- `ccc       ≥ 0.90`
+
+Pairs with `cluster_mu < 0.01` are μ-gated (pass = null, not a
+failure). Everything else is a fail.
+
+## ARI / NMI / V-measure (when hard calls are available)
+
+For sections that compare two tools' categorical (argmax) calls, we
+also report three label-permutation-invariant cluster-evaluation
+metrics from the standard literature: **Adjusted Rand Index**
+(Hubert & Arabie), **Normalised Mutual Information**, and
+**V-measure** (Rosenberg & Hirschberg). These do not depend on how
+labels are matched between tools and so provide an honest floor
+against which the mapped confusion matrix should be read.

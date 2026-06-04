@@ -1,0 +1,132 @@
+{# Label-space conventions page — shared across reports. Static
+   reference; no historical commentary; no popout-specific wording. #}
+
+# Label-space conventions
+
+Every figure in this report carries a one-line **figure tag** in its
+footer, e.g.
+
+```
+L=SP5/MID-     | flare=>name | rye=>name
+L=SP5/MID→eur  | flare=>name | rf=>name
+```
+
+The tag is the complete answer to "what label space is this graph in
+and how did each tool reach it?" Two charts with identical tags are
+directly comparable; two charts with different tags are not — even
+when they share axis labels. The tag lists **only the tools that
+actually participate in the chart**.
+
+## The label spaces
+
++-----------------+--------------------------------+--------------------------------------------------+
+| Space           | Members (ordered)              | Notes                                            |
++:================+:===============================+:=================================================+
+| `SP6`           | afr, amr, eas, eur, mid, sas   | The six-way continental superpopulation set.     |
++-----------------+--------------------------------+--------------------------------------------------+
+| `SP5`           | afr, amr, eas, eur, sas        | `SP6` with MID removed.                          |
++-----------------+--------------------------------+--------------------------------------------------+
+| `SP6.sub`       | afr.1, afr.2, eur.1, …         | A subcontinental refinement of `SP6`, used when  |
+|                 |                                | one tool's components fold into a single         |
+|                 |                                | continental label.                               |
++-----------------+--------------------------------+--------------------------------------------------+
+| `<tool>.native` | tool-defined                   | Each tool's native columns (e.g. FLARE's panel   |
+|                 |                                | populations, Rye's Q columns).                   |
++-----------------+--------------------------------+--------------------------------------------------+
+
+The shared space is named **SP** (superpopulation) — deliberately
+not after any single tool.
+
+**Subcomponent suffixes.** When a tool has more inferred components
+than the target has labels, the extras share a label and pick up
+**rank** suffixes: `afr.1` is the component most strongly correlated
+with AFR; `afr.2` the next; and so on. The rank is by descending
+correlation, so `afr.1` refers to the same biological signal across
+runs as long as the reference is fixed.
+
+## MID handling
+
+When the two tools compared in a section share the same MID stance
+(both have it, neither has it), the tag reads `MID+` or `MID-`. When
+one tool carries MID and the other doesn't, the section commits to a
+**rule** that brings them into a common SP5:
+
+- `MID-` (drop) — MID mass on the MID-bearing side is dropped before
+  comparison. Use when MID is genuinely absent from the cohort.
+- `MID→eur` (fold) — MID mass on the MID-bearing side is added to
+  the EUR column before MID is dropped. Use when one tool's reference
+  panel lacks MID and we don't want to penalise it for absent MID
+  signal that another tool reported as MID-flavoured EUR.
+
+The rule appears in the tag for every figure where it matters.
+
+## Matching methods
+
+Each clause `<tool>=><method>` names the matching method that mapped
+that tool's columns into the target space. Choose by what kind of
+information the tool emits:
+
+### `name` — exact-name match
+
+Use when the tool already exposes label names (a VCF `##ANCESTRY=`
+header, a TSV column header). Case-insensitive lookup; deterministic;
+no algorithm. The cheapest and most defensible choice.
+
+### `corrH` — correlation + Hungarian assignment
+
+Use when both sides emit **populations** (allele-frequency vectors
+per ancestry). Build the Pearson correlation matrix between the two
+sides' rows; solve the optimal one-to-one matching by the Hungarian
+algorithm.
+
+A matching is **bijective** — a one-to-one pairing — when every
+inferred component gets exactly one target label and every target
+label gets exactly one inferred component. This is only possible
+when there are at most as many inferred components as target labels
+(`K_inf ≤ K_ref`):
+
+```
+K_inf = 6, K_ref = 6  ──► bijective pairing exists. Hungarian finds
+                          the optimal one:
+                          afr ←→ flare_3
+                          amr ←→ flare_1
+                          eas ←→ flare_5
+                          eur ←→ flare_0
+                          mid ←→ flare_4
+                          sas ←→ flare_2
+
+K_inf = 9, K_ref = 6  ──► pigeonhole. Cannot be bijective. Some
+                          target labels receive multiple inferred
+                          components → the "merge" branch. Each
+                          extra component folds into its
+                          best-correlated label, producing afr.1,
+                          afr.2, ... subcomponents.
+```
+
+So `corrH` is bijective whenever `K_inf ≤ K_ref`. Cardinality is
+forced by the K-shapes, not a knob.
+
+### `postS` — posterior correlation + calibration-slope override
+
+Use when one side is **per-sample posteriors** (a soft probability
+vector per sample) and the other is a reference probability vector.
+Each component picks the reference label it correlates best with
+across samples. A second calibration-slope check catches
+anti-correlated cases: a component that looks like AFR by
+correlation but whose calibration curve has the wrong sign gets
+reassigned to whatever label has a positive slope. Many-to-one (no
+bijectivity guarantee).
+
+### `confH` — Hungarian on a hard-call confusion matrix
+
+Use when both sides emit **hard calls** at the same units (sites or
+base pairs) and you want a one-to-one mapping. Count agreements per
+(src_label, ref_label) pair; run Hungarian on the agreement matrix.
+Bijective by construction when both sides have the same number of
+labels; pads with dummies otherwise.
+
+### `manual` — analyst-supplied CSV
+
+Escape hatch when none of the above produce a defensible mapping.
+The analyst commits a `component,label` CSV; the report tag carries
+the file's hash so the mapping is reproducible.
