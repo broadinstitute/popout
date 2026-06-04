@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import (
+    calibration_heatmap,
     cohort_composition,
     concordance_strip,
     confusion_heatmap,
@@ -36,6 +37,7 @@ from . import (
 # Registry of available chart modules. A section in the YAML manifest
 # references a chart by its registry key (``chart: cohort_composition``).
 CHARTS: dict[str, Any] = {
+    "calibration_heatmap": calibration_heatmap,
     "cohort_composition": cohort_composition,
     "concordance_strip": concordance_strip,
     "confusion_heatmap": confusion_heatmap,

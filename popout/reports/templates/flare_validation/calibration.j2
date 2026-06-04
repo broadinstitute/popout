@@ -1,0 +1,44 @@
+{# FLARE vs RF calibration heatmap. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Calibration
+
+**What this is.** For every (FLARE component, RF-assigned superpop
+label) pair, two numbers describe how that FLARE component reacts to
+the RF probability for that label: **`max_cal`** is the largest mean
+FLARE proportion across binned RF probability (the strongest response
+of the component to the RF tool's signal for that label) and
+**`slope` (m)** is the linear-regression slope of FLARE proportion on
+RF probability across samples (only defined where both axes have
+enough variance). A well-behaved FLARE component answers exactly one
+RF label on the diagonal with `m ≈ 1`.
+
+**How to read this chart.** One row per FLARE component (cohort μ
+shown on the left as a small bar); one column per RF-assigned
+superpop label. Cells are the cohort-pooled `max_cal` (μ-weighted
+mean across clusters that defined that pair); the subscript `m=` is
+the cohort-median slope across the same clusters. A bright diagonal
+cell with `m ≈ 1` = the FLARE component is calibrated against the RF
+tool's call for that label. A bright off-diagonal = the FLARE
+component is being driven by a different RF label (leakage). Hatched
+cells = `max_cal > 1`, which usually means the reference panel
+under-represents that ancestry. Components with a tiny μ on the
+left are mostly noise regardless of cell colour.
+
+{% if chart %}
+{{ figure(path=chart, caption="μ strip (left) + cohort-pooled calibration heatmap. Cells annotated `max_cal` over `m=median slope`; hatched cells = `max_cal > 1`.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/calibration_slope.tsv`
+{% endif %}
+
+{% if data.get("present") %}
+**In this run.**
+
+{% if data.top_off %}
+- Largest cohort-pooled off-diagonal cells (ancestry leakage candidates): {% for lab, v in data.top_off %}{{ lab }} = {{ "%.2f"|format(v) }}{{ ", " if not loop.last else "." }}{% endfor %}
+{% endif %}
+{% if data.n_over1 %}
+- {{ data.n_over1 }} cell(s) have pooled `max_cal > 1` (hatched) — usually means the reference panel under-represents that ancestry and the calibration response is amplified beyond the input proportion.
+{% endif %}
+{% endif %}

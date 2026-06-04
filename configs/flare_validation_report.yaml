@@ -42,6 +42,12 @@ sections:
     pair: [flare, rye]
     mid_rule: drop
 
+  - id: flare_vs_rf_calibration
+    template: flare_validation/calibration.j2
+    chart: calibration_heatmap
+    pair: [flare, rf]
+    target_space: SP6
+
   - id: flare_vs_rf_confusion
     template: flare_validation/confusion.j2
     chart: confusion_heatmap
