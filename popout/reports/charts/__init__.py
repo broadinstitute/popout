@@ -27,6 +27,7 @@ from . import (
     concordance_strip,
     confusion_heatmap,
     hap_disagreement,
+    regional_manhattan,
     switch_rate,
     tract_length,
 )
@@ -39,6 +40,7 @@ CHARTS: dict[str, Any] = {
     "concordance_strip": concordance_strip,
     "confusion_heatmap": confusion_heatmap,
     "hap_disagreement": hap_disagreement,
+    "regional_manhattan": regional_manhattan,
     "switch_rate": switch_rate,
     "tract_length": tract_length,
 }

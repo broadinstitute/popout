@@ -67,15 +67,16 @@ sections:
     pair: [flare, rf]
     target_space: SP6
 
+  - id: regional
+    template: flare_validation/regional.j2
+    chart: regional_manhattan
+    pair: [flare]
+
   # ── Phase 3 in progress — sections being ported ─────────────────────
   #
   # - id: flare_vs_rf_calibration
   #   template: flare_validation/calibration.j2
   #   pair: [flare, rf]
-  #
-  # - id: regional
-  #   template: flare_validation/regional.j2
-  #   pair: [flare]
   #
   # - id: switch_rate
   #   template: flare_validation/switch_rate.j2

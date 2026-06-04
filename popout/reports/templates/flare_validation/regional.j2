@@ -1,0 +1,50 @@
+{# Regional meta-analysis — Manhattan + top-20. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Regional meta-analysis
+
+**What this measures.** For every 1 Mb sliding window on each
+chromosome (250 kb step), the bp-weighted mean ancestry proportion
+across all haplotypes is computed per ancestry. Each (window,
+ancestry) is z-scored against the chromosome-wide mean for that
+ancestry, BH-corrected for FDR, then combined across clusters via
+Stouffer's method. A peak here is a window where multiple clusters
+independently see a deviation in the same direction.
+
+**How to read this chart.** Each point is one window × ancestry,
+plotted at its genomic midpoint and meta-analysis q-value (−log10,
+so up = more significant). Color = ancestry. Line width scales with
+the number of clusters that independently flagged that window.
+Light-gray bands behind the points are pre-registered masks (HLA,
+centromere flank, segdup, high-LD). A tall peak inside a mask is
+expected; a tall peak outside any mask is real signal worth
+investigating. The dashed line is FDR 5%; the top three peaks are
+annotated by position and ancestry.
+
+{% if chart %}
+{{ figure(path=chart, caption="Cross-cluster Manhattan; top-3 peaks annotated.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/regional_meta.tsv`
+{% endif %}
+
+{% if data.get("present") %}
+**In this run.**
+
+{% if data.top_peaks %}
+- Top peak: `{{ data.top_peaks[0].chrom }}:{{ "%.1f"|format(data.top_peaks[0].mid_mb) }} Mb` for `{{ data.top_peaks[0].anc_name }}` (q = {{ "%.1e"|format(data.top_peaks[0].q) }}, flagged by {{ data.top_peaks[0].n_flagged }} cluster(s), mask = {{ data.top_peaks[0].mask or "none" }}).
+{% endif %}
+- Windows outside any pre-registered mask: **{{ "{:,}".format(data.n_outside_mask) }}**.
+
+## Top 20 windows by FDR-corrected q
+
+\small
+
+| chrom | start (Mb) | end (Mb) | ancestry | n flagged | n total | z | p | q | mask |
+|:------|-----------:|---------:|:---------|----------:|--------:|--:|--:|--:|:-----|
+{% for r in data.table_rows -%}
+| `{{ r.chrom }}` | {{ "%.2f"|format(r.start_mb) }} | {{ "%.2f"|format(r.end_mb) }} | `{{ r.ancestry_name }}` | {{ r.n_flagged }} | {{ r.n_total }} | {{ "%.2f"|format(r.z) if r.z is not none else "—" }} | {{ "%.4f"|format(r.p) if r.p is not none else "—" }} | {{ "%.4f"|format(r.q) }} | {{ r.mask or "—" }} |
+{% endfor %}
+
+\normalsize
+{% endif %}
