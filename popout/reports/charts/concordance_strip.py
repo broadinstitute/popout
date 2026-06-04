@@ -33,7 +33,7 @@ CCC_REF = 0.90
 # ── compute ────────────────────────────────────────────────────────────
 
 
-def compute(ctx) -> dict:
+def compute(ctx, section=None) -> dict:
     path = ctx.bundle_dir / "cohort" / "concordance_metrics.tsv"
     header, rows = read_tsv(path)
     if not rows:

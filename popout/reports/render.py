@@ -57,7 +57,11 @@ def _run_charts_for_section(ctx: ReportContext, sec) -> tuple[Path | None, dict]
     if not chart_name:
         return None, {}
     mod = _charts.get(chart_name)
-    data = mod.compute(ctx)
+    # Chart compute() takes (ctx, section) — the section gives access
+    # to target_space + mid_rule + pair so the chart can apply the
+    # per-section transformation (e.g. fold MID into EUR for FLARE
+    # vs RF).
+    data = mod.compute(ctx, sec)
     fig = mod.render(data, palette=ctx.palette)
     _stamp_tag(fig, ctx.tag(sec.id))
     path = ctx.assets_dir / f"{sec.id}.png"

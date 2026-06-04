@@ -54,7 +54,7 @@ def _read_merged_groups_rf(bundle_dir: Path) -> dict[tuple[str, str], dict[int, 
 # ── compute ────────────────────────────────────────────────────────────
 
 
-def compute(ctx) -> dict:
+def compute(ctx, section=None) -> dict:
     """Return the data dict consumed by both the chart and the template."""
     path = ctx.bundle_dir / "cohort" / "cohort_global.tsv"
     header, rows = read_tsv(path)

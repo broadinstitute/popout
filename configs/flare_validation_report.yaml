@@ -42,6 +42,15 @@ sections:
     pair: [flare, rye]
     mid_rule: drop
 
+  - id: flare_vs_rf_confusion
+    template: flare_validation/confusion.j2
+    chart: confusion_heatmap
+    pair: [flare, rf]
+    target_space: SP6
+    # No mid_rule — the report renders confusion_rf.tsv faithfully,
+    # whatever space the bundle delivers it in. Folding MID into EUR
+    # is the stats collector's job; tracked in COLLECTOR_FIXES.md.
+
   # ── Phase 3 in progress — sections being ported ─────────────────────
   #
   # - id: flare_vs_rf_calibration
@@ -49,7 +58,7 @@ sections:
   #   pair: [flare, rf]
   #   mid_rule: fold_to_eur
   #
-  # - id: flare_vs_rf_confusion
+  # - id: flare_vs_rf_confusion_DEFERRED
   #   template: flare_validation/confusion.j2
   #   pair: [flare, rf]
   #   mid_rule: fold_to_eur
