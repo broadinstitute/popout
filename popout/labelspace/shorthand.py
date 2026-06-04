@@ -26,6 +26,7 @@ def format(
     params: dict | None = None,
     *,
     hash_len: int = 6,
+    mid_rule: str | None = None,
 ) -> str:
     """Build the canonical figure tag.
 
@@ -33,13 +34,28 @@ def format(
     ``Assignment.source['tool']``) or a ``{tool: Assignment}`` mapping.
     The output is sorted by tool name so identical inputs ⇒ identical
     string.
+
+    ``mid_rule`` overrides the default MID flag rendering:
+
+    - ``None`` (default): MID flag is ``MID+`` if target has MID,
+      ``MID-`` otherwise.
+    - ``"fold_to_eur"``: target is MID-less but the source's MID mass
+      was redistributed into EUR before collapse. Tag renders ``MID→eur``.
+    - ``"drop"``: equivalent to ``MID-`` (source MID dropped; rendered
+      explicitly).
     """
     if isinstance(assignments, dict):
         items = sorted(assignments.items())
     else:
         items = sorted(((a.source.get("tool", "?"), a) for a in assignments),
                        key=lambda kv: kv[0])
-    target_str = f"{target.tag}/MID+" if target.has_mid else f"{target.tag}/MID-"
+    if mid_rule == "fold_to_eur":
+        mid_flag = "MID→eur"
+    elif mid_rule == "drop":
+        mid_flag = "MID-"
+    else:
+        mid_flag = "MID+" if target.has_mid else "MID-"
+    target_str = f"{target.tag}/{mid_flag}"
     clauses = [f"{tool}=>{a.method}" for tool, a in items]
     h = _hash(target, [a for _, a in items], params or {})[:hash_len]
     return " | ".join([f"L={target_str}"] + clauses + [f"v={h}"])

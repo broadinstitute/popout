@@ -120,19 +120,41 @@ def collapse(
 ) -> np.ndarray:
     """Coarsen ``q`` from ``src`` to ``dst`` (e.g. SP6 → SP5).
 
-    Today ``dst`` must be ``src.without_mid()`` and the only supported
-    rule is ``"drop"`` (MID mass disappears). ``"redistribute"`` is
-    reserved for future use.
+    ``dst`` must be ``src.without_mid()``. Supported rules:
+
+    - ``"drop"``         — MID mass disappears (each row's total drops by
+                           the MID column's value).
+    - ``"fold_to_eur"``  — MID mass is added to EUR before MID is removed
+                           (each row's total is preserved). Use this when
+                           the target needs to be MID-less but you don't
+                           want to penalise a tool that doesn't emit MID
+                           — the most common case at AoU where MID is
+                           genetically closest to EUR.
     """
     if q.shape[1] != len(src.members):
         raise ValueError(
             f"collapse: q has {q.shape[1]} columns but {src.tag} has {len(src.members)} members"
         )
-    if rule != "drop":
-        raise ValueError(f"collapse: unsupported rule {rule!r}; only 'drop' is implemented")
     if dst is not src.without_mid():
         raise ValueError(
             f"collapse: dst {dst.tag} is not the without_mid sibling of {src.tag}"
         )
+    if rule not in ("drop", "fold_to_eur"):
+        raise ValueError(
+            f"collapse: unsupported rule {rule!r}; allowed: 'drop', 'fold_to_eur'"
+        )
+
+    if rule == "fold_to_eur":
+        if "mid" not in src.members or "eur" not in src.members:
+            raise ValueError(
+                f"collapse(fold_to_eur): {src.tag} must contain both 'mid' and 'eur'"
+            )
+        out = q.copy()
+        mid_col = src.index("mid")
+        eur_col = src.index("eur")
+        out[:, eur_col] += out[:, mid_col]
+        keep = [i for i, m in enumerate(src.members) if m in dst.members]
+        return out[:, keep].copy()
+
     keep = [i for i, m in enumerate(src.members) if m in dst.members]
     return q[:, keep].copy()
