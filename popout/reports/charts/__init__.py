@@ -22,7 +22,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from . import cohort_composition, concordance_strip, confusion_heatmap
+from . import (
+    cohort_composition,
+    concordance_strip,
+    confusion_heatmap,
+    tract_length,
+)
 
 
 # Registry of available chart modules. A section in the YAML manifest
@@ -31,6 +36,7 @@ CHARTS: dict[str, Any] = {
     "cohort_composition": cohort_composition,
     "concordance_strip": concordance_strip,
     "confusion_heatmap": confusion_heatmap,
+    "tract_length": tract_length,
 }
 
 

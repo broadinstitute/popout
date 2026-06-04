@@ -51,20 +51,27 @@ sections:
     # whatever space the bundle delivers it in. Folding MID into EUR
     # is the stats collector's job; tracked in COLLECTOR_FIXES.md.
 
+  - id: tract_length
+    template: flare_validation/tract_length.j2
+    chart: tract_length
+    pair: [flare]
+
   # ── Phase 3 in progress — sections being ported ─────────────────────
   #
   # - id: flare_vs_rf_calibration
   #   template: flare_validation/calibration.j2
   #   pair: [flare, rf]
-  #   mid_rule: fold_to_eur
   #
-  # - id: flare_vs_rf_confusion_DEFERRED
-  #   template: flare_validation/confusion.j2
+  # - id: switch_rate
+  #   template: flare_validation/switch_rate.j2
+  #   pair: [flare]
+  #
+  # - id: hap_disagreement
+  #   template: flare_validation/hap_disagreement.j2
   #   pair: [flare, rf]
-  #   mid_rule: fold_to_eur
   #
-  # - id: tract_length
-  #   template: flare_validation/tract_length.j2
+  # - id: regional
+  #   template: flare_validation/regional.j2
   #   pair: [flare]
   #
   # - id: switch_rate

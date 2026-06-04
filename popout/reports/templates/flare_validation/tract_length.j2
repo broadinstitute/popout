@@ -1,0 +1,51 @@
+{# Tract length per ancestry — cohort-pooled empirical mean vs model expectation. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Tract length per ancestry
+
+**What this is.** Per-ancestry mean tract length describes FLARE's
+segmentation behaviour. Under a simple exponential admixture model,
+mean tract length in cM is roughly 100 / (T_gen × K_ancestries); the
+cluster's own `model_T_gen` (seeded into FLARE) therefore implies an
+expected mean. Empirical means much shorter than that = FLARE is
+over-segmenting (fast switches that look like LAI noise). Much longer
+= under-segmenting (FLARE missing real switches).
+
+**How to read this chart.** Each row is one FLARE ancestry component.
+The horizontal bar is the cohort-pooled mean tract length (weighted by
+`n_tracts` across clusters); the small vertical ticks on the bar mark
+each cluster's empirical mean — when they cluster tightly the cohort
+number is stable. The short dashed vertical mark is the model
+expectation derived from the median cluster's `model_T_gen` for that
+ancestry. Read the bar versus the dashed mark first; the per-cluster
+ticks tell you how united the clusters are behind that picture.
+
+{% if chart %}
+{{ figure(path=chart, caption="Cohort-pooled mean tract length per ancestry (n_tracts-weighted), per-cluster ticks, and the model expectation.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/tract_length_stats.tsv`
+{% endif %}
+
+{% if data.get("present") %}
+**In this run.**
+
+{% if data.top_dev %}
+- Largest cohort-pooled deviation from the model expectation: {% for lab, v in data.top_dev %}{{ lab }} (Δ={{ "%.2f"|format(v) }} Mb){{ "; " if not loop.last else "." }}{% endfor %}
+{% else %}
+- Cohort-pooled means sit close to the model expectation for every ancestry.
+{% endif %}
+
+A cohort bar much **shorter** than the dashed model line = over-segmentation
+(FLARE switching more than the model predicts); much **longer** =
+under-segmentation (FLARE missing switches the model expects).
+
+## Per-ancestry detail
+
+| ancestry | n_tracts (cohort) | cohort mean_Mb | model expectation (Mb) |
+|:---------|------------------:|---------------:|-----------------------:|
+{% for anc in data.labels -%}
+| `{{ anc }}` | {{ "{:,}".format(data.pooled_n[anc]) }} | {{ "%.2f"|format(data.pooled_mb[anc]) if data.pooled_mb[anc] is not none else "—" }} | {{ "%.2f"|format(data.model_ref_mb[anc]) if anc in data.model_ref_mb else "—" }} |
+{% endfor %}
+
+{% endif %}
