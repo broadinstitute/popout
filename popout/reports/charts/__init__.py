@@ -26,6 +26,7 @@ from . import (
     cohort_composition,
     concordance_strip,
     confusion_heatmap,
+    hap_disagreement,
     switch_rate,
     tract_length,
 )
@@ -37,6 +38,7 @@ CHARTS: dict[str, Any] = {
     "cohort_composition": cohort_composition,
     "concordance_strip": concordance_strip,
     "confusion_heatmap": confusion_heatmap,
+    "hap_disagreement": hap_disagreement,
     "switch_rate": switch_rate,
     "tract_length": tract_length,
 }

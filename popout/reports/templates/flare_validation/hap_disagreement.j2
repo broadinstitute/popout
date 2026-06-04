@@ -1,0 +1,53 @@
+{# Hap disagreement per superpop label. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Hap disagreement
+
+**What this is.** For each sample, what fraction of the genome
+(bp-weighted) gets a *different* ancestry call on hap1 vs hap2? Two
+non-exclusive interpretations: real biological asymmetry (admixed
+individuals can have one parent contribute a different ancestry from
+the other), or a phasing-error proxy (switch errors in upstream
+phasing artificially split a single-ancestry haplotype).
+
+**How to read this chart.** Each row is one superpop label (assigned
+by the upstream RF classifier). The horizontal bar is the
+cohort-pooled mean disagreement, n_samples-weighted across clusters
+(rows with fewer than 5 samples are dropped before pooling). The
+vertical black ticks on each bar mark each cluster's individual
+mean. The shaded grey band (0.10–0.30) is the expected baseline for
+genuinely admixed labels; pure-ancestry labels (e.g. `eas` in a
+non-admixed cohort) should sit near zero. A bar that pushes well
+past the band on a pure-ancestry label points more toward phasing
+noise than biology; tightly clustered ticks behind that bar say the
+whole cohort sees it.
+
+{% if chart %}
+{{ figure(path=chart, caption="Cohort-pooled hap-disagreement per superpop label with per-cluster overlay ticks.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/hap_disagreement.tsv`
+{% endif %}
+
+{% if data.get("present") %}
+**In this run.**
+
+{% if data.top_pure %}
+- Highest disagreement on pure-ancestry labels (suggestive of phasing noise): {% for lab, v in data.top_pure %}{{ lab }} ({{ "%.2f"|format(v) }}){{ "; " if not loop.last else "." }}{% endfor %}
+{% endif %}
+{% if data.top_spread %}
+- Largest cluster-to-cluster spread per superpop label: {% for lab, v in data.top_spread %}`{{ lab }}` (Δ={{ "%.2f"|format(v) }}){{ "; " if not loop.last else "." }}{% endfor %}
+{% endif %}
+
+## Per-(label, cluster) detail
+
+\small
+
+| superpop label | cluster · chrom | n samples | mean disagreement |
+|:---------------|:----------------|----------:|------------------:|
+{% for r in data.table_rows -%}
+| `{{ r.rf_label }}` | `{{ r.cluster_chrom }}` | {{ "{:,}".format(r.n) }} | {{ "%.3f"|format(r.mean) }} |
+{% endfor %}
+
+\normalsize
+{% endif %}
