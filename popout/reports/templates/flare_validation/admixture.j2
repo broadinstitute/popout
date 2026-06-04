@@ -1,0 +1,30 @@
+{# Per-sample admixture overview. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Per-sample admixture
+
+**What this is.** The classic ADMIXTURE-style overview: every
+sample in the cohort as one vertical strip, sorted by primary
+FLARE ancestry → descending proportion within group. Each sample's
+FLARE component vector is summed by the RF label its components
+map to under `merged_groups_rf.tsv`, so colors are SP6 ancestries
+(faithful to the bundle's mapping — when the collector emits
+`afr.3` we honour it the same as `afr`).
+
+**How to read this chart.** Long single-color runs at the left
+edge are "pure" samples; the middle of each color band shows
+admixed individuals (multiple colors stacked at non-trivial
+heights). Cohort-wide proportions appear as the relative widths
+of each color block. If you want per-cluster decomposition see
+the cohort composition section.
+
+{% if chart %}
+{{ figure(path=chart, caption="Per-sample admixture, cohort sorted by primary ancestry.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/cohort_global.tsv` or `cohort/merged_groups_rf.tsv`
+{% endif %}
+
+{% if data.get("present") %}
+**In this run.** {{ "{:,}".format(data.n_samples) }} samples; SP6 labels rendered: {% for lab in data.labels %}`{{ lab }}`{{ ", " if not loop.last else "." }}{% endfor %}
+{% endif %}

@@ -23,6 +23,7 @@ from __future__ import annotations
 from typing import Any
 
 from . import (
+    admixture_bar,
     boundary_localization,
     bp_confusion,
     calibration_heatmap,
@@ -32,12 +33,14 @@ from . import (
     confusion_heatmap,
     dx_confusion_heatmap,
     hap_disagreement,
+    label_correlation,
     local_summary,
     per_cluster_grid,
     per_label_ccc,
     per_sample_mae_violin,
     regional_manhattan,
     switch_rate,
+    ternary,
     tract_length,
     traffic_light_grid,
 )
@@ -46,6 +49,7 @@ from . import (
 # Registry of available chart modules. A section in the YAML manifest
 # references a chart by its registry key (``chart: cohort_composition``).
 CHARTS: dict[str, Any] = {
+    "admixture_bar": admixture_bar,
     "boundary_localization": boundary_localization,
     "bp_confusion": bp_confusion,
     "calibration_heatmap": calibration_heatmap,
@@ -55,12 +59,14 @@ CHARTS: dict[str, Any] = {
     "confusion_heatmap": confusion_heatmap,
     "dx_confusion_heatmap": dx_confusion_heatmap,
     "hap_disagreement": hap_disagreement,
+    "label_correlation": label_correlation,
     "local_summary": local_summary,
     "per_cluster_grid": per_cluster_grid,
     "per_label_ccc": per_label_ccc,
     "per_sample_mae_violin": per_sample_mae_violin,
     "regional_manhattan": regional_manhattan,
     "switch_rate": switch_rate,
+    "ternary": ternary,
     "tract_length": tract_length,
     "traffic_light_grid": traffic_light_grid,
 }

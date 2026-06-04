@@ -27,7 +27,6 @@ PLOT_REGISTRY = {
     "posterior": ([], "plot_posterior_confidence", "posterior"),  # gracefully degrades
     "chromosome_boxplots": (["tracts"], "plot_chromosome_boxplots", "chromosome"),
     "freq_divergence": (["model_npz"], "plot_freq_divergence", "freq_divergence"),
-    "per_hap_t": (["model_npz"], "plot_per_hap_t", "per_hap_t"),
     "ternary": (["global_tsv"], "plot_ternary", "ternary"),
     "pca_ancestry": (["spectral_npz"], "plot_pca_ancestry", "spectral"),
     "seed_vs_final": (["spectral_npz", "global_tsv"], "plot_seed_vs_final", "spectral"),

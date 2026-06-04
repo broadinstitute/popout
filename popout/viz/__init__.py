@@ -24,7 +24,6 @@ from .tracts import plot_tract_lengths, plot_switch_rate
 from .genome import plot_ancestry_along_genome, plot_multi_individual
 from .chromosome import plot_chromosome_boxplots
 from .freq_divergence import plot_freq_divergence
-from .per_hap_t import plot_per_hap_t
 from .ternary import plot_ternary
 from .deviation import plot_ancestry_deviation
 from .label_correlation import plot_label_correlation
@@ -40,7 +39,6 @@ __all__ = [
     "plot_karyogram",
     "plot_label_correlation",
     "plot_multi_individual",
-    "plot_per_hap_t",
     "plot_posterior_confidence",
     "plot_switch_rate",
     "plot_ternary",

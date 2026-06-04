@@ -181,12 +181,6 @@ class TestVizPlots:
         assert isinstance(fig, plt.Figure)
         plt.close(fig)
 
-    def test_per_hap_t(self, synthetic_run):
-        from popout.viz import plot_per_hap_t
-        fig = plot_per_hap_t(synthetic_run)
-        assert isinstance(fig, plt.Figure)
-        plt.close(fig)
-
     def test_ternary_skips_if_not_k3(self, synthetic_run):
         """Ternary plot should raise ValueError when K != 3."""
         from popout.viz import plot_ternary

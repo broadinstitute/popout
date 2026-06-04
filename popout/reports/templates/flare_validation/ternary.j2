@@ -1,0 +1,28 @@
+{# K=3 ternary admixture plot (popout DX). Gates gracefully on K != 3. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Three-way admixture (ternary)
+
+**What this is.** When the cohort's effective label space is
+exactly three RF labels, every sample is one point in an
+equilateral triangle — vertices are the three labels, distance
+to a vertex is that label's proportion. Each point's color is
+RGB-mixed from its three proportions, so dominant-X samples sit
+near vertex X in vertex-X color.
+
+**How to read this chart.** Tight clusters near a vertex are
+"clean" populations; samples strung along an edge are 2-way
+admixed; samples in the interior are 3-way admixed. A diffuse
+cloud (no clusters) is a sign that either the run is genuinely
+heterogeneous or the label mapping is noisy.
+
+{% if chart %}
+{{ figure(path=chart, caption="Three-way admixture as a simplex scatter.", tag=tag) }}
+{% else %}
+> _Ternary plot skipped: {{ data.get("reason", "K != 3") }}_
+{% endif %}
+
+{% if data.get("present") %}
+**In this run.** Vertices: {% for lab in data.labels %}`{{ lab }}`{{ ", " if not loop.last else "." }}{% endfor %} — {{ "{:,}".format(data.n_samples) }} samples plotted.
+{% endif %}

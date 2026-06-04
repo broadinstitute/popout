@@ -36,6 +36,16 @@ sections:
     chart: cohort_composition
     pair: [flare]
 
+  - id: admixture
+    template: flare_validation/admixture.j2
+    chart: admixture_bar
+    pair: [flare]
+
+  - id: ternary
+    template: flare_validation/ternary.j2
+    chart: ternary
+    pair: [flare]
+
   - id: flare_vs_rye_concordance
     template: flare_validation/concordance.j2
     chart: concordance_strip
@@ -78,24 +88,11 @@ sections:
     chart: regional_manhattan
     pair: [flare]
 
-  # ── Phase 3 in progress — sections being ported ─────────────────────
-  #
-  # - id: flare_vs_rf_calibration
-  #   template: flare_validation/calibration.j2
-  #   pair: [flare, rf]
-  #
-  # - id: switch_rate
-  #   template: flare_validation/switch_rate.j2
-  #   pair: [flare]
-  #
-  # - id: hap_disagreement
-  #   template: flare_validation/hap_disagreement.j2
-  #   pair: [flare, rf]
-  #   mid_rule: fold_to_eur
-  #
-  # - id: regional
-  #   template: flare_validation/regional.j2
-  #   pair: [flare]
+  - id: label_correlation
+    template: flare_validation/label_correlation.j2
+    chart: label_correlation
+    pair: [flare, rf]
+    target_space: SP6
 
   - id: provenance
     template: _components/provenance_appendix.j2
