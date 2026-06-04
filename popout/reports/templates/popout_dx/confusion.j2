@@ -1,0 +1,33 @@
+{# Hard-call confusion heatmaps for popout DX. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Hard-call confusion
+
+**What this is.** Pooled across every (cluster, chrom) in the
+cohort, the row-normalised confusion matrix between popout's
+primary-ancestry call (argmax) and each comparison tool's
+primary-ancestry call. Rows are popout labels; columns are the
+tool's labels.
+
+**How to read this chart.** Diagonal cells are agreement; the
+title strip carries the overall diagonal fraction. Off-diagonal
+mass on a specific row says popout systematically *re-routes*
+that ancestry to a different label under that tool — for example
+popout-`mid` ending up as tool-`eur` would show up as a strong
+`mid → eur` cell. Faithful rendering: no label folding in this
+report — what you see is what the collector wrote.
+
+{% if chart %}
+{{ figure(path=chart, caption="Row-normalised hard-call confusion, one panel per comparison tool.", tag=tag) }}
+{% else %}
+> **MISSING:** no `popout_vs_*.confusion.tsv` files
+{% endif %}
+
+{% if data.get("present") %}
+**Overall diagonal agreement.**
+
+{% for p in data.panels -%}
+- popout vs {{ p.tool }}: {{ p.agreement_pct }}
+{% endfor %}
+{% endif %}

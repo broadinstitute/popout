@@ -54,13 +54,12 @@ def fmt_int(v: Any) -> str:
     return f"{int(f):,}"
 
 
-def fmt_pct(v: Any, places: int = 1, *, scale: float = 1.0) -> str:
-    """Render *v* as a percentage. ``scale=1.0`` treats *v* as a 0-1
-    fraction; ``scale=0.01`` treats it as already-in-percent."""
+def fmt_pct(v: Any, places: int = 1) -> str:
+    """Render a 0-1 fraction as a percentage string."""
     f = to_float(v)
     if f is None:
         return "—"
-    return f"{(f / scale):.{places}f}%"
+    return f"{(f * 100):.{places}f}%"
 
 
 def md_escape(s: Any) -> str:

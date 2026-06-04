@@ -1,0 +1,24 @@
+{# Local-mode bp-weighted confusion heatmap (popout DX). #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# bp-confusion heatmap (local-mode View A)
+
+**What this is.** Pooled across every selected sample × haplotype
+× (cluster, chrom): a confusion matrix between the FLARE
+per-site label and the popout per-site label, where each cell is
+weighted by the segment length in bp. Rows are FLARE labels;
+columns are popout labels; cells are row-normalised so each row
+sums to 1 of bp share.
+
+**How to read this chart.** Diagonal mass = agreement at the
+nucleotide level. Strong off-diagonal mass on a specific row
+means popout systematically calls those bp under a different
+label than FLARE. The title strip shows the overall diagonal
+fraction.
+
+{% if chart %}
+{{ figure(path=chart, caption="bp-weighted, row-normalised FLARE-vs-popout confusion.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/bp_confusion_segments.tsv.gz`
+{% endif %}

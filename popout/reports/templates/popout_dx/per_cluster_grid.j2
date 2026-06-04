@@ -1,0 +1,25 @@
+{# Per-(cluster, chrom) performance grid (popout DX). Table-only. #}
+{% set tag = ctx.tag(section.id) %}
+
+# Per-(cluster, chrom) performance grid
+
+**What this is.** One row per (cluster, chrom): the sample count
+and resource usage that produced the cluster's popout estimate,
+plus the cohort-aggregated mean CCC per comparison tool and the
+pass-count over μ-evaluable RF labels (`#pass / #evaluable`).
+Useful for spotting clusters where popout disagreed broadly with
+every tool versus the clusters where most labels passed.
+
+{% if data.get("present") %}
+\small
+
+| {{ data.header | join(" | ") }} |
+|{{ data.aligns | join("|") }}|
+{% for row in data.grid_rows -%}
+| {{ row | join(" | ") }} |
+{% endfor %}
+
+\normalsize
+{% else %}
+> **MISSING:** `cohort/manifest.tsv`
+{% endif %}

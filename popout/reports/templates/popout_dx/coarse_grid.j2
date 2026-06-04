@@ -1,0 +1,31 @@
+{# Local-mode coarse-grid sweep (popout DX). #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Coarse-grid sweep (local-mode View C)
+
+**What this is.** For a grid of resolutions (Mb), the collector
+re-tiles every haplotype and measures the agreement between
+popout's coarse call and FLARE's coarse call for each tile;
+"diagonal fraction" is the share of tiles where the two
+labels agree. Each faint grey line is one (cluster, sample,
+haplotype, chrom); the bold green line is the per-resolution
+median across all series.
+
+**How to read this chart.** A diagonal fraction near 1.0 at small
+resolutions (≤ 1 Mb) means popout and FLARE largely agree at
+high spatial resolution. If the green line *rises* with
+resolution that means disagreements live below the smoothing
+scale — coarsening the bins makes them cancel out. If the green
+line is flat-and-low at every resolution the two tools disagree
+fundamentally, not just locally.
+
+{% if chart %}
+{{ figure(path=chart, caption="Diagonal fraction (agreement) vs resolution; faint lines = individual series, bold line = median.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/coarse_grid_summary.tsv`
+{% endif %}
+
+{% if data.get("present") %}
+**In this run.** {{ data.n_series }} (cluster, sample, haplotype, chrom) series swept across {{ data.median_xs | length }} resolution points.
+{% endif %}

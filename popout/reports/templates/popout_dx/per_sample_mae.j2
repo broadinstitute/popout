@@ -1,0 +1,33 @@
+{# Per-sample MAE distribution (popout DX). #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Per-sample MAE distribution
+
+**What this is.** For every sample in the cohort and every
+comparison tool, the mean absolute error between popout's
+proportion vector and the tool's vector (units 0–1, averaged over
+the SP6 components). The violin shows `log10(MAE)` so the long
+tail compresses; the table reports the actual MAE quantiles.
+
+**How to read this chart.** A violin sitting near `log10(0.01)`
+(≈ −2) means typical disagreement of 1 percentage point — the
+tools largely agree. A violin shifted right toward
+`log10(0.1)` (≈ −1) means typical 10pp disagreement; that level
+of drift is hard to call "agreement" no matter what Pearson r
+says. The width of the violin tells you how heterogeneous the
+disagreement is across the cohort.
+
+{% if chart %}
+{{ figure(path=chart, caption="Per-sample MAE (log10) for popout vs each comparison tool.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/per_sample_mae.tsv`
+{% endif %}
+
+{% if data.get("present") %}
+| pair | n samples | median MAE | p95 MAE | max MAE |
+|:-----|----------:|-----------:|--------:|--------:|
+{% for r in data.table_rows -%}
+| popout vs {{ r.tool }} | {{ r.n }} | {{ r.median }} | {{ r.p95 }} | {{ r.max }} |
+{% endfor %}
+{% endif %}

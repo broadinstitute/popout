@@ -1,0 +1,32 @@
+{# Local-mode boundary localization (popout DX). #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Boundary localization (local-mode View B)
+
+**What this is.** Each row in `boundary_localization.tsv` is one
+FLARE switch (ancestry transition) on a haplotype. For each, the
+collector found the nearest popout switch and recorded (a) the
+bp distance to it and (b) whether the flanking RF labels on
+both sides match. The left panel is the log-scale distribution
+of those distances; the right panel is the matched / unmatched
+breakdown for the flanking labels.
+
+**How to read this chart.** A left panel sharply peaked near
+`10^3 bp` means popout typically places its switches within a kb
+of FLARE's — local-mode tracking is fine-grained. A flat or
+right-skewed distribution means popout and FLARE disagree about
+where transitions happen, even when they agree about the labels
+involved. The right-panel "matched" fraction tells you how often
+the two tools agree on *what* is on either side, regardless of
+*where* the switch sits.
+
+{% if chart %}
+{{ figure(path=chart, caption="Distance distribution and flanking-label match.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/boundary_localization.tsv`
+{% endif %}
+
+{% if data.get("present") and data.n_total > 0 %}
+**Flanking-label match rate.** {{ data.n_match }} / {{ data.n_total }} switches matched ({{ data.match_pct }}).
+{% endif %}

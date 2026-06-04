@@ -1,0 +1,41 @@
+{# Per-tool global concordance for popout DX. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Per-tool global concordance
+
+**What this is.** For each comparison tool (FLARE / Rye / RF as
+available) we compute popout-vs-tool Pearson r and CCC per
+(cluster, RF label) and aggregate across clusters. The chart shows
+the CCC distribution per RF label as a boxplot (n_clusters > 5)
+or strip plot otherwise. The table per tool carries the cohort
+roll-up sourced from `cohort_summary.json:pairs[]`.
+
+**How to read this chart.** Each box covers one RF label; the line
+through it is the median across clusters. The green dashed line
+at 0.90 is the CCC pass threshold; the red dashed line at 0.50 is
+the rough "this label is broken for this tool" warning. Long
+boxes that straddle both lines mean some clusters pass cleanly
+and others fail badly — a sign that the label's reliability is
+cluster-specific, not cohort-wide.
+
+{% if chart %}
+{{ figure(path=chart, caption="Per-RF-label CCC across clusters, one panel per comparison tool.", tag=tag) }}
+{% else %}
+> **MISSING:** no `popout_vs_*.metrics.tsv` files
+{% endif %}
+
+{% if data.get("present") %}
+{% for panel in data.tool_panels %}
+{% if panel.present %}
+## popout vs {{ panel.tool }}
+
+| RF label | mean CCC | mean r | n pass | n fail | n μ·∅ | verdict |
+|:---------|---------:|-------:|-------:|-------:|------:|:--------|
+{% for r in panel.summary_rows -%}
+| `{{ r.rf_label }}` | {{ r.mean_ccc }} | {{ r.mean_r }} | {{ r.n_pass }} | {{ r.n_fail }} | {{ r.n_null }} | {{ r.verdict }} |
+{% endfor %}
+
+{% endif %}
+{% endfor %}
+{% endif %}

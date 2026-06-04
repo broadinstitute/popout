@@ -1,0 +1,21 @@
+{# Local-mode per-cluster summary (popout DX). Table-only. #}
+{% set tag = ctx.tag(section.id) %}
+
+# Local-mode per-cluster summary
+
+**What this is.** When the cohort was run in `global_local` mode,
+each (cluster, chrom) carries per-sample tract-level comparisons
+between popout's per-site call and the reference tool's
+per-site call. We summarise to two numbers per (cluster, chrom):
+the mean per-site agreement (fraction of sites where popout and
+the reference agree) and the mean tract-level Jaccard index.
+
+{% if data.get("present") %}
+| cluster | chrom | n samples | mean per-site agree | mean Jaccard |
+|:--------|:------|----------:|--------------------:|-------------:|
+{% for r in data.table_rows -%}
+| `{{ r.cluster_id }}` | `{{ r.chrom }}` | {{ r.n_samples }} | {{ r.mean_agree }} | {{ r.mean_jaccard }} |
+{% endfor %}
+{% else %}
+> **MISSING:** `cohort/local_per_sample.tsv`
+{% endif %}

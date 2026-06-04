@@ -1,0 +1,13 @@
+{# popout DX reading guide. Includes the shared metrics + μ-gating
+   page, then adds the RF-as-a-comparator caveat. #}
+
+{% include "_components/reading_guide_metrics.j2" %}
+
+## RF caveat
+
+Random Forest is fundamentally a hard classifier; its per-class
+probabilities are not calibrated as proportions of admixture.
+Low CCC against RF is expected and not by itself a defect of
+popout. The **hard-call confusion matrix** is the meaningful
+comparison against RF; the soft-proportion comparisons against
+FLARE and Rye are the calibrated ones.

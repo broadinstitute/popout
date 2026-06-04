@@ -52,24 +52,29 @@ def _stamp_tag(fig, tag: str) -> None:
 
 
 def _run_charts_for_section(ctx: ReportContext, sec) -> tuple[Path | None, dict]:
-    """Compute + render a section's chart (if any). Returns (png_path, data_dict)."""
+    """Compute + render a section's chart (if any). Returns (png_path, data_dict).
+
+    A section can declare either ``chart: <name>`` (compute + render +
+    save PNG) or ``data: <name>`` (compute only, no figure — for
+    table-only sections that still need a data dict).
+    """
     chart_name = sec.options.get("chart")
-    if not chart_name:
-        return None, {}
-    mod = _charts.get(chart_name)
-    # Chart compute() takes (ctx, section) — the section gives access
-    # to target_space + mid_rule + pair so the chart can apply the
-    # per-section transformation (e.g. fold MID into EUR for FLARE
-    # vs RF).
-    data = mod.compute(ctx, sec)
-    fig = mod.render(data, palette=ctx.palette)
-    _stamp_tag(fig, ctx.tag(sec.id))
-    path = ctx.assets_dir / f"{sec.id}.png"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(path, dpi=_DPI, bbox_inches="tight")
-    import matplotlib.pyplot as plt
-    plt.close(fig)
-    return path, data
+    data_name = sec.options.get("data")
+    if chart_name:
+        mod = _charts.get(chart_name)
+        data = mod.compute(ctx, sec)
+        fig = mod.render(data, palette=ctx.palette)
+        _stamp_tag(fig, ctx.tag(sec.id))
+        path = ctx.assets_dir / f"{sec.id}.png"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(path, dpi=_DPI, bbox_inches="tight")
+        import matplotlib.pyplot as plt
+        plt.close(fig)
+        return path, data
+    if data_name:
+        mod = _charts.get(data_name)
+        return None, mod.compute(ctx, sec)
+    return None, {}
 
 
 def render_report(ctx: ReportContext) -> str:
@@ -85,7 +90,8 @@ def render_report(ctx: ReportContext) -> str:
             ctx=ctx, section=sec,
             chart=str(chart_path) if chart_path else None,
             data=data,
-            **{k: v for k, v in sec.options.items() if k != "chart"},
+            **{k: v for k, v in sec.options.items()
+               if k not in ("chart", "data")},
         )
         parts.append(rendered)
         parts.append("\n\n\\newpage\n\n")
