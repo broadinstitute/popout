@@ -36,11 +36,13 @@ sections:
     chart: cohort_composition
     pair: [flare]
 
+  - id: flare_vs_rye_concordance
+    template: flare_validation/concordance.j2
+    chart: concordance_strip
+    pair: [flare, rye]
+    mid_rule: drop
+
   # ── Phase 3 in progress — sections being ported ─────────────────────
-  #
-  # - id: flare_vs_rye_concordance
-  #   template: flare_validation/concordance.j2
-  #   pair: [flare, rye]
   #
   # - id: flare_vs_rf_calibration
   #   template: flare_validation/calibration.j2

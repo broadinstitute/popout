@@ -5,6 +5,25 @@
        {{ figure(path="...png", caption="...", tag=ctx.tag(section.id)) }}
        {{ table(["lab", "ccc"], rows) }}
        {{ tag_footer(ctx.tag(section.id)) }}
+
+   TABLE CONVENTIONS
+   -----------------
+   * Pipe tables (`| a | b |`) for ALL loop-generated tables. Pandoc
+     auto-sizes columns; the \adjustbox wrap in _base.j2 keeps them
+     inside the text margin. Use `\small` / `\normalsize` around the
+     table when the content is dense.
+   * Grid tables (`+---+---+`) ONLY for hand-aligned static reference
+     tables (e.g. the label-space conventions page). The `|` columns
+     must align with `+` markers, which Jinja loops can't reliably
+     produce.
+   * Jinja whitespace control inside loops emitting one row each:
+       {% for r in rows -%}
+       | ... |
+       {% endfor %}
+     The `-%}` strips the trailing newline of the `for` tag; the
+     un-marked `{% endfor %}` preserves the newline at the end of
+     each row. Using `{%- endfor %}` strips that newline and
+     collapses every row onto a single line, breaking the table.
 #}
 
 {%- macro figure(path, caption="", tag="", width="95%") -%}
