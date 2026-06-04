@@ -56,15 +56,16 @@ sections:
     chart: tract_length
     pair: [flare]
 
+  - id: switch_rate
+    template: flare_validation/switch_rate.j2
+    chart: switch_rate
+    pair: [flare]
+
   # ── Phase 3 in progress — sections being ported ─────────────────────
   #
   # - id: flare_vs_rf_calibration
   #   template: flare_validation/calibration.j2
   #   pair: [flare, rf]
-  #
-  # - id: switch_rate
-  #   template: flare_validation/switch_rate.j2
-  #   pair: [flare]
   #
   # - id: hap_disagreement
   #   template: flare_validation/hap_disagreement.j2
