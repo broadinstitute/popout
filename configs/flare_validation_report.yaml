@@ -31,11 +31,12 @@ sections:
   - id: reading_guide
     template: _components/reading_guide_metrics.j2
 
-  # ── Phase 3 will insert the FLARE / Rye / RF sections here ───────────
-  #
-  # - id: cohort_composition
-  #   template: flare_validation/cohort_composition.j2
-  #   pair: [flare]
+  - id: cohort_composition
+    template: flare_validation/cohort_composition.j2
+    chart: cohort_composition
+    pair: [flare]
+
+  # ── Phase 3 in progress — sections being ported ─────────────────────
   #
   # - id: flare_vs_rye_concordance
   #   template: flare_validation/concordance.j2

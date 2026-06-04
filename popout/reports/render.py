@@ -1,9 +1,9 @@
 """Section renderer + pandoc driver.
 
 ``render_report(ctx)`` walks the section list in order, evaluates each
-section's ``when:`` clause, runs its Jinja2 template with ``ctx`` and
-section-scoped helpers, and concatenates the rendered markdown into
-one document. ``run_pandoc(md, pdf)`` invokes pandoc + xelatex.
+section's ``when:`` clause, runs the section's chart (if any), then
+renders its Jinja2 template with ``ctx``, the chart path, and the
+computed data dict. ``run_pandoc(md, pdf)`` invokes pandoc + xelatex.
 """
 
 from __future__ import annotations
@@ -15,10 +15,12 @@ from pathlib import Path
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
+from . import charts as _charts
 from .context import ReportContext
 
 
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
+_DPI = 220
 
 
 def _env() -> Environment:
@@ -37,6 +39,35 @@ def _env() -> Environment:
     return env
 
 
+def _stamp_tag(fig, tag: str) -> None:
+    """Inject the figure-tag shorthand as a bottom-strip footer."""
+    if not tag:
+        return
+    fig.text(
+        0.5, 0.005, tag,
+        ha="center", va="bottom",
+        fontsize=6.5, color="#666",
+        family="monospace", alpha=0.85,
+    )
+
+
+def _run_charts_for_section(ctx: ReportContext, sec) -> tuple[Path | None, dict]:
+    """Compute + render a section's chart (if any). Returns (png_path, data_dict)."""
+    chart_name = sec.options.get("chart")
+    if not chart_name:
+        return None, {}
+    mod = _charts.get(chart_name)
+    data = mod.compute(ctx)
+    fig = mod.render(data, palette=ctx.palette)
+    _stamp_tag(fig, ctx.tag(sec.id))
+    path = ctx.assets_dir / f"{sec.id}.png"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=_DPI, bbox_inches="tight")
+    import matplotlib.pyplot as plt
+    plt.close(fig)
+    return path, data
+
+
 def render_report(ctx: ReportContext) -> str:
     """Return the assembled markdown for the entire report."""
     env = _env()
@@ -44,8 +75,14 @@ def render_report(ctx: ReportContext) -> str:
     for sec in ctx.config.sections:
         if not ctx.when_passes(sec):
             continue
+        chart_path, data = _run_charts_for_section(ctx, sec)
         template = env.get_template(sec.template)
-        rendered = template.render(ctx=ctx, section=sec, **sec.options)
+        rendered = template.render(
+            ctx=ctx, section=sec,
+            chart=str(chart_path) if chart_path else None,
+            data=data,
+            **{k: v for k, v in sec.options.items() if k != "chart"},
+        )
         parts.append(rendered)
         parts.append("\n\n\\newpage\n\n")
     if parts:

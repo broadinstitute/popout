@@ -1,0 +1,44 @@
+{# Cohort composition — FLARE primary ancestry, cohort + per-cluster. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Cohort composition
+
+**What this is.** The top bar treats every cluster as a single cohort:
+every sample's FLARE primary ancestry (argmax of its FLARE proportion
+vector) is named via `cohort/merged_groups_rf.tsv`, and the segments
+show the cohort-wide count per ancestry. The bottom strip is the same
+decomposition broken down by cluster · chrom, sorted by sample count,
+for readers who want to see how each cluster contributes.
+
+**How to read this.** Read the top bar first — that is the cohort's
+ancestral makeup as FLARE sees it. The cluster bars below show how
+evenly each ancestry is distributed across the clusters that built
+that cohort: roughly proportional widths means the cohort number is
+stable; lopsided cluster widths (one cluster holding most of an
+ancestry) means the cohort number is driven by that one cluster and
+downstream per-ancestry stats for it should be read with that in mind.
+
+{% if chart %}
+{{ figure(path=chart, caption="Cohort sample count per FLARE primary ancestry, with per-(cluster, chrom) decomposition.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/cohort_global.tsv`
+{% endif %}
+
+{%- if data.get("present") %}
+**In this run.**
+{%- set dom = data.dom %}
+{%- if dom %}
+Cohort is dominated by `{{ dom[0] }}` ({{ "{:,}".format(data.cohort_counts[dom[0]]) }} samples, {{ "%.1f"|format(dom[1] * 100) }}%)
+{%- set snd = data.snd %}
+{%- if snd %}; second is `{{ snd[0] }}` ({{ "{:,}".format(data.cohort_counts[snd[0]]) }}, {{ "%.1f"|format(snd[1] * 100) }}%){% endif %}.
+{%- endif %}
+
+{%- if data.divergent %}
+
+Clusters whose composition diverges &gt;2× from the cohort on some
+ancestry:
+{% for d in data.divergent[:6] %}
+- `{{ d.cluster }}·{{ d.chrom }}` `{{ d.rf_label }}` &nbsp; {{ "%.1f"|format(d.cluster_frac * 100) }}% vs cohort {{ "%.1f"|format(d.cohort_frac * 100) }}% &nbsp; ({{ "%.1f"|format(d.ratio) }}×){% endfor %}.
+{%- endif %}
+{%- endif %}
