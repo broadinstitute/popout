@@ -348,6 +348,12 @@ workflow flare_validate {
       docker_image = docker_image,
   }
 
+  # panel_id is String? in validate_cluster — we want it genuinely unset
+  # (not the empty string) when the config left it blank, otherwise the
+  # bash idiom ~{"--panel-id " + panel_id} expands to a bare flag with no
+  # value and argparse swallows the next --flag as the missing argument.
+  if (discover_runs.panel_id != "") { String panel_id_opt = discover_runs.panel_id }
+
   # Headerless TSV; column indices match
   # validation/scripts/discover_runs.py:TSV_COLUMNS exactly. Keep in sync.
   # The last two columns (rf_ancestry, chrom_sizes) are required-non-empty
@@ -384,7 +390,7 @@ workflow flare_validate {
         chrom_sizes             = row[14],
 
         run_name                = discover_runs.run_name,
-        panel_id                = discover_runs.panel_id,
+        panel_id                = panel_id_opt,
         schema_version          = discover_runs.schema_version,
 
         cpu_override            = cpu_override,
