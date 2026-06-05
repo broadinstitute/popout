@@ -43,6 +43,14 @@ EXPECTED_SCHEMA_VERSION = "4.0.0"
 
 # Headerless TSV column order. Indexes are referenced verbatim from the WDL
 # scatter body — keep them in sync with workflows/flare/wdl/flare_validate.wdl.
+#
+# Column-order invariant: the last two columns are the required-non-empty
+# cohort singletons (rf_ancestry, chrom_sizes). Cromwell's read_tsv() uses
+# Scala split("\t") which drops TRAILING empty fields — when a row's tail
+# is all empty (e.g. self_id, popout_secondary_*, ref_panel all unset), the
+# resulting Array[String] is shorter than TSV_COLUMNS and row[N] access
+# blows up. Putting two required-non-empty columns last guarantees the
+# array always has len(TSV_COLUMNS) entries.
 TSV_COLUMNS: tuple[str, ...] = (
     "cluster_id",               # 0
     "chrom",                    # 1
@@ -52,13 +60,13 @@ TSV_COLUMNS: tuple[str, ...] = (
     "flare_log",                # 5
     "flare_qc_tsv",             # 6  optional
     "input_vcf",                # 7
-    "rf_ancestry",              # 8  cohort singleton, repeated per row
-    "chrom_sizes",              # 9  cohort singleton, repeated per row
-    "rye_q",                    # 10 optional
-    "self_id",                  # 11 optional
-    "popout_secondary_global",  # 12 optional
-    "popout_secondary_labels",  # 13 optional
-    "ref_panel",                # 14 optional
+    "rye_q",                    # 8  optional
+    "self_id",                  # 9  optional
+    "popout_secondary_global",  # 10 optional
+    "popout_secondary_labels",  # 11 optional
+    "ref_panel",                # 12 optional
+    "rf_ancestry",              # 13 cohort singleton — required non-empty
+    "chrom_sizes",              # 14 cohort singleton — required non-empty (anchors the tail)
 )
 
 # Per-cluster_run fields the manifest-mode config must carry. Optional fields

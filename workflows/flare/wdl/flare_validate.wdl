@@ -350,17 +350,20 @@ workflow flare_validate {
 
   # Headerless TSV; column indices match
   # validation/scripts/discover_runs.py:TSV_COLUMNS exactly. Keep in sync.
+  # The last two columns (rf_ancestry, chrom_sizes) are required-non-empty
+  # so Cromwell's read_tsv() can't strip the row tail — see the
+  # column-order invariant note in discover_runs.py.
   Array[Array[String]] rows = read_tsv(discover_runs.runs_manifest_tsv)
 
   scatter (row in rows) {
     # WDL 1.0 has no None literal; the idiomatic way to lift a possibly-empty
     # String column into Optional[File] is a conditional declaration.
     if (row[6]  != "") { File flare_qc_tsv_opt          = row[6]  }
-    if (row[10] != "") { File rye_q_opt                 = row[10] }
-    if (row[11] != "") { File self_id_opt               = row[11] }
-    if (row[12] != "") { File popout_secondary_global_o = row[12] }
-    if (row[13] != "") { File popout_secondary_labels_o = row[13] }
-    if (row[14] != "") { File ref_panel_opt             = row[14] }
+    if (row[8]  != "") { File rye_q_opt                 = row[8]  }
+    if (row[9]  != "") { File self_id_opt               = row[9]  }
+    if (row[10] != "") { File popout_secondary_global_o = row[10] }
+    if (row[11] != "") { File popout_secondary_labels_o = row[11] }
+    if (row[12] != "") { File ref_panel_opt             = row[12] }
 
     call validate_cluster {
       input:
@@ -372,13 +375,13 @@ workflow flare_validate {
         flare_log               = row[5],
         flare_qc_tsv            = flare_qc_tsv_opt,
         input_vcf               = row[7],
-        rf_ancestry             = row[8],
-        chrom_sizes             = row[9],
         rye_q                   = rye_q_opt,
         self_id                 = self_id_opt,
         popout_secondary_global = popout_secondary_global_o,
         popout_secondary_labels = popout_secondary_labels_o,
         ref_panel               = ref_panel_opt,
+        rf_ancestry             = row[13],
+        chrom_sizes             = row[14],
 
         run_name                = discover_runs.run_name,
         panel_id                = discover_runs.panel_id,
