@@ -101,17 +101,51 @@ def _append_lines(path: Path, lines: list[str]) -> None:
 
 
 def collate_cohort_global(arts: list[ClusterArtifact], out_path: Path) -> None:
-    _write_header_once(out_path, "cluster_id\tchrom\tsample_id\tancestries")
-    # Replace placeholder header with a more honest one: column count varies
-    # per cluster, so the consumer must read the cluster's manifest to know K.
-    out_path.write_text("cluster_id\tchrom\tsample_id\tancestry_props_tab_separated\n")
-    with open(out_path, "a") as out:
-        for art in arts:
-            global_tsv = art.artifact_dir / "global.tsv"
-            with open(global_tsv) as f:
-                next(f)  # discard the popout-format header
-                for line in f:
-                    out.write(f"{art.cluster_id}\t{art.chrom}\t{line}")
+    """Concatenate per-cluster ``global.tsv`` into a cohort-wide file with
+    named-column header.
+
+    Schema v3.0.0+: the per-cluster ``global.tsv`` header carries the
+    FLARE panel-population names verbatim from the VCF ``##ANCESTRY=``
+    line (e.g. ``sample_id<TAB>eas<TAB>amr<TAB>eur<TAB>afr<TAB>sas``).
+    The cohort file echoes those names with a ``cluster_id<TAB>chrom``
+    prefix. All clusters in the cohort must share the same panel
+    columns in the same order — mismatch is a hard error (collator
+    cannot reconcile two panels into one wide table). v2 emitted a
+    single meta-header ``ancestry_props_tab_separated`` because v2
+    panel naming wasn't stable; v3 fixed naming, so cohort_global.tsv
+    can now carry the real schema.
+    """
+    if not arts:
+        return
+    panel_cols: list[str] | None = None
+    panel_source: tuple[str, str] | None = None
+    rows: list[str] = []
+    for art in arts:
+        global_tsv = art.artifact_dir / "global.tsv"
+        with open(global_tsv) as f:
+            header = f.readline().rstrip("\n").split("\t")
+            if not header or header[0] != "sample_id":
+                raise RuntimeError(
+                    f"{global_tsv}: first column must be 'sample_id', got "
+                    f"{header[0]!r} (header: {header!r})"
+                )
+            cols = header[1:]
+            if panel_cols is None:
+                panel_cols = cols
+                panel_source = (art.cluster_id, art.chrom)
+            elif cols != panel_cols:
+                src_cid, src_chrom = panel_source
+                raise RuntimeError(
+                    f"{global_tsv}: panel header {cols!r} disagrees with "
+                    f"cohort panel {panel_cols!r} from "
+                    f"{src_cid}/{src_chrom}/global.tsv — cohort_global.tsv "
+                    f"requires every cluster to share the same FLARE panel"
+                )
+            for line in f:
+                rows.append(f"{art.cluster_id}\t{art.chrom}\t{line.rstrip()}")
+
+    header_line = "cluster_id\tchrom\tsample_id\t" + "\t".join(panel_cols)
+    out_path.write_text(header_line + "\n" + "\n".join(rows) + "\n")
 
 
 def collate_coverage(arts: list[ClusterArtifact], out_path: Path) -> None:
