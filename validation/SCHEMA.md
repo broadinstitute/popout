@@ -142,7 +142,9 @@ Single JSON object. Written by the orchestrator. Keys:
 
 ### 1.1b `global.tsv`
 
-Popout-format per-sample ancestry table written by `flare_to_popout_format.py`. Columns: `sample_id<TAB>ancestry_0<TAB>...<TAB>ancestry_K-1`. K is the FLARE-final ancestry count for this cluster (typically 5). Copied verbatim to the artifact root by the orchestrator so the collator can build `cohort_global.tsv` without re-running the format conversion.
+Per-sample ancestry table written by `flare_to_popout_format.py`. **v3.0.0+ header:** `sample_id<TAB><panel_0><TAB>...<TAB><panel_{K-1}>` where `<panel_i>` are the FLARE panel-population names taken verbatim from the source VCF's `##ANCESTRY=` line (typically K=5 in FLARE-source artifacts: `eas`, `amr`, `eur`, `afr`, `sas`, in FLARE-emitted order). Copied verbatim to the artifact root by the orchestrator so the collator can build `cohort_global.tsv` without re-running the format conversion.
+
+v2.x emitted anonymous `ancestry_0<TAB>...<TAB>ancestry_K-1` columns; readers that need to handle both shapes can use `popout.estimates.loaders.read_flare_aggregated` which auto-detects the header.
 
 ### 1.2 `tier1_metrics.tsv`
 
@@ -442,7 +444,9 @@ All tables under `cohort/` are long-form with `cluster_id` and `chrom` as the fi
 
 #### `cohort_global.tsv`
 
-Per-sample. Columns: `cluster_id<TAB>chrom<TAB>sample_id<TAB>ancestry_0...<TAB>ancestry_K-1`. K per row may differ across clusters (FLARE K varies); use the cluster's `manifest.json` to interpret column count.
+Per-sample. **v3.0.0+ header:** `cluster_id<TAB>chrom<TAB>sample_id<TAB><panel_0><TAB>...<TAB><panel_{K-1}>` where `<panel_i>` are the FLARE panel-population names (echoed verbatim from each cluster's per-cluster `global.tsv` header). The collator requires every cluster in the cohort to share the same panel columns in the same order; mismatch is a hard error (one wide cohort table cannot reconcile two panel orderings).
+
+v2.x emitted a single meta-header `cluster_id<TAB>chrom<TAB>sample_id<TAB>ancestry_props_tab_separated` because v2 panel naming wasn't stable across clusters; v3 fixed that. Consumers reading by column **position** (e.g. `cohort_composition.compute`'s `r[col["sample_id"] + 1 :]`) work on both shapes; consumers reading by column **name** require v3 or later.
 
 #### `coverage.tsv`
 
