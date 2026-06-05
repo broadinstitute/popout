@@ -1,9 +1,15 @@
 # FLARE validation artifact schema
 
-Schema version: **3.0.0** (semver — bump on any layout change)
+Schema version: **4.0.0** (semver — bump on any layout change)
 
 ## Version history
 
+- **4.0.0** — `flare_validate.wdl` input contract refactor. **Breaking input surface only; on-disk artifact layout unchanged from v3.0.0.**
+  - The workflow now takes a single `File config_file` (Cromwell-localized JSON manifest) instead of the `Array[FlareClusterRun] cluster_runs` struct array. A new `discover_runs` task opens the localized config and emits a headerless TSV consumed by `read_tsv()`; cohort-singleton URIs (`rf_ancestry`, `chrom_sizes`, `rye_q`, `self_id`, `popout_secondary_*`, `ref_panel`) live in the config under a `shared` block and are repeated per row in the TSV so Cromwell auto-localizes them at scatter call sites via String -> File coercion.
+  - `collation_config` and `previous_cohort_bundle` also move under `config.shared`; `discover_runs` echoes them as `read_string()`-able sidecar files that the workflow conditionally coerces to `File?`.
+  - Discovery mode `"manifest"` only in v4.0.0 (config carries the full `cluster_runs` list inline). Mode `"walk"` (walk a `gs://flare_pipeline` output root) is reserved for v4.1.
+  - Per-cluster artifact tarball (§1) and cohort bundle (§2) layouts are byte-identical to v3.0.0; only the WDL surface and the `SCHEMA_VERSION` constant move.
+  - See `validation/scripts/discover_runs.py` for the config schema and `workflows/flare/wdl/flare_validate.wdl` for the new scatter shape.
 - **3.0.0** — Phase 6 of the label-space + reporting retrofit. **Breaking.**
   - `global.tsv` (both per-cluster and `cohort/cohort_global.tsv`) header carries the FLARE panel-population names taken verbatim from the FLARE VCF `##ANCESTRY=` line (`sample_id<TAB>afr<TAB>amr<TAB>eas<TAB>eur<TAB>sas`). v2 emitted anonymous `ancestry_0..K-1`.
   - `soft_correlation/labels.json` is now produced via `popout.labelspace.matching.by_name` against SP5 (deterministic 1-to-1). v2 went through `postS` (posterior-correlation + slope), which invented fake subancestries like `afr.1, afr.2` whenever two FLARE components correlated strongest with the same RF label. `compare_to_rf.py` now takes `--matching {postS,by_name}`; the FLARE orchestrator (`run_cluster_validation.py` step 4) passes `by_name`. Popout DX keeps `postS`.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Build the flare_validate.wdl inputs from a completed flare_pipeline
-miniwdl run on the synthetic_flare dataset.
+"""Build the flare_validate.wdl v4.0.0 inputs pair from a completed
+flare_pipeline miniwdl run on the synthetic_flare dataset.
 
 Two-step flow:
   1. Run flare_pipeline against the synthetic dataset (see
@@ -8,7 +8,8 @@ Two-step flow:
      FLARE outputs in miniwdl's call tree.
   2. Run this script on the resulting run dir. It walks the call tree,
      pairs each (cluster_id, chrom) with its FLARE outputs + Stage A
-     input VCF, and emits an inputs.json for flare_validate.wdl.
+     input VCF, and emits a v4.0.0 config JSON plus the 3-key inputs JSON
+     the WDL consumes.
 
 The validate WDL is then driven with:
 
@@ -22,7 +23,8 @@ Usage:
         --pipeline-run-dir /tmp/miniwdl_flare_smoke/<run-id> \\
         --rf-ancestry data/synthetic_flare/rf_ancestry.tsv \\
         --chrom-sizes validation/data/grch38.chrom.sizes \\
-        --out workflows/flare/tests/synthetic_flare_validate_inputs.json
+        --config-out workflows/flare/tests/synthetic_flare_validate_config.json \\
+        --inputs-out workflows/flare/tests/synthetic_flare_validate_inputs.json
 """
 
 from __future__ import annotations
@@ -146,10 +148,11 @@ def main() -> int:
     ap.add_argument("--rf-ancestry", type=Path, required=True,
                     help="RF ancestry predictions TSV (synthetic or real)")
     ap.add_argument("--chrom-sizes", type=Path, required=True)
-    ap.add_argument("--out", type=Path, required=True,
-                    help="Output inputs.json for flare_validate.wdl")
+    ap.add_argument("--config-out", type=Path, required=True,
+                    help="Output path for the v4.0.0 config JSON the WDL discover_runs reads")
+    ap.add_argument("--inputs-out", type=Path, required=True,
+                    help="Output path for the 3-key Cromwell inputs JSON pointing at --config-out")
     ap.add_argument("--run-name", default="synthetic_flare_validate")
-    ap.add_argument("--schema-version", default="1.0.0")
     ap.add_argument("--docker-image", default=None,
                     help="Optional override; otherwise the WDL's default lai-tools:latest is used")
     args = ap.parse_args()
@@ -176,30 +179,55 @@ def main() -> int:
     cluster_runs = []
     for r in rows:
         cluster_runs.append({
-            "cluster_id":  r["cluster_id"],
-            "chrom":       r["chrom"],
-            "anc_vcf":     r["anc_vcf"],
-            "global_anc":  r["global_anc"],
-            "flare_model": r["flare_model"],
-            "flare_log":   r["flare_log"],
+            "cluster_id":   r["cluster_id"],
+            "chrom":        r["chrom"],
+            "anc_vcf":      r["anc_vcf"],
+            "global_anc":   r["global_anc"],
+            "flare_model":  r["flare_model"],
+            "flare_log":    r["flare_log"],
             "flare_qc_tsv": r["flare_qc_tsv"],
-            "input_vcf":   r["input_vcf"],
+            "input_vcf":    r["input_vcf"],
         })
 
-    payload: dict = {
-        "flare_validate.cluster_runs":   cluster_runs,
-        "flare_validate.rf_ancestry":    str(args.rf_ancestry.resolve()),
-        "flare_validate.chrom_sizes":    str(args.chrom_sizes.resolve()),
-        "flare_validate.run_name":       args.run_name,
-        "flare_validate.schema_version": args.schema_version,
+    config: dict = {
+        "schema_version": "4.0.0",
+        "run_name":       args.run_name,
+        "panel_id":       "",
+        "mid_rule":       "none",
+        "discovery": {
+            "mode":         "manifest",
+            "cluster_runs": cluster_runs,
+        },
+        "clusters": ["cluster_*", "null_cluster_*"],
+        "chroms":   ["chr*"],
+        "shared": {
+            "rf_ancestry":             str(args.rf_ancestry.resolve()),
+            "chrom_sizes":             str(args.chrom_sizes.resolve()),
+            "rye_q":                   "",
+            "self_id":                 "",
+            "popout_secondary_global": "",
+            "popout_secondary_labels": "",
+            "ref_panel":               "",
+            "collation_config":        "",
+            "previous_cohort_bundle":  "",
+        },
+    }
+
+    args.config_out.parent.mkdir(parents=True, exist_ok=True)
+    args.config_out.write_text(json.dumps(config, indent=2) + "\n")
+    print(f"\nwrote {args.config_out} ({len(cluster_runs)} cluster_run(s))", file=sys.stderr)
+
+    inputs: dict = {
+        "flare_validate.config_file": str(args.config_out.resolve()),
     }
     if args.docker_image:
-        payload["flare_validate.docker_image"] = args.docker_image
+        inputs["flare_validate.docker_image"] = args.docker_image
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(payload, indent=2) + "\n")
-    print(f"\nwrote {args.out} ({len(cluster_runs)} cluster_run(s))", file=sys.stderr)
-    print(f"\nRun: miniwdl run workflows/flare/wdl/flare_validate.wdl -i {args.out}", file=sys.stderr)
+    args.inputs_out.parent.mkdir(parents=True, exist_ok=True)
+    args.inputs_out.write_text(json.dumps(inputs, indent=2) + "\n")
+    print(f"wrote {args.inputs_out}", file=sys.stderr)
+    print(f"\nRun: miniwdl run workflows/flare/wdl/flare_validate.wdl -i {args.inputs_out}",
+          file=sys.stderr)
     return 0
 
 

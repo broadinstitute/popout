@@ -25,7 +25,20 @@ from pathlib import Path
 from typing import Iterable
 
 
-SCHEMA_VERSION = "3.0.0"
+SCHEMA_VERSION = "4.0.0"
+#
+# v4.0.0 — flare_validate WDL input contract refactor.
+#
+#   - The workflow now takes a single ``File config_file`` (Cromwell
+#     localizes it from gs://) instead of an ``Array[FlareClusterRun]``
+#     struct array. A new ``discover_runs`` task opens the localized
+#     config and emits a headerless TSV that the scatter consumes via
+#     ``read_tsv()``; cohort-singleton URIs are repeated per row and
+#     get auto-localized at scatter call sites via String -> File coercion.
+#   - The per-cluster artifact tarball layout and the cohort bundle
+#     layout are UNCHANGED from v3.0.0; only the WDL surface moves.
+#   - See validation/scripts/discover_runs.py for the config schema and
+#     workflows/flare/wdl/flare_validate.wdl for the new scatter shape.
 #
 # v3.0.0 — Phase 6 of the label-space + reporting retrofit.
 #
