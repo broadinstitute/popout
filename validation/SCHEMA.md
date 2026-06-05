@@ -1,9 +1,15 @@
 # FLARE validation artifact schema
 
-Schema version: **2.0.0** (semver — bump on any layout change)
+Schema version: **3.0.0** (semver — bump on any layout change)
 
 ## Version history
 
+- **3.0.0** — Phase 6 of the label-space + reporting retrofit. **Breaking.**
+  - `global.tsv` (both per-cluster and `cohort/cohort_global.tsv`) header carries the FLARE panel-population names taken verbatim from the FLARE VCF `##ANCESTRY=` line (`sample_id<TAB>afr<TAB>amr<TAB>eas<TAB>eur<TAB>sas`). v2 emitted anonymous `ancestry_0..K-1`.
+  - `soft_correlation/labels.json` is now produced via `popout.labelspace.matching.by_name` against SP5 (deterministic 1-to-1). v2 went through `postS` (posterior-correlation + slope), which invented fake subancestries like `afr.1, afr.2` whenever two FLARE components correlated strongest with the same RF label. `compare_to_rf.py` now takes `--matching {postS,by_name}`; the FLARE orchestrator (`run_cluster_validation.py` step 4) passes `by_name`. Popout DX keeps `postS`.
+  - `cohort/confusion_rf.tsv` collapses the RF MID column according to the cohort's `--mid-rule` (`none`/`drop`/`fold_to_eur`). The rule is recorded in `cohort_manifest.json.provenance.mid_rule`.
+  - `cohort_manifest.json` gains a `provenance` block carrying the figure-shorthand tag, target space, MID rule, matching dict, thresholds, schema version actually built, and a transformations list. See `my_notes/validation/COLLECTOR_FIXES.md` §3.
+  - `validation/scripts/flare_to_popout_format.py` survives by name (the historical "popout-format" naming is just legacy) but now preserves the FLARE panel names in its emitted `global.tsv` header.
 - **2.0.0** — Mothball R6 ref/target site-concordance audit. The check was a panel-validation question, not a FLARE-output question — running it on every (cluster, chrom) was redundant once FLARE has emitted a usable .anc.vcf.gz. Removed files: `provenance/ref_target_concordance.{tsv,json}` (per-cluster) and `cohort/ref_target_concordance.tsv`. Removed Tier-1 row: `flare_validate.ref_target_exact_overlap_pct`. Removed dashboard dimension: `ref_target_concordance`. The script and baseline meta are preserved under `validation/scripts/_mothballed/panel_validation/` for a future standalone panel-validation pipeline.
 - **1.1.0** — Adopt "Rye" naming (was ADMIXTURE); admixture_q optional gate renamed to `rye_q`. Add R6 ref/target concordance audit (`provenance/ref_target_concordance.{tsv,json}`). Expand R10 concordance (`concordance/concordance_metrics.tsv`, `concordance/concordance_summary.json`, `concordance/rye_*` family) with Pearson/CCC/cosine/MAE/Jaccard@τ per ancestry. Add three Tier-1 metrics (`global_ccc`, `ccc_<label>`, `ref_target_exact_overlap_pct`). Cohort bundle gains `cohort/concordance_metrics.tsv` and `cohort/ref_target_concordance.tsv`.
 - **1.0.0** — Initial schema.

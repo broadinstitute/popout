@@ -119,16 +119,22 @@ def parse_wallclock(s: str) -> float:
 def write_popout_global(flare_global: Path, out_path: Path) -> tuple[list[str], int]:
     """Rewrite FLARE's global.anc.gz as a plain popout-style global.tsv.
 
-    Popout's global.tsv header is ``sample_id<TAB>ancestry_0<TAB>...``.
-    FLARE's is ``SAMPLE<TAB>eas<TAB>amr<TAB>...``.  The downstream
-    compare_to_rf.py infers popout_to_rf_label from the *correlations*
-    with the RF classifier, not from column names, so we keep the K=5 FLARE
-    ordering and the first column as ``sample_id``.
+    **Schema v3.0.0:** the FLARE panel-population names declared in the
+    ``##ANCESTRY=`` VCF header (already echoed into the ``global.anc.gz``
+    header as ``SAMPLE<TAB>eas<TAB>amr<TAB>...``) are preserved verbatim.
+    Pre-v3 bundles used anonymous ``ancestry_0..K-1`` columns and had to
+    re-derive the names downstream via posterior correlation —
+    ``popout.labelspace.matching.posterior_slope`` (``postS``) — which
+    invented fake subancestries like ``afr.1, afr.2`` when two FLARE
+    components correlated strongest with the same RF label.
+
+    ``popout.estimates.loaders.read_flare_aggregated`` accepts both the
+    anonymous (legacy) and named (v3) shapes during cutover.
     """
     with gzip.open(flare_global, "rt") as f, open(out_path, "w") as g:
         header = f.readline().strip().split("\t")
         ancestries = header[1:]
-        g.write("sample_id\t" + "\t".join(f"ancestry_{i}" for i in range(len(ancestries))) + "\n")
+        g.write("sample_id\t" + "\t".join(ancestries) + "\n")
         n = 0
         for line in f:
             g.write(line)

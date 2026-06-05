@@ -25,7 +25,25 @@ from pathlib import Path
 from typing import Iterable
 
 
-SCHEMA_VERSION = "2.0.0"
+SCHEMA_VERSION = "3.0.0"
+#
+# v3.0.0 — Phase 6 of the label-space + reporting retrofit.
+#
+#   - global.tsv (per-cluster and cohort) carries FLARE panel-population
+#     names (afr/amr/eas/eur/sas) instead of ``ancestry_0..K-1``. The
+#     names come verbatim from the FLARE VCF ``##ANCESTRY=`` header.
+#   - soft_correlation/labels.json uses
+#     popout.labelspace.matching.by_name (1-to-1 with SP6); no more
+#     postS-derived ``afr.1, afr.2`` subancestries.
+#   - cohort/confusion_rf.tsv collapses RF MID per the cohort's
+#     ``--mid-rule`` (``none`` / ``drop`` / ``fold_to_eur``); the rule
+#     is recorded in cohort_manifest.json.provenance.mid_rule.
+#   - cohort_manifest.json carries a ``provenance`` block with the
+#     figure-shorthand tag, target_space, mid_rule, matching dict,
+#     thresholds, and transformations list — see
+#     my_notes/validation/COLLECTOR_FIXES.md §3.
+#
+# v2.0.0 — mothballed R6 ref/target concordance.
 
 
 # ── Per-cluster artifact layout ───────────────────────────────────────────

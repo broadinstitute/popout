@@ -327,13 +327,24 @@ def step_coverage(args, ws: Workspace, log_dir: Path) -> None:
 
 
 def step_compare_to_rf(args, ws: Workspace, log_dir: Path) -> None:
-    """Step 4: compare_to_rf.py — writes labels.json + concordance summary."""
+    """Step 4: compare_to_rf.py — writes labels.json + concordance summary.
+
+    **Schema v3.0.0:** this orchestrator is the FLARE validation
+    pipeline (every cluster's inputs are FLARE outputs), and v3
+    ``global.tsv`` carries the panel-population names from the
+    ``##ANCESTRY=`` VCF header. ``--matching by_name`` runs
+    ``popout.labelspace.matching.by_name`` against SP6, which is
+    deterministic and one-to-one (no fake subancestries like
+    ``afr.1, afr.2`` from posterior correlation). Popout DX runs
+    use its own orchestrator, where postS remains the right choice.
+    """
     scratch = ws.scratch_root / "compare_to_rf"
     scratch.mkdir(parents=True, exist_ok=True)
     rc = _run_subprocess(
         [sys.executable, str(SCRIPTS_DIR / "compare_to_rf.py"),
          "--popout-global", str(ws.intermediates["global_tsv"]),
          "--rf-ancestry", str(args.rf_ancestry),
+         "--matching", "by_name",
          "--out-dir", str(scratch)],
         log_dir / "04_compare_to_rf.log", step_name="compare_to_rf",
     )

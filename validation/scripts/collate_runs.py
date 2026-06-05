@@ -200,8 +200,47 @@ def collate_concordance_metrics(arts: list[ClusterArtifact], out_path: Path) -> 
     return any_present
 
 
-def collate_confusion_rf(arts: list[ClusterArtifact], out_path: Path) -> None:
-    """Unpivot the wide rf_confusion_matrix.tsv into long (cluster, rf_label, flare_call, n)."""
+def _apply_mid_rule(
+    cluster_id: str, chrom: str,
+    popout_names: list[str], rf_counts: dict[str, list[int]],
+    *, mid_rule: str,
+) -> list[str]:
+    """Apply the MID-handling rule to one cluster's confusion rows.
+
+    ``rf_counts`` is ``{rf_label: [n_per_flare_call, ...]}``. Returns
+    the long-form TSV rows for this cluster (one per (rf_label,
+    flare_call) cell).
+    """
+    if mid_rule == "drop":
+        rf_counts = {k: v for k, v in rf_counts.items() if k != "mid"}
+    elif mid_rule == "fold_to_eur":
+        mid = rf_counts.pop("mid", None)
+        if mid is not None:
+            eur = rf_counts.setdefault("eur", [0] * len(popout_names))
+            for j in range(len(eur)):
+                eur[j] = (eur[j] if j < len(eur) else 0) + (mid[j] if j < len(mid) else 0)
+    elif mid_rule != "none":
+        raise ValueError(f"unknown mid_rule {mid_rule!r}")
+
+    rows = []
+    for rf_label, vec in rf_counts.items():
+        for j, name in enumerate(popout_names):
+            n = vec[j] if j < len(vec) else 0
+            rows.append(f"{cluster_id}\t{chrom}\t{rf_label}\t{name}\t{n}")
+    return rows
+
+
+def collate_confusion_rf(
+    arts: list[ClusterArtifact], out_path: Path, *, mid_rule: str = "none",
+) -> None:
+    """Unpivot the wide rf_confusion_matrix.tsv into long (cluster, rf_label, flare_call, n).
+
+    ``mid_rule`` (Phase 6 of the label-space retrofit) selects the
+    RF-side MID handling rule. ``none`` passes MID rows through;
+    ``drop`` removes them; ``fold_to_eur`` sums MID counts into the
+    EUR row per (cluster, chrom, flare_call). The chosen rule is
+    recorded in ``cohort_manifest.json.provenance.mid_rule``.
+    """
     _write_header_once(out_path, "cluster_id\tchrom\trf_label\tflare_call\tn")
     for art in arts:
         src = art.artifact_dir / "confusion" / "rf_confusion_matrix.tsv"
@@ -209,15 +248,23 @@ def collate_confusion_rf(arts: list[ClusterArtifact], out_path: Path) -> None:
             header = f.readline().rstrip("\n").split("\t")
             # header[0] = "rf_label", header[1..-1] = popout ancestry names, header[-1] = "total"
             popout_names = header[1:-1]
-            rows = []
+            rf_counts: dict[str, list[int]] = {}
             for line in f:
                 parts = line.rstrip("\n").split("\t")
                 rf_label = parts[0]
                 if rf_label == "total":
                     continue
-                for idx, name in enumerate(popout_names):
-                    n = parts[1 + idx]
-                    rows.append(f"{art.cluster_id}\t{art.chrom}\t{rf_label}\t{name}\t{n}")
+                vec = []
+                for idx in range(len(popout_names)):
+                    try:
+                        vec.append(int(parts[1 + idx]))
+                    except (IndexError, ValueError):
+                        vec.append(0)
+                rf_counts[rf_label] = vec
+        rows = _apply_mid_rule(
+            art.cluster_id, art.chrom, popout_names, rf_counts,
+            mid_rule=mid_rule,
+        )
         _append_lines(out_path, rows)
 
 
@@ -696,10 +743,63 @@ def stage_per_cluster_copies(arts: list[ClusterArtifact], bundle_root: Path) -> 
         shutil.copytree(a.artifact_dir, dst)
 
 
+def _build_provenance_block(
+    *, mid_rule: str, thresholds: dict, generated_at: str,
+) -> dict:
+    """Build the cohort_manifest.json ``provenance`` block (v3.0.0+).
+
+    Records the transformations the collator baked into the bundle so
+    the report (and downstream consumers) can render a faithful
+    figure-shorthand tag without re-deriving anything. See
+    ``my_notes/validation/COLLECTOR_FIXES.md`` §3.
+    """
+    from popout.labelspace.shorthand import format as _format_tag
+    from popout.labelspace.matching import by_name as _by_name
+    from popout.labelspace.registry import SP5, SP6
+
+    # v3.0.0 FLARE bundle: labels.json is built via by_name → SP5
+    # (MID isn't a FLARE panel population; only RF has MID). Tag the
+    # cohort accordingly. SP5 is the target space; mid_rule names how
+    # RF's MID column was handled on the RF side.
+    flare_panel = SP5.members
+    rf_panel = SP6.members
+    flare_assignment = _by_name(flare_panel, SP5, source={"tool": "flare"})
+    rf_assignment = _by_name(rf_panel, SP5, source={"tool": "rf"})
+    tag = _format_tag(SP5, [flare_assignment, rf_assignment], mid_rule=mid_rule)
+
+    transformations: list[dict] = [
+        {"step": "flare_to_estimate",
+         "input_format": "flare_global_anc_named_columns",
+         "output_format": "popout_format_global_tsv"},
+        {"step": "labels_via_by_name",
+         "matching": "by_name",
+         "target_space": "SP5"},
+    ]
+    if mid_rule in ("drop", "fold_to_eur"):
+        transformations.append({
+            "step": "mid_rule",
+            "rule": mid_rule,
+            "applied_to": "cohort/confusion_rf.tsv",
+        })
+
+    return {
+        "tag": tag,
+        "target_space": "SP5",
+        "mid_rule": mid_rule,
+        "matching": {"flare": "by_name", "rf": "by_name"},
+        "thresholds": dict(thresholds),
+        "schema_version_built": SCHEMA_VERSION,
+        "transformations": transformations,
+        "generated_at": generated_at,
+    }
+
+
 def write_cohort_manifest(
     arts: list[ClusterArtifact], bundle_root: Path, *,
-    run_name: str, collation_mode: str, collation_config: dict, diff_against: str | None,
+    run_name: str, collation_mode: str, collation_config: dict,
+    diff_against: str | None, mid_rule: str, thresholds: dict,
 ) -> dict:
+    generated_at = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "run_name": run_name,
@@ -709,10 +809,15 @@ def write_cohort_manifest(
         "n_artifacts": len(arts),
         "cluster_ids": sorted({a.cluster_id for a in arts}),
         "chroms": sorted({a.chrom for a in arts}),
-        "generated_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": generated_at,
         "sha256_per_artifact": {f"{a.cluster_id}.{a.chrom}": a.sha256 for a in arts},
         "diff_against": diff_against,
         "collation_config": collation_config,
+        "provenance": _build_provenance_block(
+            mid_rule=mid_rule,
+            thresholds=thresholds,
+            generated_at=generated_at,
+        ),
     }
     (bundle_root / "cohort_manifest.json").write_text(json.dumps(manifest, indent=2))
     return manifest
@@ -740,6 +845,18 @@ def main() -> int:
     p.add_argument("--out-summary", type=Path, required=True)
     p.add_argument("--staging-dir", type=Path, default=None,
                    help="Working dir for unpacked artifacts; default = <out-bundle>.work/")
+    p.add_argument(
+        "--mid-rule", choices=("none", "drop", "fold_to_eur"), default="none",
+        help=(
+            "How to handle the RF MID column when collating "
+            "cohort/confusion_rf.tsv. FLARE's panel has no MID component "
+            "(SP5); RF emits SP6 including MID. ``none`` (default) keeps "
+            "MID rows as-is, ``drop`` removes them, ``fold_to_eur`` sums "
+            "MID counts into the EUR row. The chosen rule is recorded in "
+            "cohort_manifest.json.provenance.mid_rule and surfaces in "
+            "every figure footer's shorthand tag."
+        ),
+    )
     args = p.parse_args()
 
     if args.schema_version != SCHEMA_VERSION:
@@ -805,7 +922,8 @@ def main() -> int:
     # ★ v1.1: Rye concordance metrics (optional, gated on rye_q per cluster).
     has_rye = collate_concordance_metrics(
         arts,                              cohort_dir / "concordance_metrics.tsv")
-    collate_confusion_rf(arts,            cohort_dir / "confusion_rf.tsv")
+    collate_confusion_rf(arts,            cohort_dir / "confusion_rf.tsv",
+                         mid_rule=args.mid_rule)
     collate_calibration_slope(arts,       cohort_dir / "calibration_slope.tsv")
     collate_tract_length_stats(arts,      cohort_dir / "tract_length_stats.tsv")
     collate_switch_rate_stats(arts,       cohort_dir / "switch_rate_stats.tsv")
@@ -829,10 +947,14 @@ def main() -> int:
     stage_per_cluster_copies(arts, bundle_root)
 
     _phase("writing cohort_manifest.json")
-    write_cohort_manifest(arts, bundle_root,
-                          run_name=args.run_name, collation_mode=collation_mode,
-                          collation_config=config,
-                          diff_against=str(args.diff_against) if args.diff_against else None)
+    write_cohort_manifest(
+        arts, bundle_root,
+        run_name=args.run_name, collation_mode=collation_mode,
+        collation_config=config,
+        diff_against=str(args.diff_against) if args.diff_against else None,
+        mid_rule=args.mid_rule,
+        thresholds=thresholds,
+    )
 
     _phase("validating bundle against cohort schema")
     issues = validate_cohort_bundle(bundle_root)

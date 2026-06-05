@@ -67,6 +67,19 @@ parser.add_argument("--popout-spectral", type=Path, default=None,
                     help="Path to popout's .spectral.npz (optional; falls back to RF pca_features)")
 parser.add_argument("--out-dir", type=Path, required=True,
                     help="Output directory for results")
+parser.add_argument(
+    "--matching", choices=("postS", "by_name"), default="postS",
+    help=(
+        "Algorithm that maps tool components → SP6 RF labels. "
+        "`postS` (default) is the legacy posterior-correlation + "
+        "calibration-slope rule from popout.labelspace.matching; use it "
+        "for popout DX where components are unnamed. `by_name` trusts "
+        "the input ``global.tsv`` header verbatim and runs "
+        "``popout.labelspace.matching.by_name`` against SP6 — use it "
+        "for FLARE (v3+) bundles, where the panel-population names from "
+        "the ``##ANCESTRY=`` VCF header are the source of truth."
+    ),
+)
 args = parser.parse_args()
 args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -218,49 +231,89 @@ rf_hard_calls = np.array(rf_hard_calls_list)
 print(f"  Aligned {n:,} samples")
 
 
-# ── Compute correlation and popout ancestry names ────────────────────────
+# ── Pearson correlation between popout components and RF prob columns ────
 #
-# Routed through popout.labelspace.matching.posterior_slope (Phase 2 of the
-# label-space retrofit). The slope threshold (-0.05) and binning params
-# match the legacy values pinned in the Phase-0 golden.
+# Always computed: feeds the soft_correlation.tsv diagnostic regardless
+# of which matching algorithm is used to label components.
+
+corr = np.zeros((n_popout_anc, n_rf_labels), dtype=np.float64)
+for pa in range(n_popout_anc):
+    for ri in range(n_rf_labels):
+        a = popout_mat[:, pa]
+        b = rf_prob_matrix[:, ri]
+        if a.std() < 1e-12 or b.std() < 1e-12:
+            corr[pa, ri] = 0.0
+        else:
+            corr[pa, ri] = float(np.corrcoef(a, b)[0, 1])
+
+
+# ── Build the Assignment (component → SP6 label) ─────────────────────────
+#
+# Two methods, selectable via --matching:
+#
+#   - postS (default): popout.labelspace.matching.posterior_slope —
+#     posterior-correlation + calibration-slope override. Use when the
+#     tool's components are unnamed (popout DX). Adds correlations /
+#     slope_matrix / max_cal_matrix / overrides to ``diagnostics``.
+#
+#   - by_name: popout.labelspace.matching.by_name — exact-name match
+#     against SP6. Use for FLARE v3+ where the input ``global.tsv``
+#     header already carries the FLARE panel-population names from the
+#     ``##ANCESTRY=`` VCF header (see Phase 6 of the label-space
+#     retrofit and validation/SCHEMA.md).
 from popout.labelspace import get as _ls_get
-from popout.labelspace.matching import posterior_slope as _posterior_slope
-
-_assignment = _posterior_slope(
-    popout_mat, rf_prob_matrix, _ls_get("SP6"),
-    source={"tool": TOOL},
+from popout.labelspace.matching import (
+    by_name as _by_name,
+    posterior_slope as _posterior_slope,
 )
-corr = np.array(_assignment.diagnostics["correlations"])
-slope_matrix = np.array(
-    [[np.nan if v is None else v for v in row]
-     for row in _assignment.diagnostics["slope_matrix"]]
-)
-max_cal_matrix = np.array(
-    [[np.nan if v is None else v for v in row]
-     for row in _assignment.diagnostics["max_cal_matrix"]]
-)
-popout_to_rf_label = dict(_assignment.component_to_label)
-overrides = [
-    (o["component"], o["from_label"], o["to_label"], o["from_slope"], o["to_slope"])
-    for o in _assignment.diagnostics["overrides"]
-]
-
-if overrides:
-    print(f"\nSlope-based label overrides:")
-    for pa, old, new, old_slope, new_slope in overrides:
-        print(f"  ancestry {pa}: {old} (slope={old_slope:+.3f}) → "
-              f"{new} (slope={new_slope:+.3f})")
-
-# Disambiguated names: 1-based dense rank by descending correlation
-# (afr.1, afr.2, ...). Phase 3 of the label-space retrofit replaces the
-# legacy global-index naming (afr.0, afr.5) with the stable rule from
-# popout.labelspace.naming.
 from popout.labelspace.naming import ordered_subcomponent_names as _osc_names
-popout_names = _osc_names(
-    popout_to_rf_label,
-    correlations=corr.tolist(),
-    target_members=rf_ref_labels,
-)
+
+if args.matching == "postS":
+    _assignment = _posterior_slope(
+        popout_mat, rf_prob_matrix, _ls_get("SP6"),
+        source={"tool": TOOL},
+    )
+    slope_matrix = np.array(
+        [[np.nan if v is None else v for v in row]
+         for row in _assignment.diagnostics["slope_matrix"]]
+    )
+    max_cal_matrix = np.array(
+        [[np.nan if v is None else v for v in row]
+         for row in _assignment.diagnostics["max_cal_matrix"]]
+    )
+    overrides = [
+        (o["component"], o["from_label"], o["to_label"],
+         o["from_slope"], o["to_slope"])
+        for o in _assignment.diagnostics["overrides"]
+    ]
+    popout_to_rf_label = dict(_assignment.component_to_label)
+    popout_names = _osc_names(
+        popout_to_rf_label,
+        correlations=corr.tolist(),
+        target_members=rf_ref_labels,
+    )
+
+    if overrides:
+        print(f"\nSlope-based label overrides:")
+        for pa, old, new, old_slope, new_slope in overrides:
+            print(f"  ancestry {pa}: {old} (slope={old_slope:+.3f}) → "
+                  f"{new} (slope={new_slope:+.3f})")
+elif args.matching == "by_name":
+    # Trust the input header verbatim. ``popout_anc_cols`` was read off
+    # the popout/FLARE global.tsv header — for FLARE v3+ these are the
+    # panel-population names (afr/amr/eas/eur/sas) declared in the VCF.
+    _assignment = _by_name(
+        popout_anc_cols, _ls_get("SP6"),
+        source={"tool": TOOL},
+    )
+    _assignment.diagnostics["correlations"] = corr.tolist()
+    _assignment.diagnostics["matching"] = "by_name"
+    slope_matrix = None
+    max_cal_matrix = None
+    popout_to_rf_label = dict(_assignment.component_to_label)
+    popout_names = list(popout_anc_cols)
+else:
+    raise RuntimeError(f"unknown --matching {args.matching!r}")
 print(f"\n{TOOL} ancestry names: {popout_names}")
 
 # RF label → list of popout ancestry indices (sorted by r against that label)
