@@ -43,7 +43,7 @@ task validate_cluster {
 
     String run_name                # magicwand run-name prefix
     String? panel_id
-    String schema_version = "2.0.0"   # ★ v2.0.0 (R6 mothballed)
+    String schema_version = "3.0.0"   # ★ v3.0.0 (Phase 6 label-space retrofit)
 
     # Resource overrides (auto-scaled by anc_vcf size by default).
     Int?     cpu_override
@@ -194,7 +194,16 @@ task collate_cohort {
     File?       collation_config
     File?       previous_cohort_bundle    # cohort bundle to diff against
     String      run_name
-    String      schema_version = "2.0.0"     # ★ v2.0.0 (R6 mothballed)
+    String      schema_version = "3.0.0"     # ★ v3.0.0 (Phase 6 label-space retrofit)
+
+    # MID-handling rule for cohort/confusion_rf.tsv (Phase 6). FLARE's
+    # panel has no MID component; RF emits SP6 including MID. Pick:
+    #   "none"        — pass-through (legacy v2 behavior)
+    #   "drop"        — drop every RF-MID row from the cohort confusion
+    #   "fold_to_eur" — sum MID counts into the EUR row per cluster
+    # The chosen rule is recorded in cohort_manifest.json.provenance.mid_rule
+    # and surfaces in every figure footer's shorthand tag.
+    String      mid_rule       = "none"
 
     Int     cpu          = 4
     String  memory       = "16 GB"
@@ -222,13 +231,15 @@ task collate_cohort {
     magicwand log \
       flare_collate.run_name="~{run_name}" \
       flare_collate.n_artifacts="~{length(cluster_artifacts)}" \
-      flare_collate.schema_version="~{schema_version}"
+      flare_collate.schema_version="~{schema_version}" \
+      flare_collate.mid_rule="~{mid_rule}"
 
     python3 /opt/validation/scripts/collate_runs.py \
       --cluster-artifacts ~{sep=" " cluster_artifacts} \
       ~{"--collation-config " + collation_config} \
       ~{"--diff-against "     + previous_cohort_bundle} \
       --schema-version    ~{schema_version} \
+      --mid-rule          ~{mid_rule} \
       --run-name          ~{run_name} \
       --out-bundle        ~{out_bundle} \
       --out-summary       ~{out_summary}
@@ -280,7 +291,12 @@ workflow flare_validate {
 
     String run_name
     String? panel_id
-    String schema_version = "2.0.0"     # ★ v2.0.0 (R6 mothballed)
+    String schema_version = "3.0.0"     # ★ v3.0.0 (Phase 6 label-space retrofit)
+
+    # MID-handling for cohort/confusion_rf.tsv. See collate_cohort task
+    # input docstring above. Recommended for the v3 cutover:
+    # "fold_to_eur" — preserves the RF-MID signal as an EUR contribution.
+    String mid_rule       = "none"
 
     Int?     cpu_override
     String?  memory_override
@@ -323,6 +339,7 @@ workflow flare_validate {
       previous_cohort_bundle = previous_cohort_bundle,
       run_name               = run_name,
       schema_version         = schema_version,
+      mid_rule               = mid_rule,
       wandb_api_key          = wandb_api_key,
       docker_image           = docker_image,
   }

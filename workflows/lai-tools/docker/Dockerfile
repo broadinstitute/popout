@@ -69,11 +69,11 @@ RUN chmod +x /usr/local/bin/generate_partitions.py \
 #
 # Source vendoring is avoided — everything comes through build contexts.
 
-# validation/ — orchestrator + collator + all sub-scripts. Importable as
-# `validation.schema` via PYTHONPATH; __init__.py files are added so the
-# package resolves.
+# validation/ — orchestrator + collator + all sub-scripts. Importable
+# as `validation.schema` via PYTHONPATH. ``__init__.py`` files ship in
+# the repo as of Phase 6 of the label-space retrofit; no in-container
+# fixup needed.
 COPY --from=validation . /opt/validation/
-RUN touch /opt/validation/__init__.py /opt/validation/scripts/__init__.py
 ENV PYTHONPATH=/opt
 
 # popout (viz loaders) — diagnostic scripts import popout.viz._loaders and
