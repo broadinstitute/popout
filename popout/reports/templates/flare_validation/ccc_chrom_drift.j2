@@ -1,0 +1,30 @@
+{# Per-chrom self-ancestry proportion within X-dominant strata. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+## Per-chromosome self-ancestry proportion
+
+For each ancestry X, restrict to samples whose chr1 X-proportion is ≥
+{{ "%.2f"|format(data.threshold if data.get("present") else 0.95) }}.
+Plot one line per stratum: per-chrom median of the SAME ancestry's
+proportion across the stratum's samples.
+
+{% if chart %}
+{{ figure(path=chart, caption="Per-chrom median X-proportion within each X-dominant stratum.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/cohort_global.tsv`
+{% endif %}
+
+{%- if data.get("present") and data.strata %}
+**Across-chrom median of medians:** {% for s in data.strata if s.across_chrom_median is not none %}`{{ s.label }}` {{ "%.3f"|format(s.across_chrom_median) }} (n={{ "{:,}".format(s.n) }}){% if not loop.last %} · {% endif %}{% endfor %}.
+
+\small
+
+| stratum | n | chr1 median | mean(chr2..22 medians) | drift (chr1 − others) |
+|:--------|--:|------------:|-----------------------:|----------------------:|
+{% for s in data.strata if s.drift is not none -%}
+| `{{ s.label }}`-dominant | {{ "{:,}".format(s.n) }} | {{ "%.3f"|format(s.chr1_median) }} | {{ "%.3f"|format(s.others_mean) }} | {{ "%+.3f"|format(s.drift) }} |
+{% endfor %}
+
+\normalsize
+{%- endif %}

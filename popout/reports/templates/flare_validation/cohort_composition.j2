@@ -1,26 +1,23 @@
-{# Cohort composition — FLARE primary ancestry, cohort + per-cluster. #}
+{# Cohort composition — FLARE top-1 ancestry. #}
 {% from "_macros.j2" import figure %}
 {% set tag = ctx.tag(section.id) %}
 
 # Cohort composition
 
-**What this is.** The top bar treats every cluster as a single cohort:
-every sample's FLARE primary ancestry (argmax of its FLARE proportion
-vector) is named via `cohort/merged_groups_rf.tsv`, and the segments
-show the cohort-wide count per ancestry. The bottom strip is the same
-decomposition broken down by cluster · chrom, sorted by sample count,
-for readers who want to see how each cluster contributes.
+**What this is.** Every sample's FLARE top-1 ancestry (argmax of its
+FLARE proportion vector on chr1, after the
+`cohort/merged_groups_rf.tsv` mapping). The bar shows the cohort-wide
+count per stratum. Cluster is *not* used as a stratifier — clusters
+group samples for upstream processing, not for ancestry reporting.
 
-**How to read this.** Read the top bar first — that is the cohort's
-ancestral makeup as FLARE sees it. The cluster bars below show how
-evenly each ancestry is distributed across the clusters that built
-that cohort: roughly proportional widths means the cohort number is
-stable; lopsided cluster widths (one cluster holding most of an
-ancestry) means the cohort number is driven by that one cluster and
-downstream per-ancestry stats for it should be read with that in mind.
+**How to read this.** Read the bar segments as cohort decomposition.
+The supporting table reports each stratum's median across-chrom
+stability — the per-sample stdev of the dominant-ancestry proportion
+on chr2..22 (lower = more stable cross-chrom calls within the
+stratum).
 
 {% if chart %}
-{{ figure(path=chart, caption="Cohort sample count per FLARE primary ancestry, with per-(cluster, chrom) decomposition.", tag=tag) }}
+{{ figure(path=chart, caption="Cohort sample count per FLARE top-1 ancestry.", tag=tag) }}
 {% else %}
 > **MISSING:** `cohort/cohort_global.tsv`
 {% endif %}
@@ -28,17 +25,19 @@ downstream per-ancestry stats for it should be read with that in mind.
 {%- if data.get("present") %}
 **In this run.**
 {%- set dom = data.dom %}
-{%- if dom %}
+{%- if dom and dom[1] > 0 %}
 Cohort is dominated by `{{ dom[0] }}` ({{ "{:,}".format(data.cohort_counts[dom[0]]) }} samples, {{ "%.1f"|format(dom[1] * 100) }}%)
 {%- set snd = data.snd %}
-{%- if snd %}; second is `{{ snd[0] }}` ({{ "{:,}".format(data.cohort_counts[snd[0]]) }}, {{ "%.1f"|format(snd[1] * 100) }}%){% endif %}.
+{%- if snd and snd[1] > 0 %}; second is `{{ snd[0] }}` ({{ "{:,}".format(data.cohort_counts[snd[0]]) }}, {{ "%.1f"|format(snd[1] * 100) }}%){% endif %}.
 {%- endif %}
 
-{%- if data.divergent %}
+\small
 
-Clusters whose composition diverges &gt;2× from the cohort on some
-ancestry:
-{% for d in data.divergent[:6] %}
-- `{{ d.cluster }}·{{ d.chrom }}` `{{ d.rf_label }}` &nbsp; {{ "%.1f"|format(d.cluster_frac * 100) }}% vs cohort {{ "%.1f"|format(d.cohort_frac * 100) }}% &nbsp; ({{ "%.1f"|format(d.ratio) }}×){% endfor %}.
-{%- endif %}
+| top-1 ancestry | n samples | % of cohort | median per-sample stdev (chr2..22) |
+|:---------------|----------:|------------:|-----------------------------------:|
+{% for s in data.strata_summary -%}
+| `{{ s.label }}` | {{ "{:,}".format(s.n) }} | {{ "%.1f"|format(s.frac * 100) }}% | {% if s.chrom_stdev_med is not none %}{{ "%.3f"|format(s.chrom_stdev_med) }}{% else %}—{% endif %} |
+{% endfor %}
+
+\normalsize
 {%- endif %}

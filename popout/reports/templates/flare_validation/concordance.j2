@@ -16,17 +16,23 @@ comparison is apples-to-apples; the categorical superpop label would
 penalise FLARE on truly admixed samples mechanically.
 
 **How to read this chart.** Each row is one ancestry, present in the
-cohort. The horizontal bar is the cohort-pooled value, computed as the
-n_samples-weighted mean across clusters (rows with `cluster_mu < 0.01`
-are dropped before pooling — they are degenerate). The vertical black
-ticks on each bar mark each cluster's individual value — they show
-how tightly the clusters agree on that pooled number. The dashed
-vertical line is the pass threshold (0.95 for r, 0.90 for CCC). The
-supporting table below carries per-cluster `cluster_mu` and
-`n_samples` so a small or low-μ row is easy to spot.
+cohort. The row is partitioned into three non-overlapping lanes
+(top → bottom):
+
+- **Half-violin** (above): KDE of the per-`(cluster, chrom)` values,
+  shaded by ancestry. Wider regions = more density.
+- **Cohort bar** (middle): the cohort-pooled, n_samples-weighted
+  value, with the printed number to the right.
+- **Sina rain** (below): one dot per `(cluster, chrom)` row that
+  passed the μ-gate (`cluster_mu ≥ 0.01`). Vertical jitter is
+  proportional to local KDE density so dense clusters of values
+  fan out and sparse tails collapse to a thin line.
+
+The dashed vertical line is the pass threshold (0.95 for r, 0.90 for
+CCC). Rows with `cluster_mu < 0.01` are degenerate and excluded.
 
 {% if chart %}
-{{ figure(path=chart, caption="Pearson r and Lin's CCC, cohort-pooled (bar) with per-cluster overlay ticks.", tag=tag) }}
+{{ figure(path=chart, caption="Per-ancestry Pearson r and Lin's CCC — raincloud + sina rain. Bar = cohort-pooled value, half-violin = KDE, raindrops = per-(cluster, chrom) values.", tag=tag) }}
 {% else %}
 > **MISSING:** `cohort/concordance_metrics.tsv`
 {% endif %}
@@ -40,16 +46,4 @@ supporting table below carries per-cluster `cluster_mu` and
 {% if data.top_gap %}
 Largest per-cluster **r − CCC** gap (calibration-drift candidates): {% for lab, v in data.top_gap %}`{{ lab }}` ({{ "%+.3f"|format(v) }}){{ "; " if not loop.last else "." }}{% endfor %} — positive gap = FLARE tracks Rye in rank but is offset in absolute value.
 {% endif %}
-
-## Per-(cluster, ancestry) detail
-
-\small
-
-| ancestry | cluster · chrom | cluster_mu | n_samples | Pearson r | Lin's CCC |
-|:---------|:----------------|-----------:|----------:|----------:|----------:|
-{% for r in data.table_rows -%}
-| `{{ r.ancestry }}` | `{{ r.cluster_chrom }}` | {{ "%.3f"|format(r.cluster_mu) }} | {{ "{:,}".format(r.n_samples) }} | {{ "%.3f"|format(r.pearson_r) if r.pearson_r is not none else "—" }} | {{ "%.3f"|format(r.ccc) if r.ccc is not none else "—" }} |
-{% endfor %}
-
-\normalsize
 {% endif %}

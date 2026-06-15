@@ -1,30 +1,36 @@
-{# Per-sample admixture overview. #}
+{# Per-sample admixture — two-panel summary. #}
 {% from "_macros.j2" import figure %}
 {% set tag = ctx.tag(section.id) %}
 
 # Per-sample admixture
 
-**What this is.** The classic ADMIXTURE-style overview: every
-sample in the cohort as one vertical strip, sorted by primary
-FLARE ancestry → descending proportion within group. Each sample's
-FLARE component vector is summed by the RF label its components
-map to under `merged_groups_rf.tsv`, so colors are SP6 ancestries
-(faithful to the bundle's mapping — when the collector emits
-`afr.3` we honour it the same as `afr`).
+**What this is.** Two panels covering the cohort's admixture story.
 
-**How to read this chart.** Long single-color runs at the left
-edge are "pure" samples; the middle of each color band shows
-admixed individuals (multiple colors stacked at non-trivial
-heights). Cohort-wide proportions appear as the relative widths
-of each color block. If you want per-cluster decomposition see
-the cohort composition section.
+- **Panel A** boxes the *dominant* and *other* proportions per
+  FLARE top-1 ancestry stratum. Five strata × two boxes for SP5.
+  Boxes span p5–p95 with the median bar in the middle; the dashed
+  red reference at {{ "%.2f"|format(data.threshold_dominant if data.get("present") else 0.95) }} is the dominant
+  threshold used in the cohort-structure section.
+- **Panel B** is the classic ADMIXTURE-style per-sample stack,
+  restricted to the *admixed* sub-cohort (top-1 < {{ "%.2f"|format(data.threshold_dominant if data.get("present") else 0.95) }}),
+  sorted by top-1 ancestry then descending dominant proportion. The
+  full-cohort version is omitted because at production cohort sizes
+  it compresses to a coloured smear; the admixed subset is where the
+  per-sample view actually carries information.
+
+**How to read this chart.** Panel A: low *other* boxes mean the
+stratum is genuinely homogeneous on chr1; an *other* box that pushes
+into the 0.10+ range means a sizable fraction of the stratum is
+non-trivially admixed. Panel B: long single-colour runs are mildly
+admixed leaning samples; visible secondary colour bands are the
+real two-/three-way mixes.
 
 {% if chart %}
-{{ figure(path=chart, caption="Per-sample admixture, cohort sorted by primary ancestry.", tag=tag) }}
+{{ figure(path=chart, caption="Cohort dominant/other distribution by top-1 ancestry (A); admixed-only per-sample stack (B).", tag=tag) }}
 {% else %}
 > **MISSING:** `cohort/cohort_global.tsv` or `cohort/merged_groups_rf.tsv`
 {% endif %}
 
 {% if data.get("present") %}
-**In this run.** {{ "{:,}".format(data.n_samples) }} samples; SP6 labels rendered: {% for lab in data.labels %}`{{ lab }}`{{ ", " if not loop.last else "." }}{% endfor %}
+**In this run.** {{ "{:,}".format(data.n_samples) }} samples; {{ "{:,}".format(data.n_admixed) }} admixed (top-1 < {{ "%.2f"|format(data.threshold_dominant) }}){% if data.admixed_capped %}; Panel B subsampled to {{ "{:,}".format(data.n_admixed_shown) }} of {{ "{:,}".format(data.n_admixed) }} (cap {{ data.max_admixed_samples }}){% endif %}.
 {% endif %}

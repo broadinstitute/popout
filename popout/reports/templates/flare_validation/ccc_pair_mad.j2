@@ -1,0 +1,17 @@
+{# median |X-prop(chr_i) − X-prop(chr_j)| per sample, within strata. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+## Per-chrom-pair within-sample disagreement
+
+For each X-dominant stratum (chr1 X-proportion ≥
+{{ "%.2f"|format(data.threshold if data.get("present") else 0.95) }}),
+plot a 22×22 heatmap whose cell (i, j) is the median across the
+stratum of |X-prop(chr_i) − X-prop(chr_j)| per sample. Diagonal is
+0 by construction.
+
+{% if chart %}
+{{ figure(path=chart, caption="Per-chrom-pair median absolute difference per sample, per stratum.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/cohort_global.tsv`
+{% endif %}

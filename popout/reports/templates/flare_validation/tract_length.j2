@@ -12,17 +12,21 @@ expected mean. Empirical means much shorter than that = FLARE is
 over-segmenting (fast switches that look like LAI noise). Much longer
 = under-segmenting (FLARE missing real switches).
 
-**How to read this chart.** Each row is one FLARE ancestry component.
-The horizontal bar is the cohort-pooled mean tract length (weighted by
-`n_tracts` across clusters); the small vertical ticks on the bar mark
-each cluster's empirical mean — when they cluster tightly the cohort
-number is stable. The short dashed vertical mark is the model
-expectation derived from the median cluster's `model_T_gen` for that
-ancestry. Read the bar versus the dashed mark first; the per-cluster
-ticks tell you how united the clusters are behind that picture.
+**How to read this chart.** Each row is one FLARE ancestry component,
+on a log10 x-axis. The row partitions into three non-overlapping lanes:
+
+- **Half-violin** (above): log-space KDE of per-`(cluster, chrom)`
+  mean tract length.
+- **Cohort bar** (middle): cohort-pooled mean, weighted by `n_tracts`.
+- **Sina rain** (below): one raindrop per `(cluster, chrom)` mean,
+  density-aware jitter.
+
+The open **◇ diamond** on each row marks the model expectation,
+`100 / (median model_T_gen × K=5)`. A cohort bar sitting much shorter
+than the diamond = over-segmentation; much longer = under-segmentation.
 
 {% if chart %}
-{{ figure(path=chart, caption="Cohort-pooled mean tract length per ancestry (n_tracts-weighted), per-cluster ticks, and the model expectation.", tag=tag) }}
+{{ figure(path=chart, caption="Tract length per ancestry — raincloud + sina rain (log scale). Raindrops are per-(cluster, chrom) means; ◇ = model expectation.", tag=tag) }}
 {% else %}
 > **MISSING:** `cohort/tract_length_stats.tsv`
 {% endif %}
@@ -36,7 +40,7 @@ ticks tell you how united the clusters are behind that picture.
 - Cohort-pooled means sit close to the model expectation for every ancestry.
 {% endif %}
 
-A cohort bar much **shorter** than the dashed model line = over-segmentation
+A cohort bar much **shorter** than the diamond = over-segmentation
 (FLARE switching more than the model predicts); much **longer** =
 under-segmentation (FLARE missing switches the model expects).
 

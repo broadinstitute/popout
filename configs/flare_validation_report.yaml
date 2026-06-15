@@ -36,6 +36,41 @@ sections:
     chart: cohort_composition
     pair: [flare]
 
+  - id: cohort_structure_pair_census
+    template: flare_validation/cohort_structure_pair_census.j2
+    chart: cohort_structure_pair_census
+    pair: [flare]
+
+  - id: cohort_structure_top1_top2
+    template: flare_validation/cohort_structure_top1_top2.j2
+    chart: cohort_structure_top1_top2
+    pair: [flare]
+
+  - id: cohort_structure_3way_face
+    template: flare_validation/cohort_structure_3way_face.j2
+    chart: cohort_structure_3way_face
+    pair: [flare]
+
+  - id: ccc_chrom_drift
+    template: flare_validation/ccc_chrom_drift.j2
+    chart: ccc_chrom_drift
+    pair: [flare]
+
+  - id: ccc_chrom_stdev
+    template: flare_validation/ccc_chrom_stdev.j2
+    chart: ccc_chrom_stdev
+    pair: [flare]
+
+  - id: ccc_pair_mad
+    template: flare_validation/ccc_pair_mad.j2
+    chart: ccc_pair_mad
+    pair: [flare]
+
+  - id: ccc_dose_response
+    template: flare_validation/ccc_dose_response.j2
+    chart: ccc_dose_response
+    pair: [flare]
+
   - id: admixture
     template: flare_validation/admixture.j2
     chart: admixture_bar

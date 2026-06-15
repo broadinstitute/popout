@@ -4,9 +4,10 @@ Only applicable when the cohort's effective label space resolves to
 exactly 3 RF labels. Otherwise the chart returns an empty figure
 with a "K != 3" note (i.e. it gates gracefully).
 
-Reads ``cohort/cohort_global.tsv`` + ``cohort/merged_groups_rf.tsv``
-and rebuckets per-sample FLARE proportions into SP6 RF labels (same
-logic as ``admixture_bar.compute``).
+Reads the per-sample chr1 proportion vector via
+``popout.reports._helpers.load_cohort_cube`` (SP5, ``mid_rule="drop"``
+by default). Picks the 3 ancestries with non-zero cohort presence; if
+the effective K is not 3, the chart returns ``present=False``.
 """
 
 from __future__ import annotations
@@ -16,32 +17,37 @@ import math
 import matplotlib.pyplot as plt
 import numpy as np
 
-from . import admixture_bar
+from popout.labelspace.registry import SP5
+
+from .._helpers import load_cohort_cube
 
 
 def compute(ctx, section=None) -> dict:
-    base = admixture_bar.compute(ctx)
-    if not base.get("present"):
+    mid_rule = (section.mid_rule if section is not None else None) or "drop"
+    cube_data = load_cohort_cube(
+        ctx.bundle_dir, label_space=SP5, mid_rule=mid_rule)
+    if not cube_data:
         return {"present": False, "reason": "no data"}
-    labels = base["labels"]
-    props = base["props"]
-    nonempty = props.sum(axis=0) > 0
-    used = [labels[j] for j in range(len(labels)) if nonempty[j]]
+    members = list(cube_data["label_space"].members)
+    chr1 = cube_data["cube"][:, 0, :]
+    cohort_total = chr1.sum(axis=0)
+    used_idxs = [j for j in range(len(members)) if cohort_total[j] > 0]
+    used = [members[j] for j in used_idxs]
     if len(used) != 3:
         return {
             "present": False,
             "reason": f"effective K = {len(used)} (need exactly 3)",
             "used_labels": used,
         }
-    # Project to the 3 nonempty columns.
-    cols = [j for j in range(len(labels)) if nonempty[j]]
-    triple = props[:, cols]
-    triple = triple / triple.sum(axis=1, keepdims=True)
+    triple = chr1[:, used_idxs]
+    row_sum = triple.sum(axis=1, keepdims=True)
+    row_sum = np.where(row_sum > 0, row_sum, 1.0)
+    triple = triple / row_sum
     return {
         "present": True,
         "labels": used,
         "triple": triple,
-        "n_samples": triple.shape[0],
+        "n_samples": int(triple.shape[0]),
     }
 
 

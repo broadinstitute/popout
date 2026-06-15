@@ -1,0 +1,21 @@
+{# std(X-prop across chr1..chr22) per sample, within X-dominant strata. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+## Per-sample chrom-stdev within X-dominant strata
+
+For each X-dominant sample (chr1 X-proportion ≥
+{{ "%.2f"|format(data.threshold if data.get("present") else 0.95) }}),
+compute the standard deviation of X-proportion across chr1..chr22.
+One histogram panel per ancestry; log y-axis. Median and p95
+annotated.
+
+{% if chart %}
+{{ figure(path=chart, caption="Per-sample chrom-stdev histograms per X-dominant stratum.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/cohort_global.tsv`
+{% endif %}
+
+{%- if data.get("present") and data.strata %}
+**Median stdev:** {% for s in data.strata if s.median is not none %}`{{ s.label }}` {{ "%.3f"|format(s.median) }} (n={{ "{:,}".format(s.n) }}){% if not loop.last %} · {% endif %}{% endfor %}.
+{%- endif %}

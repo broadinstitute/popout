@@ -1,0 +1,22 @@
+{# Per-sample top-1 vs top-2 FLARE proportion, panelled by top-1. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+## Top-1 vs top-2 ancestry proportion
+
+For each chr1 sample, plot its top-2 proportion (y) against its top-1
+proportion (x). One hexbin panel per top-1 ancestry. Reference lines
+mark the dominant ({{ "%.2f"|format(data.threshold_dominant if data.get("present") else 0.95) }}) and
+leaning ({{ "%.2f"|format(data.threshold_leaning if data.get("present") else 0.85) }})
+top-1 thresholds, the admix floor ({{ "%.2f"|format(data.threshold_admix if data.get("present") else 0.10) }} on top-2),
+and the sum-to-1 ceiling (top-2 ≤ 1 − top-1).
+
+{% if chart %}
+{{ figure(path=chart, caption="Top-1 vs top-2 chr1 FLARE proportion, panelled by top-1 ancestry.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/cohort_global.tsv`
+{% endif %}
+
+{%- if data.get("present") %}
+**N = {{ "{:,}".format(data.n_samples) }} chr1 samples.**
+{%- endif %}

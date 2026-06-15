@@ -1,0 +1,22 @@
+{# Three CCC metrics vs chr1 X-dominant threshold T. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+## Threshold dose-response
+
+Sweep the chr1 X-dominant threshold T across the configured set and
+recompute three metrics per (T, ancestry): drift = chr1 median −
+mean(chr2..22 medians); median per-sample std(X-prop across
+chr1..chr22); mean off-diagonal per-chrom-pair median |X-prop(chr_i)
+− X-prop(chr_j)|. Three side-by-side line panels, one line per
+ancestry, n-annotated at endpoints.
+
+{% if chart %}
+{{ figure(path=chart, caption="Three CCC metrics vs chr1 X-dominant threshold T.", tag=tag) }}
+{% else %}
+> **MISSING:** `cohort/cohort_global.tsv`
+{% endif %}
+
+{%- if data.get("present") and data.thresholds %}
+**Thresholds swept:** {{ data.thresholds|join(", ") }}.
+{%- endif %}
