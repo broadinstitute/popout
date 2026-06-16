@@ -8,7 +8,7 @@ proportions. Five strata × 2 boxes for SP5.
 Panel B (admixed-only per-sample strip, capped): the classic
 ADMIXTURE-style per-sample stacked bars but restricted to samples whose
 top-1 proportion is < ``threshold_dominant`` (default 0.95), sorted by
-top-1 ancestry → descending top-1 proportion. Capped at
+top-1 ancestry -> descending top-1 proportion. Capped at
 ``max_admixed_samples`` (default 800) to keep the panel readable; the
 template reports the cap.
 

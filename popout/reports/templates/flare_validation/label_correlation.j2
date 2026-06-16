@@ -9,7 +9,7 @@ largest by default), the Pearson correlation between each FLARE
 component's per-sample posterior and each RF reference label.
 Cells with a thick black border are the matches the labeling
 pipeline assigned via `popout_to_rf_label`. This is the QC view
-of the FLARE→RF mapping: the assigned cells should sit far from
+of the FLARE->RF mapping: the assigned cells should sit far from
 zero (and on the correct sign), and no unassigned cell should
 have a stronger correlation than the one that was picked.
 
@@ -21,7 +21,7 @@ cluster. Where the assigned cell isn't visibly the strongest,
 inspect the per-cluster `labels.json` directly.
 
 {% if chart %}
-{{ figure(path=chart, caption="Pearson correlation matrix; bordered cells are the assigned FLARE→RF mappings.", tag=tag) }}
+{{ figure(path=chart, caption="Pearson correlation matrix; bordered cells are the assigned FLARE->RF mappings.", tag=tag) }}
 {% else %}
 > **MISSING:** no `per_cluster/<cid>/<chrom>/soft_correlation/labels.json` found
 {% endif %}

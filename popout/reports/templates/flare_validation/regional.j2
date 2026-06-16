@@ -13,7 +13,7 @@ Stouffer's method. A peak here is a window where multiple clusters
 independently see a deviation in the same direction.
 
 **How to read this chart.** Each point is one window × ancestry,
-plotted at its genomic midpoint and meta-analysis q-value (−log10,
+plotted at its genomic midpoint and meta-analysis q-value (-log10,
 so up = more significant). Color = ancestry. Line width scales with
 the number of clusters that independently flagged that window.
 Light-gray bands behind the points are pre-registered masks (HLA,
@@ -38,12 +38,19 @@ annotated by position and ancestry.
 
 ## Top 20 windows by FDR-corrected q
 
+Window = (start, end) in Mb. `flagged` is the number of clusters that
+independently flagged the window over the total cluster count. `q` is
+the FDR-corrected Stouffer combined p-value; values below `1e-300`
+are reported as `<1e-300`.
+
 \small
 
-| chrom | start (Mb) | end (Mb) | ancestry | n flagged | n total | z | p | q | mask |
-|:------|-----------:|---------:|:---------|----------:|--------:|--:|--:|--:|:-----|
+| window | ancestry | flagged | z | q | mask |
+|:-------|:---------|:-------:|--:|--:|:-----|
 {% for r in data.table_rows -%}
-| `{{ r.chrom }}` | {{ "%.2f"|format(r.start_mb) }} | {{ "%.2f"|format(r.end_mb) }} | `{{ r.ancestry_name }}` | {{ r.n_flagged }} | {{ r.n_total }} | {{ "%.2f"|format(r.z) if r.z is not none else "—" }} | {{ "%.4f"|format(r.p) if r.p is not none else "—" }} | {{ "%.4f"|format(r.q) }} | {{ r.mask or "—" }} |
+{%- set qs = ("<1e-300" if r.q is not none and r.q > 0 and r.q < 1e-300 else ("%.1e"|format(r.q))) -%}
+{%- set zs = (("%.2f"|format(r.z)) if r.z is not none else "—") -%}
+| `{{ r.chrom }}:{{ "%.2f"|format(r.start_mb) }}-{{ "%.2f"|format(r.end_mb) }}` | `{{ r.ancestry_name }}` | {{ r.n_flagged }}/{{ r.n_total }} | `{{ zs }}` | `{{ qs }}` | {{ r.mask or "—" }} |
 {% endfor %}
 
 \normalsize

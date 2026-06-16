@@ -27,6 +27,8 @@ def format(
     *,
     hash_len: int = 6,
     mid_rule: str | None = None,
+    suppress_default_mid: bool = False,
+    suppress_name_clauses: bool = False,
 ) -> str:
     """Build the canonical figure tag.
 
@@ -40,9 +42,21 @@ def format(
     - ``None`` (default): MID flag is ``MID+`` if target has MID,
       ``MID-`` otherwise.
     - ``"fold_to_eur"``: target is MID-less but the source's MID mass
-      was redistributed into EUR before collapse. Tag renders ``MID→eur``.
+      was redistributed into EUR before collapse. Tag renders ``MID->eur``.
     - ``"drop"``: equivalent to ``MID-`` (source MID dropped; rendered
       explicitly).
+
+    Optional display flags (both default ``False`` — popout_dx and any
+    other report that wants the verbose form is unaffected):
+
+    - ``suppress_default_mid=True``: drop the ``/MID±`` qualifier when
+      the target inherently has no MID and ``mid_rule`` would just
+      restate that (``None`` on a MID-less target). Explicit
+      overrides (``"drop"``, ``"fold_to_eur"``) and MID-bearing
+      targets still render the qualifier.
+    - ``suppress_name_clauses=True``: drop per-tool ``tool=>name``
+      clauses (the silent default in a verbatim-FLARE report). Other
+      methods (``postS``, ``confH``, ``manual`` …) still render.
     """
     if isinstance(assignments, dict):
         items = sorted(assignments.items())
@@ -50,13 +64,20 @@ def format(
         items = sorted(((a.source.get("tool", "?"), a) for a in assignments),
                        key=lambda kv: kv[0])
     if mid_rule == "fold_to_eur":
-        mid_flag = "MID→eur"
+        mid_flag: str | None = "MID->eur"
     elif mid_rule == "drop":
         mid_flag = "MID-"
     else:
         mid_flag = "MID+" if target.has_mid else "MID-"
-    target_str = f"{target.tag}/{mid_flag}"
-    clauses = [f"{tool}=>{a.method}" for tool, a in items]
+    if (suppress_default_mid and mid_rule is None
+            and not target.has_mid):
+        mid_flag = None
+    target_str = target.tag if mid_flag is None else f"{target.tag}/{mid_flag}"
+    if suppress_name_clauses:
+        clauses = [f"{tool}=>{a.method}" for tool, a in items
+                   if a.method != "name"]
+    else:
+        clauses = [f"{tool}=>{a.method}" for tool, a in items]
     h = _hash(target, [a for _, a in items], params or {})[:hash_len]
     return " | ".join([f"L={target_str}"] + clauses + [f"v={h}"])
 

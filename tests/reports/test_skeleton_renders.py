@@ -84,6 +84,53 @@ def test_skeleton_md_renders(config_name, bundle_mode, tmp_path: Path):
         assert "popout" not in cover_block.lower()
 
 
+def test_tag_policy_minimal_suppresses_default_sections(tmp_path: Path):
+    """FLARE config: SP5 + by-name sections emit no tag; SP6 overrides do."""
+    cfg = load_report_config(CONFIGS / "flare_validation_report.yaml")
+    assert cfg.tag_policy == "minimal"
+    ctx = ReportContext(
+        bundle=_fake_bundle(),
+        bundle_dir=tmp_path / "fake_bundle",
+        config=cfg,
+        estimates={},
+        assets_dir=tmp_path / "assets",
+    )
+    ctx.assets_dir.mkdir(parents=True, exist_ok=True)
+
+    # FLARE-only SP5 sections suppress the tag entirely.
+    assert ctx.tag("cohort_composition") == ""
+    assert ctx.tag("ccc_chrom_drift") == ""
+    assert ctx.tag("flare_vs_rye_concordance") == ""
+
+    # SP6 cross-tool sections still emit a slimmed tag. The FLARE
+    # config's defaults.mid_rule="drop" is inherited by all sections;
+    # on SP6 (which has MID) that drop is informative and survives.
+    rf_tag = ctx.tag("flare_vs_rf_calibration")
+    assert rf_tag.startswith("L=SP6/MID- | v=") and "=>" not in rf_tag, rf_tag
+
+    # Verbose tag still available via the provenance helper.
+    full = ctx.verbose_tag("cohort_composition")
+    assert full.startswith("L=SP5/MID- | flare=>name | v=")
+
+
+def test_tag_policy_verbose_preserves_full_tag(tmp_path: Path):
+    """popout_dx config: every section still emits the full verbose tag."""
+    cfg = load_report_config(CONFIGS / "popout_dx_report.yaml")
+    assert cfg.tag_policy == "verbose"
+    ctx = ReportContext(
+        bundle=_fake_bundle(mode="global_local"),
+        bundle_dir=tmp_path / "fake_bundle",
+        config=cfg,
+        estimates={},
+        assets_dir=tmp_path / "assets",
+    )
+    ctx.assets_dir.mkdir(parents=True, exist_ok=True)
+
+    tag = ctx.tag("traffic_light_grid")
+    assert tag.startswith("L=SP6/MID+ | ")
+    assert "popout=>name" in tag                # default fallback when no estimate
+
+
 @pytest.mark.skipif(
     not (shutil.which("pandoc") and shutil.which("xelatex")
          and os.environ.get("POPOUT_REPORT_TEST_PDF")),

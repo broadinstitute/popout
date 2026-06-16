@@ -8,7 +8,7 @@
 ## Pearson r vs Lin's Concordance Correlation Coefficient (CCC)
 
 **Pearson r** measures co-variation: if two estimates rise and fall
-together across samples, r ≈ 1, even when one is systematically
+together across samples, r ~ 1, even when one is systematically
 shifted (e.g. half the magnitude of the other). It answers "do the
 two estimates rank samples the same way?"
 
@@ -29,7 +29,7 @@ median (`mae_median`, robust to outliers), and the 95th percentile
 
 ## Jaccard@τ
 
-For a threshold τ ∈ {0.10, 0.25, 0.50}, **Jaccard@τ** is the
+For a threshold τ in {0.10, 0.25, 0.50}, **Jaccard@τ** is the
 intersection-over-union of the two estimates' "this sample has at
 least τ proportion of ancestry X" sets. Robust to small per-sample
 floating-point differences; sensitive to whether the two tools agree
@@ -43,15 +43,15 @@ signal for that ancestry in that cluster, and any metric computed
 on it is degenerate. The report **gates** these pairs:
 
 - they appear with `pass = null` (μ-gated, neither pass nor fail);
-- they contribute to a `μ·∅` column in summary grids;
+- they contribute to a `μ·0` column in summary grids;
 - they are excluded from aggregate "fraction passing" rolls-up.
 
 ## Pass criterion
 
 A (cluster, label) pair **passes** when both of the following hold:
 
-- `pearson_r ≥ 0.95`
-- `ccc       ≥ 0.90`
+- `pearson_r >= 0.95`
+- `ccc       >= 0.90`
 
 Pairs with `cluster_mu < 0.01` are μ-gated (pass = null, not a
 failure). Everything else is a fail.

@@ -134,7 +134,7 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
     ax.set_yticks(range(n_inf))
     ax.set_xticklabels(ref_names, fontsize=9, rotation=45, ha="right")
     ax.set_yticklabels(inf_names, fontsize=9)
-    ax.set_xlabel("reference RF label →")
+    ax.set_xlabel("reference RF label ->")
     ax.set_ylabel("FLARE component ↓")
 
     from matplotlib.patches import Rectangle

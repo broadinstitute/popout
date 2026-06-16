@@ -180,8 +180,24 @@ def collate_tier1(arts: list[ClusterArtifact], out_path: Path) -> None:
         _append_lines(out_path, lines)
 
 
-def collate_soft_correlation_rf(arts: list[ClusterArtifact], out_path: Path) -> None:
-    """Unpivot the wide rf_soft_correlation.tsv per cluster into long form."""
+def collate_soft_correlation_rf(
+    arts: list[ClusterArtifact], out_path: Path, *, mid_rule: str = "none",
+) -> None:
+    """Unpivot the wide rf_soft_correlation.tsv per cluster into long form.
+
+    Category B (FLARE x RF). ``mid_rule`` selects MID handling on the
+    RF axis:
+
+    - ``"none"`` — pass MID through (legacy behaviour).
+    - ``"drop"`` — omit the ``rf_label == "mid"`` column. Correct for
+      a SP5-targeted bundle.
+    - ``"fold_to_eur"`` — Pearson r doesn't sum, so folding MID's r
+      into EUR's r is undefined; rather than invent a value, this
+      rule degrades to ``"drop"`` here and is recorded in the
+      manifest's ``transformations`` list.
+    """
+    if mid_rule not in ("none", "drop", "fold_to_eur"):
+        raise ValueError(f"unknown mid_rule {mid_rule!r}")
     _write_header_once(out_path, "cluster_id\tchrom\tflare_ancestry\trf_label\tr")
     for art in arts:
         src = art.artifact_dir / "soft_correlation" / "rf_soft_correlation.tsv"
@@ -194,6 +210,8 @@ def collate_soft_correlation_rf(arts: list[ClusterArtifact], out_path: Path) -> 
                 ancestry = parts[0]
                 for rf_idx, rf_lab in enumerate(rf_labels):
                     if rf_idx + 1 >= len(parts):
+                        continue
+                    if rf_lab == "mid" and mid_rule in ("drop", "fold_to_eur"):
                         continue
                     rows.append(f"{art.cluster_id}\t{art.chrom}\t{ancestry}\t{rf_lab}\t{parts[rf_idx+1]}")
         _append_lines(out_path, rows)
@@ -284,6 +302,13 @@ def collate_confusion_rf(
             popout_names = header[1:-1]
             rf_counts: dict[str, list[int]] = {}
             for line in f:
+                # Comment lines (sidecar footnotes) must never become
+                # rf_label rows. The legacy ``# n_low_confidence`` row
+                # in ``rf_confusion_matrix.tsv`` has been retired, but
+                # the guard stays so future sidecars can't pollute the
+                # confusion table.
+                if line.startswith("#"):
+                    continue
                 parts = line.rstrip("\n").split("\t")
                 rf_label = parts[0]
                 if rf_label == "total":
@@ -302,8 +327,23 @@ def collate_confusion_rf(
         _append_lines(out_path, rows)
 
 
-def collate_calibration_slope(arts: list[ClusterArtifact], out_path: Path) -> None:
-    """Unpivot the wide slope_matrix.tsv into long form."""
+def collate_calibration_slope(
+    arts: list[ClusterArtifact], out_path: Path, *, mid_rule: str = "none",
+) -> None:
+    """Unpivot the wide slope_matrix.tsv into long form.
+
+    Category B (FLARE component x RF label). ``mid_rule`` selects MID
+    handling on the RF axis:
+
+    - ``"none"`` — pass MID through (legacy behaviour).
+    - ``"drop"`` — omit ``rf_label == "mid"`` cells.
+    - ``"fold_to_eur"`` — calibration slope and max_cal are not
+      summable across RF columns; folding is undefined here, so the
+      rule degrades to ``"drop"`` and is recorded in the manifest's
+      ``transformations`` list.
+    """
+    if mid_rule not in ("none", "drop", "fold_to_eur"):
+        raise ValueError(f"unknown mid_rule {mid_rule!r}")
     _write_header_once(out_path, "cluster_id\tchrom\tancestry_name\trf_label\tslope\tmax_cal")
     for art in arts:
         src = art.artifact_dir / "calibration" / "slope_matrix.tsv"
@@ -316,6 +356,8 @@ def collate_calibration_slope(arts: list[ClusterArtifact], out_path: Path) -> No
                 parts = line.rstrip("\n").split("\t")
                 ancestry = parts[0]
                 for ci, rf_lab in slope_cols:
+                    if rf_lab == "mid" and mid_rule in ("drop", "fold_to_eur"):
+                        continue
                     slope = parts[ci] if ci < len(parts) else "NA"
                     max_ci = max_cols.get(rf_lab)
                     max_v = parts[max_ci] if max_ci is not None and max_ci < len(parts) else "NA"
@@ -357,15 +399,46 @@ def collate_switch_rate_stats(arts: list[ClusterArtifact], out_path: Path) -> No
     _append_lines(out_path, rows)
 
 
+def collate_switch_rate_per_hap(arts: list[ClusterArtifact], out_path: Path) -> None:
+    """Category A (FLARE-only) per-haplotype switch rate.
+
+    One row per (cluster, chrom, sample, hap). Carries the haplotype's
+    dominant FLARE ancestry so the report can stratify by FLARE
+    top-1 without re-deriving anything from ``cohort_global.tsv``.
+    """
+    cols = ["cluster_id", "chrom", "sample_id", "hap", "dominant_anc", "n_switches"]
+    _write_header_once(out_path, "\t".join(cols))
+    for art in arts:
+        src = art.artifact_dir / "structural" / "switch_rate_per_hap.tsv"
+        if not src.exists():
+            raise RuntimeError(
+                f"{src} missing; rebuild the per-cluster artifact under "
+                f"schema v5 (write_structural_outputs emits per-hap rows)"
+            )
+        with open(src) as f:
+            next(f)            # skip header
+            rows = [f"{art.cluster_id}\t{art.chrom}\t{line.rstrip()}"
+                    for line in f if line.strip()]
+        _append_lines(out_path, rows)
+
+
 def collate_hap_disagreement(arts: list[ClusterArtifact], out_path: Path) -> None:
-    cols = ["cluster_id", "chrom", "rf_label", "n", "mean", "median"]
+    """Category A (FLARE-only) metric: hap1-vs-hap2 disagreement.
+
+    Bundled keyed by **FLARE's per-sample top-1 ancestry**. RF never
+    enters the schema. The per-sample TSV emitted by
+    ``validate_per_site_metrics.write_hap_disagreement_outputs`` carries
+    the raw rf_label + rf_max_prob for downstream filtering; the
+    aggregate here is FLARE-keyed only.
+    """
+    cols = ["cluster_id", "chrom", "flare_top1", "n", "mean", "median"]
     _write_header_once(out_path, "\t".join(cols))
     rows = []
     for art in arts:
         d = json.loads((art.artifact_dir / "hap_disagreement" / "summary.json").read_text())
-        for entry in d.get("per_rf_label", []):
+        for entry in d.get("per_flare_top1", []):
             rows.append("\t".join([
-                art.cluster_id, art.chrom, entry["rf_label"],
+                art.cluster_id, art.chrom, entry["flare_top1"],
                 str(entry["n"]), f"{entry['mean']:.6f}", f"{entry['median']:.6f}",
             ]))
     _append_lines(out_path, rows)
@@ -810,11 +883,30 @@ def _build_provenance_block(
          "target_space": "SP5"},
     ]
     if mid_rule in ("drop", "fold_to_eur"):
-        transformations.append({
+        # Category B tables that actually receive the rule. Only these
+        # three are FLARE x RF cross-tabs where RF's MID column exists
+        # as real data. Hap_disagreement, switch_rate, and tract_length
+        # are category A (FLARE-only) and therefore never carry MID at
+        # all; they don't need the rule and don't appear here.
+        rule_applied_to = [
+            "cohort/confusion_rf.tsv",
+            "cohort/calibration_slope.tsv",
+            "cohort/soft_correlation_rf.tsv",
+        ]
+        if mid_rule == "fold_to_eur":
+            note = ("calibration_slope and soft_correlation_rf cells "
+                    "are not summable across RF labels; the fold "
+                    "degrades to drop for those tables.")
+        else:
+            note = None
+        entry = {
             "step": "mid_rule",
             "rule": mid_rule,
-            "applied_to": "cohort/confusion_rf.tsv",
-        })
+            "applied_to": rule_applied_to,
+        }
+        if note:
+            entry["note"] = note
+        transformations.append(entry)
 
     return {
         "tag": tag,
@@ -951,16 +1043,19 @@ def main() -> int:
     collate_coverage(arts,                cohort_dir / "coverage.tsv")
     collate_manifest(arts,                cohort_dir / "manifest.tsv")
     collate_tier1(arts,                   cohort_dir / "tier1_metrics.tsv")
-    collate_soft_correlation_rf(arts,     cohort_dir / "soft_correlation_rf.tsv")
+    collate_soft_correlation_rf(arts,     cohort_dir / "soft_correlation_rf.tsv",
+                                mid_rule=args.mid_rule)
     collate_merged_groups_rf(arts,        cohort_dir / "merged_groups_rf.tsv")
     # ★ v1.1: Rye concordance metrics (optional, gated on rye_q per cluster).
     has_rye = collate_concordance_metrics(
         arts,                              cohort_dir / "concordance_metrics.tsv")
     collate_confusion_rf(arts,            cohort_dir / "confusion_rf.tsv",
                          mid_rule=args.mid_rule)
-    collate_calibration_slope(arts,       cohort_dir / "calibration_slope.tsv")
+    collate_calibration_slope(arts,       cohort_dir / "calibration_slope.tsv",
+                              mid_rule=args.mid_rule)
     collate_tract_length_stats(arts,      cohort_dir / "tract_length_stats.tsv")
     collate_switch_rate_stats(arts,       cohort_dir / "switch_rate_stats.tsv")
+    collate_switch_rate_per_hap(arts,     cohort_dir / "switch_rate_per_hap.tsv")
     collate_hap_disagreement(arts,        cohort_dir / "hap_disagreement.tsv")
     collate_regional_windows(arts,        cohort_dir / "regional_windows.tsv.gz")
     has_self_id = collate_self_id(arts,   cohort_dir / "self_id.tsv")

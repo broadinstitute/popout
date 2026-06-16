@@ -24,7 +24,6 @@ from popout.reports.charts import (
     ccc_chrom_stdev,
     ccc_dose_response,
     ccc_pair_mad,
-    cohort_structure_3way_face,
     cohort_structure_pair_census,
     cohort_structure_top1_top2,
 )
@@ -103,7 +102,6 @@ def ctx(tmp_path: Path) -> ReportContext:
 ALL_CHARTS = [
     cohort_structure_pair_census,
     cohort_structure_top1_top2,
-    cohort_structure_3way_face,
     ccc_chrom_drift,
     ccc_chrom_stdev,
     ccc_pair_mad,

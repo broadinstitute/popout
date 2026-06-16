@@ -17,6 +17,11 @@ style:
 defaults:
   target_space: SP6
   mid_rule: null
+  # popout components are anonymous; each per-tool clause
+  # (popout=>postS, flare=>name, rye=>name, rf=>name) carries
+  # documented contract information, so keep the full verbose tag on
+  # every figure.
+  tag_policy: verbose
 
 sections:
   - id: cover

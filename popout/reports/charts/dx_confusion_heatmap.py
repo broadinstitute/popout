@@ -122,7 +122,7 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
         ax.set_xticklabels(col_labels)
         ax.set_yticks(range(len(row_labels)))
         ax.set_yticklabels(row_labels)
-        ax.set_xlabel(f"{tool} label →")
+        ax.set_xlabel(f"{tool} label ->")
         ax.set_ylabel("popout label ↓")
         ax.set_title(f"popout vs {tool} — diag {p['agreement_pct']}",
                      fontsize=10)

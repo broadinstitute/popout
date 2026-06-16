@@ -380,10 +380,19 @@ cm_lines.append(f"total\t{vals}\t{col_totals.sum()}")
 
 print(f"\nLow-confidence samples (RF max prob < {_LOW_CONF_THRESHOLD}): "
       f"{n_low_confidence:,} ({100 * n_low_confidence / n:.2f}%)")
-cm_lines.append(f"# n_low_confidence\t{n_low_confidence}\t{_LOW_CONF_THRESHOLD}")
 
 with open(args.out_dir / "confusion_matrix.tsv", "w") as f:
     f.write("\n".join(cm_lines) + "\n")
+
+# Low-confidence count goes into its own sidecar so it never pollutes
+# the long-form confusion table downstream.
+with open(args.out_dir / "low_confidence.json", "w") as f:
+    json.dump({
+        "n_low_confidence": n_low_confidence,
+        "threshold": _LOW_CONF_THRESHOLD,
+        "n_total": n,
+    }, f, indent=2)
+    f.write("\n")
 
 
 # ── 2. Per-popout-ancestry composition ────────────────────────────────────

@@ -39,24 +39,15 @@ def _env() -> Environment:
     return env
 
 
-def _stamp_tag(fig, tag: str) -> None:
-    """Inject the figure-tag shorthand as a bottom-strip footer."""
-    if not tag:
-        return
-    fig.text(
-        0.5, 0.005, tag,
-        ha="center", va="bottom",
-        fontsize=6.5, color="#666",
-        family="monospace", alpha=0.85,
-    )
-
-
 def _run_charts_for_section(ctx: ReportContext, sec) -> tuple[Path | None, dict]:
     """Compute + render a section's chart (if any). Returns (png_path, data_dict).
 
     A section can declare either ``chart: <name>`` (compute + render +
     save PNG) or ``data: <name>`` (compute only, no figure — for
     table-only sections that still need a data dict).
+
+    The label-space figure tag is emitted only via the markdown
+    ``figure`` macro (see ``_macros.j2``) — no matplotlib stamp.
     """
     chart_name = sec.options.get("chart")
     data_name = sec.options.get("data")
@@ -64,7 +55,6 @@ def _run_charts_for_section(ctx: ReportContext, sec) -> tuple[Path | None, dict]
         mod = _charts.get(chart_name)
         data = mod.compute(ctx, sec)
         fig = mod.render(data, palette=ctx.palette)
-        _stamp_tag(fig, ctx.tag(sec.id))
         path = ctx.assets_dir / f"{sec.id}.png"
         path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(path, dpi=_DPI, bbox_inches="tight")
@@ -100,8 +90,30 @@ def render_report(ctx: ReportContext) -> str:
     return "".join(parts)
 
 
-def run_pandoc(md_path: Path, out_pdf: Path, *, style=None) -> None:
-    """Render a markdown file → PDF via pandoc + xelatex."""
+_DRAFT_HEADER = r"""\usepackage{fancyhdr}
+\usepackage{xcolor}
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\color{red!70!black}\textbf{DRAFT}\ \textbar\ working draft, not a finalized document}
+\fancyfoot[R]{\thepage}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0.4pt}
+\fancypagestyle{plain}{%
+  \fancyhf{}%
+  \fancyfoot[C]{\color{red!70!black}\textbf{DRAFT}\ \textbar\ working draft, not a finalized document}%
+  \fancyfoot[R]{\thepage}%
+  \renewcommand{\headrulewidth}{0pt}%
+  \renewcommand{\footrulewidth}{0.4pt}%
+}
+"""
+
+
+def run_pandoc(md_path: Path, out_pdf: Path, *,
+               style=None, draft: bool = False) -> None:
+    """Render a markdown file → PDF via pandoc + xelatex.
+
+    ``draft=True`` injects a ``DRAFT`` footer on every page via fancyhdr.
+    """
     if style is None:
         # Sensible defaults; tests pass a real ReportStyle here.
         margin = "0.75in"
@@ -126,6 +138,8 @@ def run_pandoc(md_path: Path, out_pdf: Path, *, style=None) -> None:
         "-V", f"monofont={monofont}",
         f"--highlight-style={highlight}",
     ]
+    if draft:
+        cmd += ["-V", f"header-includes={_DRAFT_HEADER}"]
     print(f"[reports] pandoc → {out_pdf}", file=sys.stderr, flush=True)
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:

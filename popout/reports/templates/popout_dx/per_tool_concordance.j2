@@ -30,7 +30,7 @@ cluster-specific, not cohort-wide.
 {% if panel.present %}
 ## popout vs {{ panel.tool }}
 
-| RF label | mean CCC | mean r | n pass | n fail | n μ·∅ | verdict |
+| RF label | mean CCC | mean r | n pass | n fail | n μ·0 | verdict |
 |:---------|---------:|-------:|-------:|-------:|------:|:--------|
 {% for r in panel.summary_rows -%}
 | `{{ r.rf_label }}` | {{ r.mean_ccc }} | {{ r.mean_r }} | {{ r.n_pass }} | {{ r.n_fail }} | {{ r.n_null }} | {{ r.verdict }} |

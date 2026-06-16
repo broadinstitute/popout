@@ -46,7 +46,7 @@ from pathlib import Path
 
 
 WORKFLOW_NAME = "flare_validate"
-SCHEMA_VERSION = "4.0.0"
+SCHEMA_VERSION = "5.0.0"
 
 VALIDATION_DIR = Path(__file__).resolve().parent
 DEFAULT_CHROM_SIZES = VALIDATION_DIR / "data" / "grch38.chrom.sizes"

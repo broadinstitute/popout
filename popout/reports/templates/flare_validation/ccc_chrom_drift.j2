@@ -4,7 +4,7 @@
 
 ## Per-chromosome self-ancestry proportion
 
-For each ancestry X, restrict to samples whose chr1 X-proportion is ≥
+For each ancestry X, restrict to samples whose chr1 X-proportion is >=
 {{ "%.2f"|format(data.threshold if data.get("present") else 0.95) }}.
 Plot one line per stratum: per-chrom median of the SAME ancestry's
 proportion across the stratum's samples.
@@ -20,7 +20,7 @@ proportion across the stratum's samples.
 
 \small
 
-| stratum | n | chr1 median | mean(chr2..22 medians) | drift (chr1 − others) |
+| stratum | n | chr1 median | mean(chr2..22 medians) | drift (chr1 - others) |
 |:--------|--:|------------:|-----------------------:|----------------------:|
 {% for s in data.strata if s.drift is not none -%}
 | `{{ s.label }}`-dominant | {{ "{:,}".format(s.n) }} | {{ "%.3f"|format(s.chr1_median) }} | {{ "%.3f"|format(s.others_mean) }} | {{ "%+.3f"|format(s.drift) }} |

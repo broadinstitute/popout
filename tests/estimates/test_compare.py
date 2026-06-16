@@ -118,7 +118,7 @@ def test_compare_flare_vs_rf_with_mid_fold():
     # eur counts s0. FLARE's hard_calls is None so no confusion is built
     # in this case.
     assert out.confusion is None
-    assert "MID→eur" in out.tag
+    assert "MID->eur" in out.tag
 
 
 def test_compare_flare_vs_rf_drop_rule_zeroes_mid_mass():

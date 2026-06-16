@@ -12,14 +12,14 @@ of the component to the RF tool's signal for that label) and
 **`slope` (m)** is the linear-regression slope of FLARE proportion on
 RF probability across samples (only defined where both axes have
 enough variance). A well-behaved FLARE component answers exactly one
-RF label on the diagonal with `m ≈ 1`.
+RF label on the diagonal with `m ~ 1`.
 
 **How to read this chart.** One row per FLARE component (cohort μ
 shown on the left as a small bar); one column per RF-assigned
 superpop label. Cells are the cohort-pooled `max_cal` (μ-weighted
 mean across clusters that defined that pair); the subscript `m=` is
 the cohort-median slope across the same clusters. A bright diagonal
-cell with `m ≈ 1` = the FLARE component is calibrated against the RF
+cell with `m ~ 1` = the FLARE component is calibrated against the RF
 tool's call for that label. A bright off-diagonal = the FLARE
 component is being driven by a different RF label (leakage). Hatched
 cells = `max_cal > 1`, which usually means the reference panel

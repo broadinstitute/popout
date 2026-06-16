@@ -39,7 +39,7 @@ from .._helpers import (
 
 
 def _cluster_mu_map(bundle_dir) -> dict[tuple[str, str, str], float]:
-    """(cluster_id, chrom, ancestry) → cluster_mu, from concordance_metrics.tsv."""
+    """(cluster_id, chrom, ancestry) -> cluster_mu, from concordance_metrics.tsv."""
     path = bundle_dir / "cohort" / "concordance_metrics.tsv"
     header, rows = read_tsv(path)
     out: dict[tuple[str, str, str], float] = {}
@@ -134,7 +134,7 @@ def compute(ctx, section=None) -> dict:
         base = anc.split(".")[0]
         if base == rf:
             continue
-        off_diag.append((f"FLARE=`{anc}` → RF=`{rf}`", v))
+        off_diag.append((f"FLARE=`{anc}` -> RF=`{rf}`", v))
     top_off = topn(off_diag, n=3)
     n_over1 = len(over1_cells)
 

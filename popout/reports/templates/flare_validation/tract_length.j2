@@ -21,12 +21,12 @@ on a log10 x-axis. The row partitions into three non-overlapping lanes:
 - **Sina rain** (below): one raindrop per `(cluster, chrom)` mean,
   density-aware jitter.
 
-The open **◇ diamond** on each row marks the model expectation,
+The open **<> diamond** on each row marks the model expectation,
 `100 / (median model_T_gen × K=5)`. A cohort bar sitting much shorter
 than the diamond = over-segmentation; much longer = under-segmentation.
 
 {% if chart %}
-{{ figure(path=chart, caption="Tract length per ancestry — raincloud + sina rain (log scale). Raindrops are per-(cluster, chrom) means; ◇ = model expectation.", tag=tag) }}
+{{ figure(path=chart, caption="Tract length per ancestry — raincloud + sina rain (log scale). Raindrops are per-(cluster, chrom) means; <> = model expectation.", tag=tag) }}
 {% else %}
 > **MISSING:** `cohort/tract_length_stats.tsv`
 {% endif %}

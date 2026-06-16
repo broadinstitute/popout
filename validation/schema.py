@@ -25,7 +25,29 @@ from pathlib import Path
 from typing import Iterable
 
 
-SCHEMA_VERSION = "4.0.0"
+SCHEMA_VERSION = "5.0.0"
+#
+# v5.0.0 — collector fidelity audit (see my_notes/validation/COLLECTOR_AUDIT.md).
+#
+#   - cohort/hap_disagreement.tsv is rekeyed by **FLARE per-sample top-1**
+#     ancestry (column ``flare_top1``). RF never appears in this schema —
+#     it is a category A (FLARE-only) metric. No MID row possible.
+#   - hap_disagreement/per_sample.tsv (per cluster) gains
+#     ``flare_top1``, ``dominant_anc_h1``, ``dominant_anc_h2``, and the
+#     raw ``rf_hard_label`` + ``rf_max_prob`` columns. The ``"mixed"``
+#     and ``"unjoined"`` pseudo-labels are retired; a missing RF join
+#     now raises.
+#   - cohort/calibration_slope.tsv and cohort/soft_correlation_rf.tsv
+#     now apply the cohort-level ``mid_rule`` (drop or fold_to_eur,
+#     where ``fold_to_eur`` degrades to drop because slope and r are
+#     not summable across RF columns). The manifest's
+#     ``transformations`` list records every table the rule touched.
+#   - compare_to_rf.py no longer writes the ``# n_low_confidence``
+#     footnote row into the confusion matrix; it lives in
+#     ``confusion/low_confidence.json`` as a sidecar.
+#   - The collator skips any ``#``-prefixed line in
+#     ``rf_confusion_matrix.tsv`` to belt-and-braces against future
+#     sidecar leakage.
 #
 # v4.0.0 — flare_validate WDL input contract refactor.
 #
@@ -92,6 +114,7 @@ REQUIRED_CLUSTER_FILES: tuple[str, ...] = (
     # structural/
     "structural/tract_length_summary.json",
     "structural/switch_rate_summary.json",
+    "structural/switch_rate_per_hap.tsv",
     # hap_disagreement/
     "hap_disagreement/per_sample.tsv",
     "hap_disagreement/summary.json",
@@ -182,6 +205,7 @@ REQUIRED_COHORT_FILES: tuple[str, ...] = (
     "cohort/calibration_slope.tsv",
     "cohort/tract_length_stats.tsv",
     "cohort/switch_rate_stats.tsv",
+    "cohort/switch_rate_per_hap.tsv",
     "cohort/hap_disagreement.tsv",
     "cohort/regional_windows.tsv.gz",
     "cohort/regional_meta.tsv",

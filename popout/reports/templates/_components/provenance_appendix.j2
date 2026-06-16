@@ -21,3 +21,14 @@
 | `{{ k }}` | `{{ v[:12] }}` |
 {% endfor %}
 {% endif %}
+
+## Per-section label-space tag
+
+Full per-section tag, including sections whose tag is suppressed in the
+body. Two figures with the same tag share label-space mapping.
+
+| section | target | pair | mid_rule | tag |
+|---|---|---|---|---|
+{% for sec in ctx.config.sections if sec.pair %}
+| `{{ sec.id }}` | {{ sec.target_space }} | {{ sec.pair | join(", ") }} | {{ sec.mid_rule or "—" }} | `{{ ctx.verbose_tag(sec.id) }}` |
+{% endfor %}

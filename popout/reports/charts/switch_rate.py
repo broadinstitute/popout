@@ -1,76 +1,50 @@
-"""FLARE switch rate — raincloud + sina rain, per FLARE top-1 ancestry.
+"""FLARE switch rate per FLARE top-1 ancestry: raincloud + sina rain.
 
-Each ``(cluster_id, chrom)`` row in ``cohort/switch_rate_stats.tsv`` is
-assigned to the *modal* FLARE top-1 ancestry of its samples (from
-``cohort_global.tsv`` via ``load_cohort_cube``). One row per stratum.
+Each haplotype's switch count is bucketed by **FLARE's own dominant
+ancestry on that haplotype** (column ``dominant_anc`` in
+``cohort/switch_rate_per_hap.tsv``). One row per stratum.
 
 Per row:
-  - cohort-pooled bar = n_haplotypes-weighted mean of that stratum's
-    per-(cluster, chrom) means
-  - half-violin = KDE of per-(cluster, chrom) means in the stratum
-  - sina rain  = one raindrop per (cluster, chrom) mean
+  - cohort-pooled bar = stratum mean (n_haplotypes-weighted)
+  - half-violin = KDE of per-(cluster, chrom) per-hap mean switch
+    counts within the stratum
+  - sina rain = one raindrop per (cluster, chrom, dominant_anc) cell
 
-The previous per-(cluster, chrom) forest was illegible on production
-cohorts (clusters × chroms grows linearly); top-1 ancestry collapses
-the y-axis to N_strata while keeping the per-(cluster, chrom) drift
-visible as the rain shape.
-
-Data: ``cohort/switch_rate_stats.tsv`` (cluster_id, chrom, n_haplotypes,
-min, median, mean, p99, max) and ``cohort_global.tsv`` (for the
-(cluster, chrom) → modal top-1 ancestry map).
+Data:
+  - ``cohort/switch_rate_per_hap.tsv`` (v5+): one row per
+    ``(cluster_id, chrom, sample_id, hap, dominant_anc, n_switches)``.
+  - ``cohort/switch_rate_stats.tsv``: cohort-aggregate min/median/p99/max
+    for the headline.
 """
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import defaultdict
 
 import matplotlib.pyplot as plt
-import numpy as np
 
 from popout.labelspace.registry import SP5
 
 from .._helpers import (
-    load_cohort_cube,
     n_weighted_mean,
     raincloud_panel,
     read_tsv,
 )
 
 
-def _cluster_chrom_to_top1(cube_data: dict) -> dict[tuple[str, str], str]:
-    if not cube_data:
-        return {}
-    cube = cube_data["cube"]
-    members = list(cube_data["label_space"].members)
-    chroms = list(cube_data["chroms"])
-    chrom_idx = {c: i for i, c in enumerate(chroms)}
-    sample_ids = list(cube_data["sample_ids"])
-    cluster_of = cube_data["cluster_of"]
-    sid_idx = {sid: i for i, sid in enumerate(sample_ids)}
-
-    counts: dict[tuple[str, str], Counter] = {}
-    for (sid, chrom), cid in cluster_of.items():
-        si = sid_idx.get(sid)
-        ci = chrom_idx.get(chrom)
-        if si is None or ci is None:
-            continue
-        top1 = members[int(np.argmax(cube[si, ci, :]))]
-        counts.setdefault((cid, chrom), Counter())[top1] += 1
-    return {k: c.most_common(1)[0][0] for k, c in counts.items()}
-
-
-def compute(ctx, section=None) -> dict:
-    path = ctx.bundle_dir / "cohort" / "switch_rate_stats.tsv"
-    header, rows = read_tsv(path)
+def _read_cohort_aggregate(bundle_dir) -> dict:
+    header, rows = read_tsv(bundle_dir / "cohort" / "switch_rate_stats.tsv")
     if not rows:
-        return {"present": False}
+        return {}
     col = {h: i for i, h in enumerate(header)}
-
-    items: list[tuple[str, str, int, float, float, float, float, float]] = []
+    cohort_min = None
+    cohort_p99 = None
+    cohort_max = None
+    cohort_n_hap = 0
+    means = []
+    medians = []
     for r in rows:
         try:
-            cid = r[col["cluster_id"]]
-            chrom = r[col["chrom"]]
             n_hap = int(float(r[col["n_haplotypes"]]))
             mn = float(r[col["min"]])
             med = float(r[col["median"]])
@@ -79,60 +53,100 @@ def compute(ctx, section=None) -> dict:
             mx = float(r[col["max"]])
         except (IndexError, KeyError, ValueError):
             continue
-        items.append((cid, chrom, n_hap, mn, med, mean, p99, mx))
-    if not items:
+        cohort_min = mn if cohort_min is None else min(cohort_min, mn)
+        cohort_p99 = p99 if cohort_p99 is None else max(cohort_p99, p99)
+        cohort_max = mx if cohort_max is None else max(cohort_max, mx)
+        cohort_n_hap += n_hap
+        means.append((n_hap, mean))
+        medians.append((n_hap, med))
+    cohort_mean = n_weighted_mean(means) or 0.0
+    cohort_med = n_weighted_mean(medians) or 0.0
+    return {
+        "cohort_min": cohort_min or 0.0,
+        "cohort_max": cohort_max or 0.0,
+        "cohort_p99": cohort_p99 or 0.0,
+        "cohort_mean": cohort_mean,
+        "cohort_med": cohort_med,
+        "cohort_n_hap": cohort_n_hap,
+    }
+
+
+def compute(ctx, section=None) -> dict:
+    path = ctx.bundle_dir / "cohort" / "switch_rate_per_hap.tsv"
+    header, rows = read_tsv(path)
+    if not rows:
         return {"present": False}
+    col = {h: i for i, h in enumerate(header)}
+    for required in ("dominant_anc", "n_switches",
+                     "cluster_id", "chrom", "sample_id", "hap"):
+        if required not in col:
+            raise RuntimeError(
+                f"{path}: expected v5 column {required!r}; "
+                f"header was {header!r}. Regenerate the bundle under "
+                f"schema v5.0.0."
+            )
 
-    mid_rule = (section.mid_rule if section is not None else None) or "drop"
-    cube_data = load_cohort_cube(
-        ctx.bundle_dir, label_space=SP5, mid_rule=mid_rule)
-    cc_to_anc = _cluster_chrom_to_top1(cube_data)
-
-    cohort_mean = n_weighted_mean(
-        [(it[2], it[5]) for it in items]) or 0.0
-    cohort_med = n_weighted_mean(
-        [(it[2], it[4]) for it in items]) or 0.0
-    cohort_min = min(it[3] for it in items)
-    cohort_p99 = max(it[6] for it in items)
-    cohort_max = max(it[7] for it in items)
-    cohort_n_hap = sum(it[2] for it in items)
+    # Per (cluster, chrom, dominant_anc): collect haplotype switch counts.
+    # Each raindrop in the chart is one (cluster, chrom, dom_anc) cell's
+    # mean switch count, with n_hap haplotypes contributing.
+    per_cell: dict[tuple[str, str, str], list[int]] = defaultdict(list)
+    for r in rows:
+        try:
+            cid = r[col["cluster_id"]]
+            chrom = r[col["chrom"]]
+            dom = r[col["dominant_anc"]]
+            sw = int(r[col["n_switches"]])
+        except (IndexError, KeyError, ValueError):
+            continue
+        per_cell[(cid, chrom, dom)].append(sw)
 
     members = list(SP5.members)
     strata_rows: list[dict] = []
     for lab in members:
-        sub = [it for it in items if cc_to_anc.get((it[0], it[1])) == lab]
-        means = [it[5] for it in sub]
-        if not sub:
-            strata_rows.append({"label": lab, "n_hap": 0, "n_cc": 0,
-                                "min": None, "median": None, "mean": None,
-                                "p99": None, "max": None, "means": []})
+        cell_means: list[tuple[int, float]] = []
+        per_row_means: list[float] = []
+        all_switches: list[int] = []
+        for (cid, chrom, dom), switches in per_cell.items():
+            if dom != lab or not switches:
+                continue
+            cell_mean = sum(switches) / len(switches)
+            cell_means.append((len(switches), cell_mean))
+            per_row_means.append(cell_mean)
+            all_switches.extend(switches)
+        if not all_switches:
+            strata_rows.append({
+                "label": lab, "n_hap": 0, "n_cells": 0,
+                "min": None, "median": None, "mean": None,
+                "p99": None, "max": None, "means": [],
+            })
             continue
-        s_mean = n_weighted_mean([(it[2], it[5]) for it in sub]) or 0.0
-        s_med = n_weighted_mean([(it[2], it[4]) for it in sub]) or 0.0
+        all_switches.sort()
+        n = len(all_switches)
+        s_mean = n_weighted_mean(cell_means) or 0.0
+        s_med = float(all_switches[n // 2])
+        p99_idx = max(0, int(round(0.99 * (n - 1))))
         strata_rows.append({
             "label": lab,
-            "n_hap": sum(it[2] for it in sub),
-            "n_cc": len(sub),
-            "min": min(it[3] for it in sub),
+            "n_hap": n,
+            "n_cells": len(cell_means),
+            "min": int(all_switches[0]),
             "median": s_med,
             "mean": s_mean,
-            "p99": max(it[6] for it in sub),
-            "max": max(it[7] for it in sub),
-            "means": means,
+            "p99": int(all_switches[p99_idx]),
+            "max": int(all_switches[-1]),
+            "means": per_row_means,
         })
-    n_unmapped = sum(1 for it in items if (it[0], it[1]) not in cc_to_anc)
+
+    aggregate = _read_cohort_aggregate(ctx.bundle_dir)
+    n_unstratified = sum(1 for r in rows
+                         if r[col["dominant_anc"]] not in members)
 
     return {
         "present": True,
         "strata_rows": strata_rows,
-        "cohort_mean": cohort_mean,
-        "cohort_med": cohort_med,
-        "cohort_min": cohort_min,
-        "cohort_p99": cohort_p99,
-        "cohort_max": cohort_max,
-        "cohort_n_hap": cohort_n_hap,
-        "n_cluster_chrom": len(items),
-        "n_unmapped_cluster_chrom": n_unmapped,
+        "n_haplotypes_total": sum(r["n_hap"] for r in strata_rows),
+        "n_unstratified_haplotypes": n_unstratified,
+        **aggregate,
     }
 
 
@@ -147,7 +161,7 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
     strata = [r for r in data["strata_rows"] if r["n_hap"] > 0]
     if not strata:
         fig, ax = plt.subplots(figsize=(6, 1.2))
-        ax.text(0.5, 0.5, "no strata with samples",
+        ax.text(0.5, 0.5, "no strata with haplotypes",
                 ha="center", va="center")
         ax.axis("off")
         return fig
@@ -187,8 +201,8 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
     ax_legend.legend(
         [bar_proxy, violin_proxy, rain_proxy],
         ["bar = stratum mean (n_haplotypes-weighted)",
-         "half-violin = KDE of per-(cluster, chrom) means",
-         "raindrop = one (cluster, chrom) mean"],
+         "half-violin = KDE of per-(cluster, chrom) cell means",
+         "raindrop = one (cluster, chrom, dominant_anc) cell mean"],
         loc="center", ncol=3, fontsize=9, frameon=False,
     )
     return fig

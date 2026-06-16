@@ -73,6 +73,11 @@ class SectionSpec:
     @classmethod
     def from_dict(cls, d: dict[str, Any], defaults: dict[str, Any]) -> "SectionSpec":
         d = {**defaults, **d}
+        # ``tag_policy`` is a report-wide knob carried on ReportConfig; do
+        # not leak it into per-section options.
+        reserved = {"id", "template", "pair",
+                    "target_space", "mid_rule", "when",
+                    "tag_policy", "draft"}
         return cls(
             id=d["id"],
             template=d["template"],
@@ -80,15 +85,14 @@ class SectionSpec:
             target_space=d.get("target_space", "SP5"),
             mid_rule=d.get("mid_rule"),
             when=d.get("when"),
-            options={
-                k: v for k, v in d.items()
-                if k not in {"id", "template", "pair",
-                              "target_space", "mid_rule", "when"}
-            },
+            options={k: v for k, v in d.items() if k not in reserved},
         )
 
 
 # ── Report ─────────────────────────────────────────────────────────────
+
+
+_TAG_POLICIES = ("verbose", "minimal")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -97,6 +101,9 @@ class ReportConfig:
     style: ReportStyle
     sections: tuple[SectionSpec, ...]
     raw: dict[str, Any]                 # the original parsed YAML dict
+    defaults: dict[str, Any] = dataclasses.field(default_factory=dict)
+    tag_policy: str = "verbose"         # "verbose" | "minimal"
+    draft: bool = False                 # stamp DRAFT footer on every page
 
 
 def load_report_config(yaml_path: str | Path) -> ReportConfig:
@@ -107,6 +114,13 @@ def load_report_config(yaml_path: str | Path) -> ReportConfig:
     title = raw.get("title", "")
     style = ReportStyle.from_dict(raw.get("style"))
     defaults = raw.get("defaults", {}) or {}
+    tag_policy = defaults.get("tag_policy", "verbose")
+    if tag_policy not in _TAG_POLICIES:
+        raise ValueError(
+            f"{yaml_path}: defaults.tag_policy must be one of "
+            f"{_TAG_POLICIES}; got {tag_policy!r}"
+        )
+    draft = bool(defaults.get("draft", False))
     sec_dicts = raw.get("sections", []) or []
     if not isinstance(sec_dicts, list):
         raise ValueError(f"{yaml_path}: 'sections' must be a list")
@@ -120,4 +134,6 @@ def load_report_config(yaml_path: str | Path) -> ReportConfig:
             )
         sections.append(SectionSpec.from_dict(s, defaults))
     return ReportConfig(title=title, style=style,
-                         sections=tuple(sections), raw=raw)
+                         sections=tuple(sections), raw=raw,
+                         defaults=defaults, tag_policy=tag_policy,
+                         draft=draft)

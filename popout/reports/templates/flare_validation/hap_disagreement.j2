@@ -1,4 +1,4 @@
-{# Hap disagreement per superpop label. #}
+{# Hap disagreement per FLARE top-1 ancestry. #}
 {% from "_macros.j2" import figure %}
 {% set tag = ctx.tag(section.id) %}
 
@@ -9,27 +9,27 @@
 non-exclusive interpretations: real biological asymmetry (admixed
 individuals can have one parent contribute a different ancestry from
 the other), or a phasing-error proxy (switch errors in upstream
-phasing artificially split a single-ancestry haplotype).
+phasing artificially split a single-ancestry haplotype). The metric
+is **FLARE-internal end to end**: nothing about RF enters here.
 
-**How to read this chart.** Each row is one superpop label (assigned
-by the upstream RF classifier). The row partitions into three
-non-overlapping lanes:
+**How to read this chart.** Each row is one **FLARE top-1 ancestry**
+stratum. The row partitions into three non-overlapping lanes:
 
 - **Half-violin** (above): KDE of per-`(cluster, chrom)` mean
-  disagreement values within the label.
-- **Cohort bar** (middle): label-pooled mean, weighted by sample
+  disagreement values within the stratum.
+- **Stratum bar** (middle): stratum-pooled mean, weighted by sample
   count (rows with fewer than 5 samples are excluded before pooling).
 - **Sina rain** (below): one raindrop per `(cluster, chrom)` mean,
   density-aware jitter.
 
-The shaded grey band (0.10–0.30) is the expected baseline for
-genuinely admixed labels; pure-ancestry labels should sit near zero.
-A bar that pushes past the band on a pure-ancestry label points more
-toward phasing noise than biology; rain dots packed tightly behind it
-say the whole cohort sees it.
+The shaded grey band (0.10-0.30) is the expected baseline for
+genuinely admixed top-1 strata; pure-ancestry strata should sit near
+zero. A bar that pushes past the band on a pure-ancestry stratum
+points more toward phasing noise than biology; rain dots packed
+tightly behind it say the whole cohort sees it.
 
 {% if chart %}
-{{ figure(path=chart, caption="Hap disagreement per superpop label — raincloud + sina rain. Raindrops are per-(cluster, chrom) means.", tag=tag) }}
+{{ figure(path=chart, caption="Hap disagreement per FLARE top-1 ancestry - raincloud + sina rain. Raindrops are per-(cluster, chrom) means.", tag=tag) }}
 {% else %}
 > **MISSING:** `cohort/hap_disagreement.tsv`
 {% endif %}
@@ -38,9 +38,9 @@ say the whole cohort sees it.
 **In this run.**
 
 {% if data.top_pure %}
-- Highest disagreement on pure-ancestry labels (suggestive of phasing noise): {% for lab, v in data.top_pure %}{{ lab }} ({{ "%.2f"|format(v) }}){{ "; " if not loop.last else "." }}{% endfor %}
+- Highest disagreement on pure-ancestry strata (suggestive of phasing noise): {% for lab, v in data.top_pure %}{{ lab }} ({{ "%.2f"|format(v) }}){{ "; " if not loop.last else "." }}{% endfor %}
 {% endif %}
 {% if data.top_spread %}
-- Largest cluster-to-cluster spread per superpop label: {% for lab, v in data.top_spread %}`{{ lab }}` (Δ={{ "%.2f"|format(v) }}){{ "; " if not loop.last else "." }}{% endfor %}
+- Largest cluster-to-cluster spread per stratum: {% for lab, v in data.top_spread %}`{{ lab }}` (delta={{ "%.2f"|format(v) }}){{ "; " if not loop.last else "." }}{% endfor %}
 {% endif %}
 {% endif %}

@@ -4,7 +4,7 @@
 
 ## Per-sample chrom-stdev within X-dominant strata
 
-For each X-dominant sample (chr1 X-proportion ≥
+For each X-dominant sample (chr1 X-proportion >=
 {{ "%.2f"|format(data.threshold if data.get("present") else 0.95) }}),
 compute the standard deviation of X-proportion across chr1..chr22.
 One histogram panel per ancestry; log y-axis. Median and p95

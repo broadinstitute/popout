@@ -99,7 +99,7 @@ def main(argv: list[str] | None = None) -> int:
     if md_only:
         _log("--out is .md; skipping pandoc")
     else:
-        run_pandoc(md_path, args.out, style=cfg.style)
+        run_pandoc(md_path, args.out, style=cfg.style, draft=cfg.draft)
         if not args.keep_md:
             md_path.unlink(missing_ok=True)
         _log(f"wrote {args.out}")

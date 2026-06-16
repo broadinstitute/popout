@@ -5,8 +5,8 @@
 ## Cohort decomposition by FLARE top-N label
 
 Per sample, derive a label from the chr1 5-ancestry FLARE proportion vector:
-`X≥{{ "%.2f"|format(data.threshold_dominant if data.get("present") else 0.95) }}` if top-1 clears the dominant threshold,
-`X-leaning` if top-1 ≥ {{ "%.2f"|format(data.threshold_leaning if data.get("present") else 0.85) }} and top-2 < {{ "%.2f"|format(data.threshold_admix if data.get("present") else 0.10) }},
+`X>={{ "%.2f"|format(data.threshold_dominant if data.get("present") else 0.95) }}` if top-1 clears the dominant threshold,
+`X-leaning` if top-1 >= {{ "%.2f"|format(data.threshold_leaning if data.get("present") else 0.85) }} and top-2 < {{ "%.2f"|format(data.threshold_admix if data.get("present") else 0.10) }},
 alpha-sorted top-2 or top-3 otherwise.
 
 {% if chart %}

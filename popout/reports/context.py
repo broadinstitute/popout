@@ -69,8 +69,53 @@ class ReportContext:
         raise KeyError(f"no section with id {section_id!r}")
 
     def tag(self, section_id: str) -> str:
-        """Per-section figure-tag shorthand. Only the tools listed in
-        the section's ``pair`` appear in the tag."""
+        """Per-section figure-tag shorthand.
+
+        The report's ``tag_policy`` (set in the YAML ``defaults`` block)
+        controls verbosity:
+
+        - ``"verbose"`` (default; popout_dx): always emit the full tag
+          ``L=<target>/MID± | tool=>method ... | v=<hash>``.
+        - ``"minimal"`` (FLARE validation): when every parameter of
+          this section matches the report's defaults and every
+          per-tool matcher is ``by_name`` (the silent default in a
+          verbatim-FLARE report), suppress the tag entirely. Otherwise
+          emit a slimmed tag with ``=>name`` clauses removed and the
+          ``/MID±`` qualifier dropped when it carries no information.
+        """
+        sec = self.section(section_id)
+        if not sec.pair:
+            return ""
+        target = get(sec.target_space)
+        assignments = []
+        for tool in sec.pair:
+            est = self.estimates.get(tool)
+            members = est.label_space.members if est is not None else target.members
+            a = by_name(members, target, source={"tool": tool})
+            assignments.append(a)
+
+        policy = getattr(self.config, "tag_policy", "verbose")
+        if policy == "minimal":
+            default_target = self.config.defaults.get("target_space", "SP5")
+            default_mid = self.config.defaults.get("mid_rule")
+            if (sec.target_space == default_target
+                    and sec.mid_rule == default_mid
+                    and all(a.method == "name" for a in assignments)):
+                return ""
+            return format_tag(
+                target, assignments, mid_rule=sec.mid_rule,
+                suppress_default_mid=True,
+                suppress_name_clauses=True,
+            )
+        return format_tag(target, assignments, mid_rule=sec.mid_rule)
+
+    def verbose_tag(self, section_id: str) -> str:
+        """Full verbose tag for a section, ignoring the report policy.
+
+        Used by the provenance appendix so the audit trail records the
+        complete label-space coordinates even when the body suppresses
+        them.
+        """
         sec = self.section(section_id)
         if not sec.pair:
             return ""

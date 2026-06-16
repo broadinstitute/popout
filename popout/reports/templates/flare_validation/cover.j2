@@ -9,9 +9,13 @@
 ### `{{ ctx.bundle.get("run_name", "") }}`
 
 This report compares FLARE against Rye and the upstream RF classifier
-on the AoU cohort. Each section's figure footer carries the **label
-space tag** for that section — see the next page for the conventions
-used throughout.
+on the AoU cohort. FLARE component names are taken **verbatim** from
+the panel VCF header, so most sections live in the report's default
+label space (`SP5`, MID dropped) with name-based matching and carry
+no figure footer. Sections that deviate (for example FLARE vs RF on
+`SP6`) print a slim tag under the figure caption; the full
+per-section tag is always listed in the provenance appendix. See the
+next page for the conventions.
 
 | key | value |
 |---|---|

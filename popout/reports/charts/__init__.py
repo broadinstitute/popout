@@ -33,7 +33,6 @@ from . import (
     ccc_pair_mad,
     coarse_grid,
     cohort_composition,
-    cohort_structure_3way_face,
     cohort_structure_pair_census,
     cohort_structure_top1_top2,
     concordance_strip,
@@ -47,7 +46,6 @@ from . import (
     per_sample_mae_violin,
     regional_manhattan,
     switch_rate,
-    ternary,
     tract_length,
     traffic_light_grid,
 )
@@ -66,7 +64,6 @@ CHARTS: dict[str, Any] = {
     "ccc_pair_mad": ccc_pair_mad,
     "coarse_grid": coarse_grid,
     "cohort_composition": cohort_composition,
-    "cohort_structure_3way_face": cohort_structure_3way_face,
     "cohort_structure_pair_census": cohort_structure_pair_census,
     "cohort_structure_top1_top2": cohort_structure_top1_top2,
     "concordance_strip": concordance_strip,
@@ -80,7 +77,6 @@ CHARTS: dict[str, Any] = {
     "per_sample_mae_violin": per_sample_mae_violin,
     "regional_manhattan": regional_manhattan,
     "switch_rate": switch_rate,
-    "ternary": ternary,
     "tract_length": tract_length,
     "traffic_light_grid": traffic_light_grid,
 }

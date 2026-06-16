@@ -81,10 +81,16 @@ from statsmodels.stats.multitest import multipletests
 # ── Static-input loaders ──────────────────────────────────────────────────
 
 
-def load_rf_hard_labels(path: Path, *, mixed_threshold: float = 0.8) -> dict[str, str]:
-    """Return sample_id -> RF hard label (afr/eur/.../mixed). Mirrors the
-    semantics of the old validate_hap_disagreement.load_rf_hard_labels."""
-    out: dict[str, str] = {}
+def load_rf_hard_labels(path: Path) -> dict[str, tuple[str, float]]:
+    """Return ``sample_id -> (rf_hard_label, rf_max_prob)``.
+
+    The RF hard label is carried verbatim from the TSV's
+    ``ancestry_pred`` column; ``rf_max_prob`` is the corresponding
+    confidence. Downstream callers can apply a max-prob threshold if
+    they want to gate on confidence, but **no relabelling happens
+    here**: the collector never invents pseudo-labels like ``mixed``.
+    """
+    out: dict[str, tuple[str, float]] = {}
     with open(path) as f:
         header = f.readline().rstrip("\n").split("\t")
         rid_col = header.index("research_id")
@@ -95,8 +101,7 @@ def load_rf_hard_labels(path: Path, *, mixed_threshold: float = 0.8) -> dict[str
             rid = parts[rid_col]
             pred = parts[pred_col]
             probs = ast.literal_eval(parts[prob_col])
-            max_p = max(probs)
-            out[rid] = pred if max_p >= mixed_threshold else "mixed"
+            out[rid] = (pred, float(max(probs)))
     return out
 
 
@@ -640,10 +645,12 @@ def run_collector(args: argparse.Namespace) -> None:
 
     write_structural_outputs(
         tract_lengths_bp, tract_count_h1, tract_count_h2,
+        samples, bp_per_anc_h1, bp_per_anc_h2,
         anc_names, model_T, K, structural_out,
     )
     write_hap_disagreement_outputs(
-        samples, rf_hard_labels, agree_bp, disagree_bp,
+        samples, rf_hard_labels, anc_names,
+        agree_bp, disagree_bp,
         bp_per_anc_h1, bp_per_anc_h2, hap_out,
     )
     write_regional_outputs(
@@ -659,12 +666,23 @@ def write_structural_outputs(
     tract_lengths_bp: dict[int, list[int]],
     tract_count_h1: np.ndarray,
     tract_count_h2: np.ndarray,
+    samples: list[str],
+    bp_per_anc_h1: np.ndarray,
+    bp_per_anc_h2: np.ndarray,
     anc_names: dict[int, str],
     model_T: float | None,
     K: int,
     out_dir: Path,
 ) -> None:
-    """Emit tract_length_summary.json + switch_rate_summary.json."""
+    """Emit tract_length_summary.json + switch_rate_summary.json +
+    switch_rate_per_hap.tsv.
+
+    The per-hap TSV is the durable, FLARE-keyed artifact for switch
+    rate: one row per (sample, hap) with the haplotype's switch
+    count and the haplotype's dominant FLARE ancestry. This lets the
+    report stratify by FLARE top-1 without re-deriving anything from
+    cohort_global.tsv.
+    """
     # ── tract_length_summary.json ──
     per_anc = []
     n_tracts_total = 0
@@ -736,19 +754,51 @@ def write_structural_outputs(
         "max": int(switches.max()),
         "histogram": histogram,
     }, indent=2))
+
+    # ── switch_rate_per_hap.tsv ──
+    # FLARE-keyed durable artifact: one row per (sample, hap). The
+    # haplotype's dominant ancestry is FLARE's argmax over
+    # bp_per_anc. Rows where the hap saw zero data are omitted
+    # (consistent with the cohort aggregates above).
+    dom_h1_idx = bp_per_anc_h1.argmax(axis=1)
+    dom_h2_idx = bp_per_anc_h2.argmax(axis=1)
+    with open(out_dir / "switch_rate_per_hap.tsv", "w") as f:
+        f.write("sample_id\thap\tdominant_anc\tn_switches\n")
+        for i, sid in enumerate(samples):
+            if saw_h1[i]:
+                f.write(f"{sid}\t1\t{anc_names.get(int(dom_h1_idx[i]), f'ancestry_{int(dom_h1_idx[i])}')}\t{int(tract_count_h1[i]) - 1}\n")
+            if saw_h2[i]:
+                f.write(f"{sid}\t2\t{anc_names.get(int(dom_h2_idx[i]), f'ancestry_{int(dom_h2_idx[i])}')}\t{int(tract_count_h2[i]) - 1}\n")
+    print(f"  wrote {out_dir / 'switch_rate_per_hap.tsv'}", flush=True)
     print(f"  wrote {out_dir / 'switch_rate_summary.json'}", flush=True)
 
 
 def write_hap_disagreement_outputs(
     samples: list[str],
-    rf_hard_labels: dict[str, str],
+    rf_hard_labels: dict[str, tuple[str, float]],
+    anc_names: list[str],
     agree_bp: np.ndarray,
     disagree_bp: np.ndarray,
     bp_per_anc_h1: np.ndarray,
     bp_per_anc_h2: np.ndarray,
     out_dir: Path,
 ) -> None:
-    """Emit per_sample.tsv + summary.json."""
+    """Emit ``per_sample.tsv`` + ``summary.json`` for hap disagreement.
+
+    The per-sample TSV is the durable, FLARE-keyed artifact: it carries
+    every sample's hap1-vs-hap2 disagreement fraction along with
+    FLARE's per-hap dominant ancestry name (``dom_h1``, ``dom_h2``)
+    and FLARE's per-sample top-1 (the dominant of ``dom_h1``,
+    ``dom_h2``). The RF label and its max-prob ride along on every row
+    for downstream filtering, but no metric is bucketed against RF and
+    no relabelling happens.
+
+    The summary aggregates by FLARE's per-sample top-1 only (no
+    `per_rf_label` block). RF's MID column can never appear because
+    FLARE has no MID class — this is a category A metric.
+
+    A sample with no RF label is a broken join and raises.
+    """
     total_bp = agree_bp + disagree_bp
     if (total_bp == 0).any():
         # A sample with zero bp means the VCF held no records spanning
@@ -759,47 +809,67 @@ def write_hap_disagreement_outputs(
             f"hap_disagreement undefined"
         )
 
-    # Dominant ancestry per hap (argmax over bp_per_anc).
-    dom_h1 = bp_per_anc_h1.argmax(axis=1)
-    dom_h2 = bp_per_anc_h2.argmax(axis=1)
+    # FLARE per-hap dominant ancestry (argmax over the FLARE bp-per-
+    # ancestry breakdown). FLARE per-sample top-1 = argmax over
+    # (bp_per_anc_h1 + bp_per_anc_h2).
+    dom_h1_idx = bp_per_anc_h1.argmax(axis=1)
+    dom_h2_idx = bp_per_anc_h2.argmax(axis=1)
+    top1_idx = (bp_per_anc_h1 + bp_per_anc_h2).argmax(axis=1)
     disagree_frac = disagree_bp / total_bp
     agree_frac = 1.0 - disagree_frac
 
-    # Per-sample TSV.
-    n_missing_label = 0
-    cols = ["sample_id", "rf_hard_label", "agreement_bp_frac",
-            "disagreement_bp_frac", "total_bp", "dominant_anc_h1", "dominant_anc_h2"]
-    rows: list[tuple] = []
-    per_label_dis: dict[str, list[float]] = defaultdict(list)
-    for i, sid in enumerate(samples):
-        label = rf_hard_labels.get(sid)
-        if label is None:
-            n_missing_label += 1
-            label = "unjoined"
-        rows.append((sid, label, float(agree_frac[i]), float(disagree_frac[i]),
-                     int(total_bp[i]), int(dom_h1[i]), int(dom_h2[i])))
-        per_label_dis[label].append(float(disagree_frac[i]))
+    # Refuse the silent "unjoined" fallback: every sample needs a real
+    # RF label. A missing join is a collector bug, not a data point.
+    missing = [sid for sid in samples if sid not in rf_hard_labels]
+    if missing:
+        raise RuntimeError(
+            f"{len(missing)} samples missing from RF label table; "
+            f"first few: {missing[:5]!r}. The collector does not invent "
+            f"'unjoined' rows — fix the RF join upstream."
+        )
 
+    # Per-sample TSV (durable; FLARE-keyed; RF columns carried for
+    # filtering, not for stratification).
+    cols = [
+        "sample_id",
+        "flare_top1",
+        "dominant_anc_h1",
+        "dominant_anc_h2",
+        "agreement_bp_frac",
+        "disagreement_bp_frac",
+        "total_bp",
+        "rf_hard_label",
+        "rf_max_prob",
+    ]
+    per_top1: dict[str, list[float]] = defaultdict(list)
     with open(out_dir / "per_sample.tsv", "w") as f:
         f.write("\t".join(cols) + "\n")
-        for r in rows:
-            f.write("\t".join(str(x) for x in r) + "\n")
+        for i, sid in enumerate(samples):
+            rf_label, rf_p = rf_hard_labels[sid]
+            top1_name = anc_names[int(top1_idx[i])]
+            row = (
+                sid,
+                top1_name,
+                anc_names[int(dom_h1_idx[i])],
+                anc_names[int(dom_h2_idx[i])],
+                f"{float(agree_frac[i]):.6f}",
+                f"{float(disagree_frac[i]):.6f}",
+                int(total_bp[i]),
+                rf_label,
+                f"{rf_p:.4f}",
+            )
+            f.write("\t".join(str(x) for x in row) + "\n")
+            per_top1[top1_name].append(float(disagree_frac[i]))
     print(f"  wrote {out_dir / 'per_sample.tsv'}", flush=True)
 
-    if n_missing_label:
-        print(f"  WARN: {n_missing_label} samples without RF labels; "
-              f"bucketed as 'unjoined'", flush=True)
-
     cohort_mean = float(disagree_frac.mean())
-    label_order = sorted(per_label_dis.keys(),
-                         key=lambda k: (k == "mixed", k == "unjoined", k))
-    per_rf_label = []
-    for k in label_order:
-        vals = per_label_dis[k]
+    per_flare_top1 = []
+    for k in sorted(per_top1.keys()):
+        vals = per_top1[k]
         if not vals:
             continue
-        per_rf_label.append({
-            "rf_label": k,
+        per_flare_top1.append({
+            "flare_top1": k,
             "n": int(len(vals)),
             "mean": float(np.mean(vals)),
             "median": float(np.median(vals)),
@@ -808,8 +878,7 @@ def write_hap_disagreement_outputs(
     (out_dir / "summary.json").write_text(json.dumps({
         "cohort_mean_disagreement": cohort_mean,
         "n_samples": int(len(samples)),
-        "n_samples_unjoined": int(n_missing_label),
-        "per_rf_label": per_rf_label,
+        "per_flare_top1": per_flare_top1,
     }, indent=2))
     print(f"  wrote {out_dir / 'summary.json'}", flush=True)
 

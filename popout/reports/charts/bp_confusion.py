@@ -103,7 +103,7 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
     ax.set_xticklabels(col_labels)
     ax.set_yticks(range(len(row_labels)))
     ax.set_yticklabels(row_labels)
-    ax.set_xlabel("popout label →")
+    ax.set_xlabel("popout label ->")
     ax.set_ylabel("FLARE label ↓")
     ax.set_title(
         f"bp-weighted confusion — diag {data['agreement_pct']}",

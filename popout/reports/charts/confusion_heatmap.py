@@ -85,7 +85,7 @@ def compute(ctx, section=None) -> dict:
                 continue
             if recall[i, j] > 0.02:
                 off_pairs.append((
-                    f"RF=`{rf}` → FLARE=`{fc}` (n={int(M[i, j]):,})",
+                    f"RF=`{rf}` -> FLARE=`{fc}` (n={int(M[i, j]):,})",
                     recall[i, j],
                 ))
     top_conf = topn(off_pairs, n=3)

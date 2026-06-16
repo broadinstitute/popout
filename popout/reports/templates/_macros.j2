@@ -1,10 +1,9 @@
 {# Shared markdown helpers used by every section template.
 
    Usage in a section template:
-       {% from "_macros.j2" import figure, table, tag_footer %}
+       {% from "_macros.j2" import figure, table %}
        {{ figure(path="...png", caption="...", tag=ctx.tag(section.id)) }}
        {{ table(["lab", "ccc"], rows) }}
-       {{ tag_footer(ctx.tag(section.id)) }}
 
    TABLE CONVENTIONS
    -----------------
@@ -52,9 +51,3 @@
 {% endmacro -%}
 
 
-{%- macro tag_footer(tag) -%}
-{%- if tag %}
-
-`{{ tag }}`
-{% endif %}
-{% endmacro -%}

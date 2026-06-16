@@ -17,14 +17,14 @@ penalise FLARE on truly admixed samples mechanically.
 
 **How to read this chart.** Each row is one ancestry, present in the
 cohort. The row is partitioned into three non-overlapping lanes
-(top → bottom):
+(top -> bottom):
 
 - **Half-violin** (above): KDE of the per-`(cluster, chrom)` values,
   shaded by ancestry. Wider regions = more density.
 - **Cohort bar** (middle): the cohort-pooled, n_samples-weighted
   value, with the printed number to the right.
 - **Sina rain** (below): one dot per `(cluster, chrom)` row that
-  passed the μ-gate (`cluster_mu ≥ 0.01`). Vertical jitter is
+  passed the μ-gate (`cluster_mu >= 0.01`). Vertical jitter is
   proportional to local KDE density so dense clusters of values
   fan out and sparse tails collapse to a thin line.
 
@@ -44,6 +44,6 @@ CCC). Rows with `cluster_mu < 0.01` are degenerate and excluded.
 - Cohort-pooled **Lin's CCC** per ancestry: {% for anc, v in data.pooled_ccc.items() %}`{{ anc }}` ({{ "%.3f"|format(v) if v is not none else "—" }}){{ ", " if not loop.last else "." }}{% endfor %}
 
 {% if data.top_gap %}
-Largest per-cluster **r − CCC** gap (calibration-drift candidates): {% for lab, v in data.top_gap %}`{{ lab }}` ({{ "%+.3f"|format(v) }}){{ "; " if not loop.last else "." }}{% endfor %} — positive gap = FLARE tracks Rye in rank but is offset in absolute value.
+Largest per-cluster **r - CCC** gap (calibration-drift candidates): {% for lab, v in data.top_gap %}`{{ lab }}` ({{ "%+.3f"|format(v) }}){{ "; " if not loop.last else "." }}{% endfor %} — positive gap = FLARE tracks Rye in rank but is offset in absolute value.
 {% endif %}
 {% endif %}

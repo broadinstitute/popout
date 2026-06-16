@@ -3,19 +3,46 @@
 
 # Label-space conventions
 
-Every figure in this report carries a one-line **figure tag** in its
-footer, e.g.
+The **figure tag** is a deterministic one-line answer to "what label
+space is this graph in and how did each tool reach it?" Two charts
+with identical tags are directly comparable; two charts with
+different tags are not — even when they share axis labels.
+
+The full grammar is:
 
 ```
-L=SP5/MID-     | flare=>name | rye=>name
-L=SP5/MID→eur  | flare=>name | rf=>name
+L=<target>/MID±  | <tool1>=><method1> | <tool2>=><method2> | v=<hash>
 ```
 
-The tag is the complete answer to "what label space is this graph in
-and how did each tool reach it?" Two charts with identical tags are
-directly comparable; two charts with different tags are not — even
-when they share axis labels. The tag lists **only the tools that
-actually participate in the chart**.
+For example:
+
+```
+L=SP6/MID+  | popout=>postS | flare=>name | rye=>name | rf=>name | v=ab12cd
+L=SP5/MID->eur  | flare=>name | rf=>name                            | v=...
+```
+
+{% if ctx.config.tag_policy == "minimal" %}
+**This report applies `tag_policy: minimal`.** Because FLARE
+component names are taken verbatim from the panel VCF header and
+every section's matcher is `=>name`, the per-figure tag would be
+identical and uninformative across most of the document. To cut the
+visual noise, tags are emitted only when a section *deviates* from
+the report-level defaults:
+
+- A section that overrides `target_space` (for example FLARE vs RF
+  on `SP6`) emits a slim tag, with the redundant `=>name` clauses
+  and tautological MID markers stripped: e.g. `` `L=SP6/MID- | v=…` ``.
+- Default sections (`SP5`, `mid_rule: drop`, all `=>name`) emit no
+  tag at all under the figure caption.
+- The **provenance appendix at the back lists the full verbose tag
+  for every section**, so the audit trail is intact.
+
+The grammar below remains the authoritative reference for what each
+token means.
+{% else %}
+Every figure in this report carries this tag. The tag lists **only
+the tools that actually participate in the chart**.
+{% endif %}
 
 ## The label spaces
 
@@ -37,12 +64,15 @@ actually participate in the chart**.
 The shared space is named **SP** (superpopulation) — deliberately
 not after any single tool.
 
-**Subcomponent suffixes.** When a tool has more inferred components
-than the target has labels, the extras share a label and pick up
-**rank** suffixes: `afr.1` is the component most strongly correlated
-with AFR; `afr.2` the next; and so on. The rank is by descending
+**Subcomponent suffixes.** When a tool uses a correlation-based
+matcher (`corrH`, `postS`) and has more inferred components than the
+target has labels, the extras share a label and pick up **rank**
+suffixes: `afr.1` is the component most strongly correlated with
+AFR; `afr.2` the next; and so on. The rank is by descending
 correlation, so `afr.1` refers to the same biological signal across
-runs as long as the reference is fixed.
+runs as long as the reference is fixed. **FLARE never picks up rank
+suffixes in this pipeline**: its components are named in the panel
+VCF header and matched verbatim by `=>name`.
 
 ## MID handling
 
@@ -53,12 +83,18 @@ one tool carries MID and the other doesn't, the section commits to a
 
 - `MID-` (drop) — MID mass on the MID-bearing side is dropped before
   comparison. Use when MID is genuinely absent from the cohort.
-- `MID→eur` (fold) — MID mass on the MID-bearing side is added to
+- `MID->eur` (fold) — MID mass on the MID-bearing side is added to
   the EUR column before MID is dropped. Use when one tool's reference
   panel lacks MID and we don't want to penalise it for absent MID
   signal that another tool reported as MID-flavoured EUR.
 
+{% if ctx.config.tag_policy == "minimal" %}
+The rule appears in the figure footer when a section overrides it.
+Sections that use the report-level default appear without a footer;
+their MID rule is recorded in the provenance appendix.
+{% else %}
 The rule appears in the tag for every figure where it matters.
+{% endif %}
 
 ## Matching methods
 
@@ -70,7 +106,9 @@ information the tool emits:
 
 Use when the tool already exposes label names (a VCF `##ANCESTRY=`
 header, a TSV column header). Case-insensitive lookup; deterministic;
-no algorithm. The cheapest and most defensible choice.
+no algorithm. The cheapest and most defensible choice — and the path
+FLARE takes today: its panel populations are read verbatim from the
+VCF header, so no correlation matching or rank-suffixing is needed.
 
 ### `corrH` — correlation + Hungarian assignment
 
@@ -83,27 +121,27 @@ A matching is **bijective** — a one-to-one pairing — when every
 inferred component gets exactly one target label and every target
 label gets exactly one inferred component. This is only possible
 when there are at most as many inferred components as target labels
-(`K_inf ≤ K_ref`):
+(`K_inf <= K_ref`):
 
 ```
-K_inf = 6, K_ref = 6  ──► bijective pairing exists. Hungarian finds
+K_inf = 6, K_ref = 6  --> bijective pairing exists. Hungarian finds
                           the optimal one:
-                          afr ←→ flare_3
-                          amr ←→ flare_1
-                          eas ←→ flare_5
-                          eur ←→ flare_0
-                          mid ←→ flare_4
-                          sas ←→ flare_2
+                          afr <--> flare_3
+                          amr <--> flare_1
+                          eas <--> flare_5
+                          eur <--> flare_0
+                          mid <--> flare_4
+                          sas <--> flare_2
 
-K_inf = 9, K_ref = 6  ──► pigeonhole. Cannot be bijective. Some
+K_inf = 9, K_ref = 6  --> pigeonhole. Cannot be bijective. Some
                           target labels receive multiple inferred
-                          components → the "merge" branch. Each
+                          components -> the "merge" branch. Each
                           extra component folds into its
                           best-correlated label, producing afr.1,
                           afr.2, ... subcomponents.
 ```
 
-So `corrH` is bijective whenever `K_inf ≤ K_ref`. Cardinality is
+So `corrH` is bijective whenever `K_inf <= K_ref`. Cardinality is
 forced by the K-shapes, not a knob.
 
 ### `postS` — posterior correlation + calibration-slope override

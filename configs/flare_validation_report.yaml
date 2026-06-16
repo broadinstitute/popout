@@ -20,6 +20,14 @@ style:
 defaults:
   target_space: SP5
   mid_rule: drop
+  # Suppress the per-figure label-space tag for sections that use only
+  # the report's defaults and only by-name matchers (the common case
+  # now that FLARE calls are taken verbatim). Cross-tool or non-name
+  # sections still emit a slim tag.
+  tag_policy: minimal
+  # Stamp a DRAFT footer on every page. Flip to false once the report
+  # is finalized.
+  draft: true
 
 sections:
   - id: cover
@@ -46,11 +54,6 @@ sections:
     chart: cohort_structure_top1_top2
     pair: [flare]
 
-  - id: cohort_structure_3way_face
-    template: flare_validation/cohort_structure_3way_face.j2
-    chart: cohort_structure_3way_face
-    pair: [flare]
-
   - id: ccc_chrom_drift
     template: flare_validation/ccc_chrom_drift.j2
     chart: ccc_chrom_drift
@@ -74,11 +77,6 @@ sections:
   - id: admixture
     template: flare_validation/admixture.j2
     chart: admixture_bar
-    pair: [flare]
-
-  - id: ternary
-    template: flare_validation/ternary.j2
-    chart: ternary
     pair: [flare]
 
   - id: flare_vs_rye_concordance
@@ -115,8 +113,7 @@ sections:
   - id: hap_disagreement
     template: flare_validation/hap_disagreement.j2
     chart: hap_disagreement
-    pair: [flare, rf]
-    target_space: SP6
+    pair: [flare]
 
   - id: regional
     template: flare_validation/regional.j2

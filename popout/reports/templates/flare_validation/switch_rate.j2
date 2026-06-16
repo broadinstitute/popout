@@ -1,4 +1,4 @@
-{# Switch rate — raincloud per FLARE top-1 ancestry stratum. #}
+{# Switch rate: raincloud per FLARE top-1 ancestry stratum (v5 schema). #}
 {% from "_macros.j2" import figure %}
 {% set tag = ctx.tag(section.id) %}
 
@@ -9,36 +9,37 @@ chromosome. Pure-ancestry haplotypes sit near zero; recently admixed
 haplotypes spread to dozens. Outliers in the 100+ tail are typically
 driven by phasing errors or LAI noise rather than real biology.
 
-**How to read this chart.** Rows are FLARE top-1 ancestry strata —
-each `(cluster_id, chrom)` row in `cohort/switch_rate_stats.tsv`
-is assigned to the *modal* top-1 ancestry of its samples in
-`cohort_global.tsv`, then aggregated. For each stratum row:
+**How to read this chart.** Rows are FLARE top-1 ancestry strata.
+Each haplotype's switch count is bucketed by **FLARE's own dominant
+ancestry on that haplotype** (read directly from
+`cohort/switch_rate_per_hap.tsv`); no re-derivation, no
+approximation. For each stratum row:
 
-- **Half-violin** (above): KDE of per-`(cluster, chrom)` mean switch
-  rates within the stratum.
-- **Cohort bar** (middle): stratum mean, weighted by `n_haplotypes`.
-- **Sina rain** (below): one raindrop per `(cluster, chrom)` mean,
-  density-aware jitter.
+- **Half-violin** (above): KDE of per-`(cluster, chrom, dominant_anc)`
+  cell mean switch counts within the stratum.
+- **Stratum bar** (middle): stratum mean, weighted by `n_haplotypes`.
+- **Sina rain** (below): one raindrop per
+  `(cluster, chrom, dominant_anc)` cell, density-aware jitter.
 
 {% if chart %}
-{{ figure(path=chart, caption="Switch rate per FLARE top-1 ancestry stratum — raincloud + sina rain. Raindrops are per-(cluster, chrom) means.", tag=tag) }}
+{{ figure(path=chart, caption="Switch rate per FLARE top-1 ancestry stratum - raincloud + sina rain. Raindrops are per-(cluster, chrom, dominant_anc) cell means.", tag=tag) }}
 {% else %}
-> **MISSING:** `cohort/switch_rate_stats.tsv`
+> **MISSING:** `cohort/switch_rate_per_hap.tsv`
 {% endif %}
 
 {% if data.get("present") %}
 **In this run.**
 
 - Cohort mean switch rate: **{{ "%.2f"|format(data.cohort_mean) }}** per haplotype (median {{ "%.2f"|format(data.cohort_med) }}, p99 {{ "%.0f"|format(data.cohort_p99) }}, max {{ "%.0f"|format(data.cohort_max) }}).
-- {{ data.n_cluster_chrom }} `(cluster_id, chrom)` rows pooled{% if data.n_unmapped_cluster_chrom %}; {{ data.n_unmapped_cluster_chrom }} unmapped (no samples in `cohort_global.tsv`){% endif %}.
+- {{ "{:,}".format(data.n_haplotypes_total) }} haplotypes pooled across the strata.
 
 \small
 
-| stratum | n_haplotypes | n cluster·chrom | min | mean | median | p99 | max |
-|:--------|-------------:|----------------:|----:|-----:|-------:|----:|----:|
-| **cohort** | {{ "{:,}".format(data.cohort_n_hap) }} | {{ data.n_cluster_chrom }} | {{ "%.2f"|format(data.cohort_min) }} | {{ "%.2f"|format(data.cohort_mean) }} | {{ "%.2f"|format(data.cohort_med) }} | {{ "%.0f"|format(data.cohort_p99) }} | {{ "%.0f"|format(data.cohort_max) }} |
+| stratum | n_haplotypes | n cells | min | mean | median | p99 | max |
+|:--------|-------------:|--------:|----:|-----:|-------:|----:|----:|
+| **cohort** | {{ "{:,}".format(data.cohort_n_hap) }} | - | {{ "%.2f"|format(data.cohort_min) }} | {{ "%.2f"|format(data.cohort_mean) }} | {{ "%.2f"|format(data.cohort_med) }} | {{ "%.0f"|format(data.cohort_p99) }} | {{ "%.0f"|format(data.cohort_max) }} |
 {% for r in data.strata_rows if r.n_hap > 0 -%}
-| `{{ r.label }}`-top1 | {{ "{:,}".format(r.n_hap) }} | {{ r.n_cc }} | {{ "%.2f"|format(r.min) }} | {{ "%.2f"|format(r.mean) }} | {{ "%.2f"|format(r.median) }} | {{ "%.0f"|format(r.p99) }} | {{ "%.0f"|format(r.max) }} |
+| `{{ r.label }}`-top1 | {{ "{:,}".format(r.n_hap) }} | {{ r.n_cells }} | {{ r.min }} | {{ "%.2f"|format(r.mean) }} | {{ "%.2f"|format(r.median) }} | {{ r.p99 }} | {{ r.max }} |
 {% endfor %}
 
 \normalsize
