@@ -1,0 +1,45 @@
+popout: train/infer scatter shape, portable model NPZ, retire resume
+
+Add `popout seed`, `popout train`, `popout infer` subcommands
+(popout/orchestrate.py) so whole-genome runs scatter cleanly via WDL.
+`popout train` runs seed + EM on one chrom and writes a portable
+`.model.npz`; `popout infer` consumes that model on another chrom,
+re-fits per-site allele_freq from the saved `leaf_labels`, and writes
+per-chrom global TSV + tracts. The infer path uses the trained
+leaf_labels directly rather than re-clustering, which was the silent
+failure mode in `run_em_genome`'s warm-start (em.py:2126) and the
+likely reason every run in data/ stayed chr1-only.
+
+Make the model NPZ self-describing: write_model now saves block_data,
+pattern_freq, bucket_assignments, seed_method, leaf_labels, leaf_paths,
+train_chrom, and popout_version. read_model derives block-emissions /
+per-hap-T mode from the array presence, not from a re-passed CLI flag.
+AncestryModel gains seed_method / leaf_labels / leaf_paths (optional).
+
+New `popout seed` writes a standalone `.seed.npz` (per-hap responsibilities
++ leaf metadata + per-leaf allele_freq) that `popout train --seed-input`
+can consume. Sets up future "scatter on priors instead of model" shapes
+without picking a name that collides with worktree-priors' AIM-panel
+--priors flag.
+
+Retire the WorkDir/manifest stage-skipping and legacy
+--resume-from-checkpoint path. Both have been broken since April
+(main_v1 resume failure, abandoned since) and were entangling the
+model-checkpoint code. popout/checkpoint.py collapses to
+atomic_write_npz / atomic_write_npy. Delete _save_checkpoint,
+_load_checkpoint, _save_*/load_*_workdir, --work-dir, --no-checkpoint,
+--restart-stage, --resume-from-checkpoint, --checkpoint-after-em,
+--stop-after-seeding, --reproducible=seeding subprocess machinery.
+
+Rewrite workflows/popout/wdl/popout.wdl as a single parametrized task
+(mode = seed | train | infer). Add workflows/popout/wdl/popout_pipeline.wdl
+mirroring flare_pipeline.wdl: train on user-defined train_chromosome
+(default chr1), scatter infer over the rest.
+
+Also drop the reports label_correlation section: by_name matching makes
+the bordered cells tautologically strongest per row, and n=5 overlapping
+sites is too thin to read off-diagonal correlations into.
+
+Round-trip tests in tests/test_output.py cover model.npz and seed.npz
+including all optional fields. Pre-existing test_density_invariance
+failure on main is unaffected.
