@@ -303,11 +303,18 @@ def write_model(
     chrom_data: ChromData | None = None,
     ancestry_names: list[str] | None = None,
 ) -> None:
-    """Write model parameters to a human-readable file.
+    """Write the trained model.
 
-    Also saves a companion ``.npz`` archive with full-precision arrays
-    (allele frequencies, mu) for potential re-inference.
+    Two files:
+      - ``out_path``: human-readable TSV summary.
+      - ``out_path.npz``: self-describing portable archive used by
+        ``popout infer`` and any downstream tool. Carries the full model
+        state PLUS the seeding-derived identity (seed_method, leaf_labels,
+        leaf_paths) and the block/per-hap-T mode arrays. The mode is
+        derived from presence of arrays at load time, not from CLI flags.
     """
+    from . import __version__ as _popout_version
+
     model = result.model
     with open(out_path, "w") as f:
         f.write(f"n_ancestries\t{model.n_ancestries}\n")
@@ -319,15 +326,39 @@ def write_model(
         mu=np.array(model.mu),
         n_ancestries=np.array(model.n_ancestries),
         gen_since_admix=np.array(model.gen_since_admix),
+        popout_version=np.array(_popout_version),
     )
     if chrom_data is not None:
         save_dict["pos_bp"] = np.array(chrom_data.pos_bp)
         save_dict["pos_cm"] = np.array(chrom_data.pos_cm)
         save_dict["chrom"] = np.array(chrom_data.chrom)
+        save_dict["train_chrom"] = np.array(str(chrom_data.chrom))
+    # Per-hap T
     if getattr(model, "gen_per_hap", None) is not None:
         save_dict["gen_per_hap"] = np.array(model.gen_per_hap)
     if getattr(model, "bucket_centers", None) is not None:
         save_dict["bucket_centers"] = np.array(model.bucket_centers)
+    if getattr(model, "bucket_assignments", None) is not None:
+        save_dict["bucket_assignments"] = np.array(model.bucket_assignments)
+    # Block emissions
+    bd = getattr(model, "block_data", None)
+    if bd is not None:
+        save_dict["pattern_indices"] = np.array(bd.pattern_indices)
+        save_dict["block_starts"] = np.array(bd.block_starts)
+        save_dict["block_ends"] = np.array(bd.block_ends)
+        save_dict["block_distances"] = np.array(bd.block_distances)
+        save_dict["pattern_counts"] = np.array(bd.pattern_counts)
+        save_dict["max_patterns"] = np.int32(bd.max_patterns)
+        save_dict["block_size"] = np.int32(bd.block_size)
+    if getattr(model, "pattern_freq", None) is not None:
+        save_dict["pattern_freq"] = np.array(model.pattern_freq)
+    # Seeding-derived identity
+    if getattr(model, "seed_method", None) is not None:
+        save_dict["seed_method"] = np.array(str(model.seed_method))
+    if getattr(model, "leaf_labels", None) is not None:
+        save_dict["leaf_labels"] = np.array(model.leaf_labels, dtype=np.int32)
+    if getattr(model, "leaf_paths", None) is not None:
+        save_dict["leaf_paths"] = np.array(model.leaf_paths)
     if ancestry_names is not None:
         if len(ancestry_names) != model.n_ancestries:
             raise ValueError(
@@ -337,6 +368,198 @@ def write_model(
         save_dict["ancestry_names"] = np.array(ancestry_names, dtype=object)
     np.savez_compressed(f"{out_path}.npz", **save_dict)
     log.info("Wrote model to %s (+ .npz)", out_path)
+
+
+def read_model(npz_path: str) -> dict:
+    """Load a model NPZ written by :func:`write_model`.
+
+    Returns a dict with:
+      ``model``: AncestryModel reconstructed from the archive. Block and
+        per-hap-T modes are implied by the presence of their arrays; no
+        separate flag is consulted.
+      ``train_chrom``: str | None -- chrom the model was trained on.
+      ``popout_version``: str | None -- version that wrote the file.
+      ``ancestry_names``: list[str] | None.
+      ``pos_bp``, ``pos_cm``, ``chrom``: training-chrom site positions
+        (for diagnostics; per-chrom inference uses the inference chrom's
+        own positions).
+    """
+    import jax.numpy as jnp
+
+    from .blocks import BlockData
+    from .datatypes import AncestryModel
+
+    data = np.load(npz_path, allow_pickle=True)
+
+    bd = None
+    if "block_starts" in data:
+        bd = BlockData(
+            pattern_indices=data["pattern_indices"],
+            block_starts=data["block_starts"],
+            block_ends=data["block_ends"],
+            block_distances=data["block_distances"],
+            pattern_counts=data["pattern_counts"],
+            max_patterns=int(data["max_patterns"]),
+            block_size=int(data["block_size"]),
+        )
+    pf = jnp.array(data["pattern_freq"]) if "pattern_freq" in data else None
+    gen_per_hap = (
+        jnp.array(data["gen_per_hap"]) if "gen_per_hap" in data else None
+    )
+    bucket_centers = (
+        jnp.array(data["bucket_centers"]) if "bucket_centers" in data else None
+    )
+    bucket_assignments = (
+        jnp.array(data["bucket_assignments"])
+        if "bucket_assignments" in data else None
+    )
+    seed_method = str(data["seed_method"]) if "seed_method" in data else None
+    leaf_labels = (
+        np.array(data["leaf_labels"]) if "leaf_labels" in data else None
+    )
+    leaf_paths = (
+        np.array(data["leaf_paths"]) if "leaf_paths" in data else None
+    )
+
+    model = AncestryModel(
+        n_ancestries=int(data["n_ancestries"]),
+        mu=jnp.array(data["mu"]),
+        gen_since_admix=float(data["gen_since_admix"]),
+        allele_freq=jnp.array(data["allele_freq"]),
+        gen_per_hap=gen_per_hap,
+        bucket_centers=bucket_centers,
+        bucket_assignments=bucket_assignments,
+        pattern_freq=pf,
+        block_data=bd,
+        seed_method=seed_method,
+        leaf_labels=leaf_labels,
+        leaf_paths=leaf_paths,
+    )
+
+    train_chrom = (
+        str(data["train_chrom"]) if "train_chrom" in data else None
+    )
+    popout_version = (
+        str(data["popout_version"]) if "popout_version" in data else None
+    )
+    ancestry_names = (
+        list(data["ancestry_names"]) if "ancestry_names" in data else None
+    )
+    pos_bp = np.array(data["pos_bp"]) if "pos_bp" in data else None
+    pos_cm = np.array(data["pos_cm"]) if "pos_cm" in data else None
+    chrom = str(data["chrom"]) if "chrom" in data else None
+
+    return {
+        "model": model,
+        "train_chrom": train_chrom,
+        "popout_version": popout_version,
+        "ancestry_names": ancestry_names,
+        "pos_bp": pos_bp,
+        "pos_cm": pos_cm,
+        "chrom": chrom,
+    }
+
+
+def write_seed(
+    out_path: str,
+    seed_method: str,
+    n_ancestries: int,
+    leaf_labels: np.ndarray,
+    leaf_paths: np.ndarray | list[str],
+    responsibilities: np.ndarray,
+    allele_freq: np.ndarray,
+    chrom_data: ChromData,
+    leaf_meta: dict | None = None,
+    seed_kwargs: dict | None = None,
+) -> None:
+    """Write a seeding artifact (the per-haplotype priors shaped by seeding).
+
+    Self-describing NPZ consumed by ``popout train --seed-input`` (and any
+    downstream tool that wants to scatter on the seeding output instead of
+    on a fully-fitted model).
+    """
+    import json
+
+    from . import __version__ as _popout_version
+
+    save_dict = dict(
+        seed_method=np.array(str(seed_method)),
+        n_ancestries=np.int32(n_ancestries),
+        leaf_labels=np.array(leaf_labels, dtype=np.int32),
+        leaf_paths=np.array(leaf_paths),
+        responsibilities=np.array(responsibilities, dtype=np.float32),
+        allele_freq=np.array(allele_freq, dtype=np.float32),
+        chrom=np.array(str(chrom_data.chrom)),
+        n_sites=np.int64(chrom_data.n_sites),
+        n_haps=np.int64(chrom_data.n_haps),
+        pos_bp=np.array(chrom_data.pos_bp),
+        pos_cm=np.array(chrom_data.pos_cm),
+        popout_version=np.array(_popout_version),
+    )
+    if leaf_meta is not None:
+        if "bic_scores" in leaf_meta:
+            save_dict["leaf_bic_scores"] = np.array(
+                leaf_meta["bic_scores"], dtype=np.float32,
+            )
+        if "depths" in leaf_meta:
+            save_dict["leaf_depths"] = np.array(
+                leaf_meta["depths"], dtype=np.int32,
+            )
+        if "n_haps" in leaf_meta:
+            save_dict["leaf_n_haps"] = np.array(
+                leaf_meta["n_haps"], dtype=np.int32,
+            )
+    if seed_kwargs is not None:
+        save_dict["seed_kwargs_json"] = np.array(
+            json.dumps(seed_kwargs, sort_keys=True, default=str),
+        )
+    np.savez_compressed(out_path, **save_dict)
+    log.info(
+        "Wrote seed artifact to %s (A=%d, H=%d, T=%d, method=%s)",
+        out_path, n_ancestries,
+        chrom_data.n_haps, chrom_data.n_sites, seed_method,
+    )
+
+
+def read_seed(npz_path: str) -> dict:
+    """Load a seeding artifact written by :func:`write_seed`.
+
+    Returns a dict with all stored fields. ``leaf_meta`` is reconstructed
+    as a dict of optional sub-arrays. ``seed_kwargs`` is parsed back from
+    JSON if present.
+    """
+    import json
+
+    data = np.load(npz_path, allow_pickle=True)
+    out: dict = {
+        "seed_method": str(data["seed_method"]),
+        "n_ancestries": int(data["n_ancestries"]),
+        "leaf_labels": np.array(data["leaf_labels"]),
+        "leaf_paths": np.array(data["leaf_paths"]),
+        "responsibilities": np.array(data["responsibilities"]),
+        "allele_freq": np.array(data["allele_freq"]),
+        "chrom": str(data["chrom"]),
+        "n_sites": int(data["n_sites"]),
+        "n_haps": int(data["n_haps"]),
+        "pos_bp": np.array(data["pos_bp"]),
+        "pos_cm": np.array(data["pos_cm"]),
+        "popout_version": (
+            str(data["popout_version"]) if "popout_version" in data else None
+        ),
+    }
+    leaf_meta: dict = {}
+    if "leaf_bic_scores" in data:
+        leaf_meta["bic_scores"] = np.array(data["leaf_bic_scores"])
+    if "leaf_depths" in data:
+        leaf_meta["depths"] = np.array(data["leaf_depths"])
+    if "leaf_n_haps" in data:
+        leaf_meta["n_haps"] = np.array(data["leaf_n_haps"])
+    out["leaf_meta"] = leaf_meta or None
+    if "seed_kwargs_json" in data:
+        out["seed_kwargs"] = json.loads(str(data["seed_kwargs_json"]))
+    else:
+        out["seed_kwargs"] = None
+    return out
 
 
 class DecodeParquetWriter:

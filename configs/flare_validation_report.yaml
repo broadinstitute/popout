@@ -120,11 +120,5 @@ sections:
     chart: regional_manhattan
     pair: [flare]
 
-  - id: label_correlation
-    template: flare_validation/label_correlation.j2
-    chart: label_correlation
-    pair: [flare, rf]
-    target_space: SP6
-
   - id: provenance
     template: _components/provenance_appendix.j2

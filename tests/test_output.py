@@ -8,6 +8,9 @@ import numpy as np
 from popout.datatypes import AncestryModel, AncestryResult, ChromData, DecodeResult
 from popout.output import (
     write_model,
+    read_model,
+    write_seed,
+    read_seed,
     write_ancestry_tracts,
     write_decode_parquet,
     read_decode_parquet,
@@ -65,6 +68,124 @@ def test_write_model_without_names():
 
         data = np.load(f"{out_path}.npz", allow_pickle=True)
         assert "ancestry_names" not in data
+
+
+def test_model_npz_roundtrip_carries_seeding_identity():
+    """write_model -> read_model preserves seed_method, leaf_labels, leaf_paths,
+    block-emissions arrays, and per-hap-T arrays via the portable NPZ."""
+    import jax.numpy as jnp
+
+    result, chrom_data = _make_minimal_result(n_ancestries=4, n_haps=20, n_sites=80)
+    rng = np.random.default_rng(0)
+    leaf_labels = rng.integers(0, 4, size=20).astype(np.int32)
+    leaf_paths = np.array(["L0", "L1", "L01", "L11"], dtype=object)
+    bucket_centers = jnp.array([2.0, 5.0, 10.0], dtype=jnp.float32)
+    bucket_assignments = jnp.array(rng.integers(0, 3, size=20), dtype=jnp.int32)
+
+    from dataclasses import replace
+    model = replace(
+        result.model,
+        seed_method="recursive",
+        leaf_labels=leaf_labels,
+        leaf_paths=leaf_paths,
+        bucket_centers=bucket_centers,
+        bucket_assignments=bucket_assignments,
+    )
+    result.model = model
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = str(Path(tmp) / "test.model")
+        write_model(result, out_path, chrom_data=chrom_data,
+                    ancestry_names=["a", "b", "c", "d"])
+        loaded = read_model(f"{out_path}.npz")
+
+    lm = loaded["model"]
+    assert lm.seed_method == "recursive"
+    assert lm.leaf_labels is not None and lm.leaf_labels.shape == (20,)
+    np.testing.assert_array_equal(lm.leaf_labels, leaf_labels)
+    assert lm.leaf_paths is not None and len(lm.leaf_paths) == 4
+    assert lm.bucket_centers is not None
+    np.testing.assert_array_almost_equal(np.array(lm.bucket_centers),
+                                         np.array(bucket_centers))
+    assert lm.bucket_assignments is not None
+    assert loaded["train_chrom"] == "chr1"
+    assert loaded["popout_version"] is not None
+    assert loaded["ancestry_names"] == ["a", "b", "c", "d"]
+
+
+def test_model_npz_roundtrip_omits_unset_optionals():
+    """Model with no seeding identity / no block data / no per-hap-T still
+    round-trips cleanly; the optional fields stay None on load."""
+    result, chrom_data = _make_minimal_result(n_ancestries=3)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out_path = str(Path(tmp) / "test.model")
+        write_model(result, out_path, chrom_data=chrom_data)
+        loaded = read_model(f"{out_path}.npz")
+
+    lm = loaded["model"]
+    assert lm.n_ancestries == 3
+    assert lm.seed_method is None
+    assert lm.leaf_labels is None
+    assert lm.leaf_paths is None
+    assert lm.bucket_centers is None
+    assert lm.bucket_assignments is None
+    assert lm.block_data is None
+    assert lm.pattern_freq is None
+
+
+def test_seed_npz_roundtrip():
+    """write_seed -> read_seed preserves all schema fields including
+    leaf_meta and seed_kwargs."""
+    rng = np.random.default_rng(7)
+    chrom_data = ChromData(
+        geno=rng.integers(0, 2, size=(50, 30)).astype(np.uint8),
+        pos_bp=np.arange(30, dtype=np.int64) * 1000,
+        pos_cm=np.linspace(0, 1, 30),
+        chrom="chr1",
+    )
+    leaf_meta = {
+        "bic_scores": np.array([1.5, 2.0, 3.0], dtype=np.float32),
+        "depths": np.array([1, 2, 2], dtype=np.int32),
+        "n_haps": np.array([20, 15, 15], dtype=np.int32),
+    }
+    seed_kwargs = {
+        "seed_method": "recursive",
+        "max_leaves": 20,
+        "merge_hellinger": 0.008,
+    }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "test.seed.npz")
+        write_seed(
+            out_path=path,
+            seed_method="recursive",
+            n_ancestries=3,
+            leaf_labels=rng.integers(0, 3, size=50).astype(np.int32),
+            leaf_paths=np.array(["L0", "L01", "L011"], dtype=object),
+            responsibilities=rng.random((50, 3)).astype(np.float32),
+            allele_freq=rng.random((3, 30)).astype(np.float32),
+            chrom_data=chrom_data,
+            leaf_meta=leaf_meta,
+            seed_kwargs=seed_kwargs,
+        )
+        loaded = read_seed(path)
+
+    assert loaded["seed_method"] == "recursive"
+    assert loaded["n_ancestries"] == 3
+    assert loaded["leaf_labels"].shape == (50,)
+    assert len(loaded["leaf_paths"]) == 3
+    assert loaded["responsibilities"].shape == (50, 3)
+    assert loaded["allele_freq"].shape == (3, 30)
+    assert loaded["chrom"] == "chr1"
+    assert loaded["n_sites"] == 30
+    assert loaded["n_haps"] == 50
+    assert loaded["leaf_meta"] is not None
+    np.testing.assert_array_equal(
+        loaded["leaf_meta"]["bic_scores"], [1.5, 2.0, 3.0],
+    )
+    assert loaded["seed_kwargs"] == seed_kwargs
+    assert loaded["popout_version"] is not None
 
 
 def test_write_model_names_length_mismatch():

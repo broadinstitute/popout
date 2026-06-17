@@ -80,7 +80,17 @@ class AncestryModel:
     gen_since_admix : float
         Estimated generations since admixture (T).
     allele_freq : jnp.ndarray, shape (A, n_sites)
-        Per-ancestry allele frequencies at each site.
+        Per-ancestry allele frequencies at each site (per training chrom).
+
+    Seeding-derived identity (stable across chroms; carried so per-chrom
+    inference can reuse the training assignment instead of re-clustering):
+    seed_method : str | None
+        "gmm" or "recursive".
+    leaf_labels : np.ndarray | None, shape (H,) int32
+        Per-haplotype population label from seeding.
+    leaf_paths : np.ndarray | None, shape (A,) object
+        Tree path strings (e.g. "L01R") from recursive seeding; for GMM
+        seeding the paths are just "L0", "L1", ...
     """
 
     n_ancestries: int
@@ -94,6 +104,10 @@ class AncestryModel:
     # Block emission model (optional — None means single-site Bernoulli)
     pattern_freq: Optional[jnp.ndarray] = None       # (n_blocks, max_patterns, A)
     block_data: object = None                         # BlockData (avoid circular import)
+    # Seeding-derived identity (stable across chroms)
+    seed_method: Optional[str] = None
+    leaf_labels: Optional[np.ndarray] = None          # (H,) int32
+    leaf_paths: Optional[np.ndarray] = None           # (A,) object
 
     def log_transition_matrix(self, d_morgan: jnp.ndarray) -> jnp.ndarray:
         """Build (n_intervals, A, A) log transition matrices.

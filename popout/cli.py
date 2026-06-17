@@ -189,72 +189,6 @@ def _enable_xla_determinism() -> None:
     )
 
 
-def _spawn_deterministic_seeding(raw_args: list[str]) -> None:
-    """Run the seeding stage in a child process with XLA determinism on,
-    then return so the parent can run EM at full speed.
-
-    The child writes a seed checkpoint; when the parent continues normal
-    main() execution, the checkpoint short-circuits the seeding stage
-    and EM picks up from there (without the XLA flag, so no slowdown).
-    Requires checkpointing to be on.
-    """
-    if "--no-checkpoint" in raw_args:
-        print(
-            "ERROR: --reproducible=seeding requires checkpointing. "
-            "Either drop --no-checkpoint, or use --reproducible=all "
-            "(slower but works without checkpoints).",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-
-    # Strip --reproducible from child args so the child doesn't recurse
-    # into another spawn; the child's determinism comes from XLA_FLAGS.
-    child_args: list[str] = []
-    skip_next = False
-    for a in raw_args:
-        if skip_next:
-            skip_next = False
-            continue
-        if a == "--reproducible":
-            skip_next = True
-            continue
-        if a.startswith("--reproducible="):
-            continue
-        child_args.append(a)
-    if "--stop-after-seeding" not in child_args:
-        child_args.append("--stop-after-seeding")
-
-    env = os.environ.copy()
-    cur_xla = env.get("XLA_FLAGS", "")
-    if _XLA_DETERMINISM_FLAG not in cur_xla:
-        env["XLA_FLAGS"] = (cur_xla + " " + _XLA_DETERMINISM_FLAG).strip()
-
-    print(
-        ">>> [reproducible=seeding] Stage 1/2: deterministic seeding subprocess",
-        file=sys.stderr,
-    )
-    print(
-        f"    child env XLA_FLAGS={env['XLA_FLAGS']!r}",
-        file=sys.stderr,
-    )
-    rc = subprocess.run(
-        [sys.executable, "-m", "popout", *child_args],
-        env=env,
-    ).returncode
-    if rc != 0:
-        print(
-            f"ERROR: deterministic seeding subprocess exited {rc}; "
-            "not continuing to EM stage.",
-            file=sys.stderr,
-        )
-        sys.exit(rc)
-    print(
-        ">>> [reproducible=seeding] Stage 2/2: continuing with EM at full speed "
-        "(seed checkpoint will be reused)",
-        file=sys.stderr,
-    )
-
-
 def main(argv: list[str] | None = None) -> None:
     # Dispatch subcommands before parsing main args
     raw_args = argv if argv is not None else sys.argv[1:]
@@ -306,19 +240,39 @@ def main(argv: list[str] | None = None) -> None:
     if raw_args and raw_args[0] == "convert":
         _cmd_convert(raw_args[1:])
         return
+    if raw_args and raw_args[0] == "seed":
+        from .orchestrate import cmd_seed
+        cmd_seed(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "train":
+        from .orchestrate import cmd_train
+        cmd_train(raw_args[1:])
+        return
+    if raw_args and raw_args[0] == "infer":
+        from .orchestrate import cmd_infer
+        cmd_infer(raw_args[1:])
+        return
 
     # Reproducibility dispatch — must run BEFORE any popout/jax import
-    # in this process. Sets XLA_FLAGS or spawns a deterministic seeding
-    # subprocess as appropriate.
+    # in this process. Sets XLA_FLAGS for the whole run when on.
     _repro = _peek_reproducible(raw_args)
     if _repro == "all":
         _enable_xla_determinism()
     elif _repro == "seeding":
-        _spawn_deterministic_seeding(raw_args)
-        # Subprocess wrote the seed checkpoint; fall through and continue
-        # main() in this parent at full speed (XLA flag NOT set here).
-        # The checkpoint will short-circuit the seeding stage when EM
-        # reaches it.
+        # The "seeding" mode used to spawn a subprocess that ran seeding
+        # deterministically and dumped a checkpoint that the parent then
+        # resumed from. That checkpoint-resume machinery has been
+        # retired; for deterministic seeding now, use --reproducible=all
+        # (or run `popout seed` with --reproducible=all, then use the
+        # resulting .seed.npz as --seed-input to `popout train`).
+        print(
+            "ERROR: --reproducible=seeding is no longer supported. "
+            "Use --reproducible=all for full XLA determinism, or run "
+            "`popout seed --reproducible=all` and pass the .seed.npz to "
+            "`popout train --seed-input`.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
     parser = argparse.ArgumentParser(
         description="GPU-accelerated self-bootstrapping local ancestry inference",
@@ -499,12 +453,6 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     parser.add_argument(
-        "--stop-after-seeding", action="store_true",
-        help="Exit after recursive seeding and Stage 1 model init, before "
-             "starting EM iterations.",
-    )
-
-    parser.add_argument(
         "--reproducible",
         choices=["off", "seeding", "all"],
         default="off",
@@ -514,37 +462,6 @@ def main(argv: list[str] | None = None) -> None:
              "checkpoint resume; requires checkpointing on. all: force "
              "XLA determinism for the whole run (EM E-step ~50× slower at "
              "biobank scale; only use when bit-exact EM matters).",
-    )
-
-    # --- Checkpoint / resume ---
-    parser.add_argument(
-        "--work-dir", type=str, default=None,
-        help="Work directory for checkpoints and intermediate files. "
-             "Resume is automatic when a matching work dir exists. "
-             "Default: {out}.work/",
-    )
-    parser.add_argument(
-        "--no-checkpoint", action="store_true",
-        help="Disable checkpoint/resume. Kills mid-run lose all progress.",
-    )
-    parser.add_argument(
-        "--restart-stage",
-        choices=["seed", "em", "decode", "tracts", "all"],
-        default=None,
-        help="Invalidate this stage and all subsequent stages, "
-             "forcing recomputation even if checkpoint files exist.",
-    )
-
-    # Deprecated checkpoint flags (kept for backward compatibility)
-    parser.add_argument(
-        "--resume-from-checkpoint", type=str, default=None,
-        help="[Deprecated] Resume is now automatic via --work-dir. "
-             "This flag still works but will be removed in a future release.",
-    )
-    parser.add_argument(
-        "--checkpoint-after-em", action="store_true",
-        help="[Deprecated] Post-EM checkpoints are now automatic. "
-             "This flag is a no-op.",
     )
 
     parser.add_argument(
@@ -800,80 +717,6 @@ def main(argv: list[str] | None = None) -> None:
             )
             sys.exit(1)
 
-    # --- Deprecation warnings for legacy checkpoint flags ---
-    if args.resume_from_checkpoint is not None:
-        log.warning(
-            "--resume-from-checkpoint is deprecated. Resume is now automatic "
-            "when a work directory exists. Use --work-dir to specify location.",
-        )
-    if args.checkpoint_after_em:
-        log.warning(
-            "--checkpoint-after-em is deprecated and has no effect. "
-            "Post-EM checkpoints are now written automatically.",
-        )
-
-    # --- Work directory for checkpoint/resume ---
-    from .checkpoint import WorkDir
-    from . import __version__
-    work_dir = None
-    if not args.no_checkpoint and args.method not in ("cnn", "cnn-crf"):
-        from pathlib import Path as _Path
-        wd_path = _Path(args.work_dir) if args.work_dir else _Path(f"{args.out}.work")
-
-        recursive_kwargs_for_hash = None
-        if args.seed_method == "recursive":
-            recursive_kwargs_for_hash = dict(
-                min_cluster_size=args.recursive_min_cluster_size,
-                max_depth=args.recursive_max_depth,
-                max_leaves=args.recursive_max_leaves,
-                bic_per_sample=args.recursive_bic_per_sample,
-                em_iter_per_split=args.recursive_em_iter,
-                merge_hellinger_threshold=args.recursive_merge_hellinger,
-                split_restarts=args.recursive_split_restarts,
-                balance_bic_tolerance=args.recursive_balance_tolerance,
-                min_leaf_size=args.recursive_min_leaf_size,
-            )
-
-        pgen_path_for_fp = args.pgen if args.pgen else args.vcf
-        if args.pgen:
-            fp_hash = WorkDir.compute_pgen_fingerprint(pgen_path_for_fp)
-        else:
-            fp_hash = WorkDir.compute_vcf_fingerprint(pgen_path_for_fp)
-
-        work_dir = WorkDir(wd_path)
-        work_dir.open_or_create(
-            popout_version=__version__,
-            input_fingerprint={
-                "pgen_sha_prefix": fp_hash,
-                "n_haps": 2 * n_samples,
-                "thin_cm": args.thin_cm,
-                "seeding_exclusion_sha_prefix": WorkDir.hash_exclusion_file(
-                    args.exclude_seeding_samples,
-                ),
-            },
-            args={
-                "gen_since_admix": args.gen_since_admix,
-                "n_ancestries": args.n_ancestries,
-                "seed_method": args.seed_method,
-                "max_ancestries": args.max_ancestries,
-                "ancestry_detection": args.ancestry_detection,
-                "recursive_kwargs_hash": WorkDir.hash_recursive_kwargs(
-                    recursive_kwargs_for_hash,
-                ),
-                "seed": args.seed,
-                "n_em_iter": args.n_em_iter,
-                "block_emissions": args.block_emissions,
-                "block_size": args.block_size,
-                "freeze_anchors_iters": args.freeze_anchors_iters,
-                "em_t_policy": args.em_t_policy,
-                "held_out_init": args.held_out_init,
-                "probs": args.probs,
-                "per_hap_T": args.per_hap_T,
-                "n_T_buckets": args.n_T_buckets,
-            },
-            restart_stage=args.restart_stage,
-        )
-
     # --- Stream chromosomes and run pipeline ---
     # We need to keep ChromData for output writing, so collect them
     chrom_data_list = []
@@ -937,12 +780,8 @@ def main(argv: list[str] | None = None) -> None:
             em_t_policy=args.em_t_policy,
             held_out_init=args.held_out_init,
             out_prefix=args.out,
-            stop_after_seeding=args.stop_after_seeding,
-            resume_from_checkpoint=args.resume_from_checkpoint,
-            checkpoint_after_em=args.checkpoint_after_em,
             write_dense_decode=write_dense_decode,
             seeding_mask=seeding_mask,
-            work_dir=work_dir,
         )
 
     t_compute = time.perf_counter() - t0
@@ -994,20 +833,12 @@ def main(argv: list[str] | None = None) -> None:
         log.info("Wrote spectral data to %s.spectral.npz", out_prefix)
 
     tracts_path = f"{out_prefix}.tracts.tsv.gz"
-    if work_dir is not None and work_dir.stage_done("tracts"):
-        log.info("stage tracts: already done, skipping")
-    else:
-        import time as _time
-        t0_tracts = _time.perf_counter()
-        write_ancestry_tracts(
-            results, chrom_data_list, n_samples, sample_names,
-            tracts_path,
-            write_posteriors=args.probs,
-            stats=stats,
-        )
-        if work_dir is not None:
-            work_dir.mark_done("tracts",
-                               wall_s=_time.perf_counter() - t0_tracts)
+    write_ancestry_tracts(
+        results, chrom_data_list, n_samples, sample_names,
+        tracts_path,
+        write_posteriors=args.probs,
+        stats=stats,
+    )
 
     if write_dense_decode:
         for res, cdata in zip(results, chrom_data_list):
