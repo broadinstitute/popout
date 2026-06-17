@@ -79,13 +79,36 @@ def compute(ctx, section=None) -> dict:
             "reason": "labels.json has no correlations matrix",
         }
     corr = np.asarray(labels["correlations"], dtype=np.float64)
-    ref_names = labels.get(
+    ref_names = list(labels.get(
         "rf_ref_labels",
         [f"ref_{i}" for i in range(corr.shape[1])],
-    )
+    ))
     n_inf = corr.shape[0]
-    inf_names = [f"flare_{i}" for i in range(n_inf)]
+    # FLARE component names come verbatim from the panel header
+    # (``component_to_label`` is the by-name matcher's index -> name map;
+    # ``method: name`` is the FLARE-verbatim path). Anonymous
+    # ``flare_<i>`` only as a last resort if the matcher metadata is
+    # absent.
+    ctl = labels.get("component_to_label") or {}
+    inf_names: list[str] = []
+    for i in range(n_inf):
+        nm = ctl.get(str(i)) or ctl.get(i)
+        inf_names.append(nm if nm else f"flare_{i}")
     popout_to_rf = labels.get("popout_to_rf_label", {})
+
+    # Honour the section's mid_rule. mid_rule="drop" on an SP6-targeted
+    # section means RF's MID column is dropped from the comparison.
+    # mid_rule="fold_to_eur" folds MID's correlation into EUR (not
+    # summable, so degrade to drop and note it). When mid_rule is None
+    # or "none", pass MID through.
+    section_mid_rule = (section.mid_rule
+                        if section is not None else None)
+    if section_mid_rule in ("drop", "fold_to_eur") and "mid" in ref_names:
+        mid_idx = ref_names.index("mid")
+        keep = [j for j in range(len(ref_names)) if j != mid_idx]
+        corr = corr[:, keep]
+        ref_names = [ref_names[j] for j in keep]
+
     assigned: list[tuple[int, int]] = []
     for inf_idx, rf_name in popout_to_rf.items():
         try:
@@ -105,6 +128,7 @@ def compute(ctx, section=None) -> dict:
         "inf_names": inf_names,
         "assigned": assigned,
         "n_overlapping": labels.get("n_overlapping_sites"),
+        "mid_rule": section_mid_rule,
     }
 
 
