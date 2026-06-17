@@ -48,7 +48,11 @@ workflows:
   - name: popout
     subclass: WDL
     primaryDescriptorPath: /workflows/popout/wdl/popout.wdl
-    topic: GPU-accelerated local ancestry inference at biobank scale
+    topic: Run popout on one chromosome in seed/train/infer mode (parametrized task)
+  - name: popout-pipeline
+    subclass: WDL
+    primaryDescriptorPath: /workflows/popout/wdl/popout_pipeline.wdl
+    topic: End-to-end popout LAI — train on one chrom, scatter inference over the rest
   - name: popout-label
     subclass: WDL
     primaryDescriptorPath: /workflows/popout/wdl/popout_label.wdl
