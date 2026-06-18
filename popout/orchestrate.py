@@ -272,7 +272,7 @@ def cmd_seed(argv: list[str]) -> None:
             min_leaf_size=args.recursive_min_leaf_size,
             min_cluster_size=args.recursive_min_cluster_size,
             max_depth=args.recursive_max_depth,
-            merge_hellinger=args.recursive_merge_hellinger,
+            merge_hellinger_threshold=args.recursive_merge_hellinger,
         )
         K = len(leaf_info)
         seed_resp = _build_seed_resp(
@@ -488,7 +488,7 @@ def cmd_train(argv: list[str]) -> None:
             min_leaf_size=args.recursive_min_leaf_size,
             min_cluster_size=args.recursive_min_cluster_size,
             max_depth=args.recursive_max_depth,
-            merge_hellinger=args.recursive_merge_hellinger,
+            merge_hellinger_threshold=args.recursive_merge_hellinger,
         )
         K_override = len(leaf_info)
         seed_resp = _build_seed_resp(
@@ -551,7 +551,7 @@ def cmd_train(argv: list[str]) -> None:
 
     ancestry_names = None
     if args.ancestry_names is not None:
-        from .cli import parse_ancestry_names
+        from .names import parse_ancestry_names
         ancestry_names = parse_ancestry_names(
             args.ancestry_names, result.model.n_ancestries,
         )
@@ -746,7 +746,7 @@ def cmd_infer(argv: list[str]) -> None:
     n_samples = len(sample_names)
     ancestry_names = None
     if args.ancestry_names is not None:
-        from .cli import parse_ancestry_names
+        from .names import parse_ancestry_names
         ancestry_names = parse_ancestry_names(args.ancestry_names, K)
 
     write_global_ancestry(
@@ -755,7 +755,6 @@ def cmd_infer(argv: list[str]) -> None:
     write_ancestry_tracts(
         [result], [chrom_data], n_samples, sample_names,
         f"{args.out}.tracts.tsv.gz",
-        ancestry_names=ancestry_names,
         write_posteriors=args.probs or args.write_dense_decode,
     )
 
