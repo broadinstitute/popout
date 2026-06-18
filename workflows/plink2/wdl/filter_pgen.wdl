@@ -1,8 +1,23 @@
 version 1.0
 
-## Filter PGEN files with plink2.  Each filter is individually optional —
-## undefined inputs are not passed to plink2.  Combine inputs to build
-## different filter profiles for downstream analysis.
+## Filter PGEN files with plink2 for downstream popout.
+##
+## Popout-focused, single plink2 pass: biallelic SNPs only, palindromic
+## removal, FILTER!=PASS exclusion, MAF/missingness/HWE thresholds,
+## centromere/blacklist BED exclusion, deterministic variant IDs and
+## duplicate removal.
+##
+## No `--extract`, `--exclude`, `--keep`, `--remove`, or `extra_args`
+## escape hatches are exposed -- those previously enabled the 3-pass
+## AIM-panel-union workflow whose Pass C emitted variants without
+## re-applying MAF/HWE/mind/palindromic checks, producing 40M+ -variant
+## "filtered" PGENs that popout's own MAF filter then catastrophically
+## reduced. This task is the single source of truth for popout-ready
+## filtered PGEN triplets; AIM-panel work belongs in a separate
+## workflow.
+##
+## Defaults are tuned for the AoU v9 cohort. Override any of them per
+## inputs.json without touching the WDL.
 ##
 ## Resources auto-scale based on PGEN file size.
 ##
@@ -17,33 +32,41 @@ task filter_pgen_task {
     String output_prefix = basename(pgen, ".pgen") + ".filtered"
 
     # ---- Variant-type filters ----
-    String?  chromosomes                        # --chr, e.g. "1-22"
-    Int?     min_alleles                        # --min-alleles
-    Int?     max_alleles                        # --max-alleles
-    String?  snps_only                          # --snps-only, e.g. "just-acgt"
-    Boolean  exclude_palindromic_snps = false   # --exclude-palindromic-snps
+    # Defaults match the standard popout filter profile: biallelic
+    # ACGT SNPs only, palindromic removed (strand-ambiguous so popout's
+    # phased-genotype HMM can't disambiguate them anyway).
+    String?  chromosomes                         # --chr (usually unneeded per-chrom scatter)
+    Int      min_alleles               = 2       # --min-alleles
+    Int      max_alleles               = 2       # --max-alleles
+    String   snps_only                 = "just-acgt"  # --snps-only
+    Boolean  exclude_palindromic_snps  = true    # --exclude-palindromic-snps
 
     # ---- Quality filters ----
-    Boolean  var_filter = true                  # --var-filter (exclude FILTER!=PASS)
-    Float?   maf                                # --maf
-    Float?   geno                               # --geno (variant missingness)
-    Float?   mind                               # --mind (sample missingness)
-    Float?   hwe                                # --hwe <threshold> [modifier]
-    String   hwe_modifier = "keep-fewhet"       # modifier for --hwe
+    # MAF 0.05 matches the main_v10 baseline. Tighten or loosen per
+    # cohort. mind/geno bound sample-level and variant-level
+    # missingness; HWE excludes hard violations at 1e-10 (keep-fewhet
+    # only removes the heterozygote-deficit side, preserving population
+    # structure signal popout uses).
+    Boolean  var_filter   = true                 # --var-filter (exclude FILTER!=PASS)
+    Float    maf          = 0.05                 # --maf
+    Float    geno         = 0.01                 # --geno
+    Float    mind         = 0.05                 # --mind
+    Float    hwe          = 0.0000000001         # --hwe 1e-10 threshold
+    String   hwe_modifier = "keep-fewhet"        # modifier for --hwe
 
     # ---- Variant ID normalization ----
-    String?  set_all_var_ids                    # --set-all-var-ids, e.g. "@:#:$r:$a"
-    String?  rm_dup                             # --rm-dup, e.g. "exclude-all"
+    # Stable chr:pos:ref:alt IDs so cross-chrom merges and later panel
+    # joins are unambiguous; exclude-all drops duplicate IDs after
+    # normalization.
+    String   set_all_var_ids = "@:#:$r:$a"       # --set-all-var-ids
+    String   rm_dup          = "exclude-all"     # --rm-dup
 
-    # ---- Include/exclude lists ----
-    File?        extract                        # --extract <variant list>
-    File?        exclude                        # --exclude <variant list>
-    File?        remove                         # --remove <sample list>
-    File?        keep                           # --keep <sample list>
-    Array[File]  exclude_range_beds = []        # BED files concatenated into --exclude range
-
-    # ---- Escape hatch ----
-    String extra_args = ""
+    # ---- Region exclusion ----
+    # Centromeres + ENCODE blacklist + high-LD regions. Empty array =
+    # no region exclusion. Standard popout inputs:
+    #   gs://fc-secure-1c6b9393-5e5d-4a87-b483-d1f0b019af92/beds/hg38-blacklist.v2.bed
+    #   gs://fc-secure-1c6b9393-5e5d-4a87-b483-d1f0b019af92/beds/high-LD-regions-hg38-GRCh38.bed
+    Array[File]  exclude_range_beds = []
 
     # ---- Resources ----
     Int?    cpu_override
@@ -63,8 +86,8 @@ task filter_pgen_task {
                        else if pgen_gb > 10.0 then "64 GB"
                        else "32 GB"
 
-  Int    cpu         = select_first([cpu_override, auto_cpu])
-  String memory      = select_first([memory_override, auto_memory])
+  Int    cpu          = select_first([cpu_override, auto_cpu])
+  String memory       = select_first([memory_override, auto_memory])
   Int    disk_size_gb = ceil(pgen_gb * 3) + 100
 
   command <<<
@@ -78,55 +101,42 @@ task filter_pgen_task {
 
     ARGS=()
 
-    # -- Variant-type filters --
-    ~{if defined(chromosomes) then 'ARGS+=(--chr ~{chromosomes})'                     else ''}
-    ~{if defined(min_alleles) then 'ARGS+=(--min-alleles ~{min_alleles})'             else ''}
-    ~{if defined(max_alleles) then 'ARGS+=(--max-alleles ~{max_alleles})'             else ''}
-    ~{if defined(snps_only)   then "ARGS+=(--snps-only '~{snps_only}')"               else ''}
-    ~{if exclude_palindromic_snps then 'ARGS+=(--exclude-palindromic-snps)'           else ''}
+    # -- Variant-type --
+    ~{if defined(chromosomes) then 'ARGS+=(--chr ~{chromosomes})' else ''}
+    ARGS+=(--min-alleles ~{min_alleles})
+    ARGS+=(--max-alleles ~{max_alleles})
+    ARGS+=(--snps-only '~{snps_only}')
+    ~{if exclude_palindromic_snps then 'ARGS+=(--exclude-palindromic-snps)' else ''}
 
-    # -- Quality filters --
-    ~{if var_filter    then 'ARGS+=(--var-filter)'    else ''}
-    ~{if defined(maf)  then 'ARGS+=(--maf ~{maf})'   else ''}
-    ~{if defined(geno) then 'ARGS+=(--geno ~{geno})' else ''}
-    ~{if defined(mind) then 'ARGS+=(--mind ~{mind})' else ''}
-
-    # HWE: compound flag (threshold + optional modifier)
-    if [ -n "~{default='' hwe}" ]; then
-      if [ -n "~{hwe_modifier}" ]; then
-        ARGS+=(--hwe ~{hwe} '~{hwe_modifier}')
-      else
-        ARGS+=(--hwe ~{hwe})
-      fi
-    fi
+    # -- Quality --
+    ~{if var_filter then 'ARGS+=(--var-filter)' else ''}
+    ARGS+=(--maf ~{maf})
+    ARGS+=(--geno ~{geno})
+    ARGS+=(--mind ~{mind})
+    ARGS+=(--hwe ~{hwe} '~{hwe_modifier}')
 
     # -- Variant ID normalization --
     # Single quotes protect $r/$a from bash expansion under set -u
-    if [ -n '~{default="" set_all_var_ids}' ]; then
-      ARGS+=(--set-all-var-ids '~{set_all_var_ids}')
-    fi
-    ~{if defined(rm_dup) then 'ARGS+=(--rm-dup ~{rm_dup})' else ''}
+    ARGS+=(--set-all-var-ids '~{set_all_var_ids}')
+    ARGS+=(--rm-dup ~{rm_dup})
 
-    # -- Include/exclude lists --
-    ~{if defined(extract) then 'ARGS+=(--extract ~{extract})' else ''}
-    ~{if defined(exclude) then 'ARGS+=(--exclude ~{exclude})' else ''}
-    ~{if defined(remove)  then 'ARGS+=(--remove ~{remove})'   else ''}
-    ~{if defined(keep)    then 'ARGS+=(--keep ~{keep})'        else ''}
-
-    # Region exclusion: concatenate multiple BED files for --exclude range
+    # -- Region exclusion --
     BEDS=(~{sep=' ' exclude_range_beds})
     if [ "${#BEDS[@]}" -gt 0 ]; then
       cat "${BEDS[@]}" > combined_exclude_ranges.bed
       ARGS+=(--exclude range combined_exclude_ranges.bed)
     fi
 
+    echo "=== plink2 filter args ==="
+    printf '%s\n' "${ARGS[@]}"
+    echo "=========================="
+
     plink2 \
       --pfile "${INPUT_PREFIX}" \
       --make-pgen \
       --out ~{output_prefix} \
       --threads ~{cpu} \
-      "${ARGS[@]}" \
-      ~{extra_args}
+      "${ARGS[@]}"
 
     ls -lh ~{output_prefix}.{pgen,pvar,psam}
     grep -E '(variants loaded|remaining after)' ~{output_prefix}.log || true
@@ -153,35 +163,24 @@ workflow filter_pgen {
     File   pvar
     File   psam
 
-    # Variant-type filters
-    String?  chromosomes
-    Int?     min_alleles
-    Int?     max_alleles
-    String?  snps_only
-    Boolean  exclude_palindromic_snps = false
+    String?      chromosomes
+    Int          min_alleles               = 2
+    Int          max_alleles               = 2
+    String       snps_only                 = "just-acgt"
+    Boolean      exclude_palindromic_snps  = true
 
-    # Quality filters
-    Boolean  var_filter = true
-    Float?   maf
-    Float?   geno
-    Float?   mind
-    Float?   hwe
-    String   hwe_modifier = "keep-fewhet"
+    Boolean      var_filter   = true
+    Float        maf          = 0.05
+    Float        geno         = 0.01
+    Float        mind         = 0.05
+    Float        hwe          = 0.0000000001
+    String       hwe_modifier = "keep-fewhet"
 
-    # Variant ID normalization
-    String?  set_all_var_ids
-    String?  rm_dup
+    String       set_all_var_ids = "@:#:$r:$a"
+    String       rm_dup          = "exclude-all"
 
-    # Include/exclude lists
-    File?        extract
-    File?        exclude
-    File?        remove
-    File?        keep
     Array[File]  exclude_range_beds = []
 
-    String  extra_args = ""
-
-    # Resources
     Int?    cpu_override
     String? memory_override
     String  docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/plink2:latest"
@@ -205,12 +204,7 @@ workflow filter_pgen {
       hwe_modifier              = hwe_modifier,
       set_all_var_ids           = set_all_var_ids,
       rm_dup                    = rm_dup,
-      extract                   = extract,
-      exclude                   = exclude,
-      remove                    = remove,
-      keep                      = keep,
       exclude_range_beds        = exclude_range_beds,
-      extra_args                = extra_args,
       cpu_override              = cpu_override,
       memory_override           = memory_override,
       docker_image              = docker_image
