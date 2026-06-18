@@ -650,10 +650,30 @@ def cmd_infer(argv: list[str]) -> None:
     new_freq = update_allele_freq_from_stats(em_stats)
     chrom_model = replace(chrom_model, allele_freq=new_freq)
 
-    # Decode
+    # Decode.
+    #
+    # Three modes for the dense decode parquet:
+    #   --write-dense-decode : parquet written at <out>.chr<N>.decode.parquet
+    #                          (first-class WDL output, glob-visible).
+    #   --probs only         : parquet still needed to stream the
+    #                          mean_posterior column into tracts.tsv.gz,
+    #                          but written under <out>.decode_tmp/ so the
+    #                          WDL glob does NOT match and the file is
+    #                          deleted after tracts are written. Mean-
+    #                          posterior is added to tracts at near-zero
+    #                          delocalization cost.
+    #   neither              : no parquet written; tracts have no
+    #                          mean_posterior column.
     decode_pq = None
-    if args.write_dense_decode or args.probs:
+    parquet_is_temp = False
+    if args.write_dense_decode:
         decode_pq = f"{args.out}.chr{chrom_data.chrom}.decode.parquet"
+    elif args.probs:
+        from pathlib import Path as _Path
+        tmpdir = _Path(f"{args.out}.decode_tmp")
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        decode_pq = str(tmpdir / f"chr{chrom_data.chrom}.decode.parquet")
+        parquet_is_temp = True
     decode = decode_chromosome(
         chrom_data, chrom_model, batch_size=chrom_batch,
         write_dense_decode=(args.write_dense_decode or args.probs),
@@ -679,7 +699,17 @@ def cmd_infer(argv: list[str]) -> None:
         [result], [chrom_data], n_samples, sample_names,
         f"{args.out}.tracts.tsv.gz",
         ancestry_names=ancestry_names,
+        write_posteriors=args.probs or args.write_dense_decode,
     )
+
+    if parquet_is_temp and decode_pq is not None:
+        from pathlib import Path as _Path
+        _Path(decode_pq).unlink(missing_ok=True)
+        try:
+            _Path(decode_pq).parent.rmdir()
+        except OSError:
+            pass
+        log.info("Removed temp decode parquet at %s", decode_pq)
 
     import json
     summary = {
