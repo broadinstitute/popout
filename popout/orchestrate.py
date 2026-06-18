@@ -103,14 +103,17 @@ def _load_single_chrom(args) -> "ChromData":
     if args.vcf:
         from .vcf_io import iter_chromosomes
         chrom_iter = iter_chromosomes(
-            args.vcf, gmap, chromosomes=args.chromosomes,
+            args.vcf, gmap,
+            min_maf=args.maf,
+            chromosomes=args.chromosomes,
         )
     else:
         from .pgen_io import iter_chromosomes as pgen_iter
         chrom_iter = pgen_iter(
             args.pgen, gmap,
+            min_maf=args.maf,
             chromosomes=args.chromosomes,
-            thin_cm=args.thin_cm, maf_threshold=args.maf,
+            thin_cm=args.thin_cm,
         )
 
     chroms = list(chrom_iter)
