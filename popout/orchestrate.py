@@ -125,6 +125,54 @@ def _load_single_chrom(args) -> "ChromData":
     return chroms[0]
 
 
+def _build_seeding_mask(
+    exclude_path: str,
+    sample_names: list[str],
+    n_haps: int,
+) -> "np.ndarray":
+    """Build a per-haplotype boolean mask from a sample-id exclusion TSV.
+
+    Matches the cli.py implementation: True = keep, False = exclude.
+    Both haplotypes of an excluded sample are masked out.
+    """
+    from .cli import load_seeding_exclusion_list
+
+    exclude_set = load_seeding_exclusion_list(exclude_path)
+    log.info(
+        "Loaded %d exclusion samples for seeding from %s",
+        len(exclude_set), exclude_path,
+    )
+
+    sample_set = {str(s) for s in sample_names}
+    unknown = exclude_set - sample_set
+    if unknown:
+        log.warning(
+            "%d sample IDs in --exclude-seeding-samples not found in input: "
+            "%s%s",
+            len(unknown), sorted(unknown)[:5],
+            " ..." if len(unknown) > 5 else "",
+        )
+
+    seeding_mask = np.ones(n_haps, dtype=bool)
+    n_excluded = 0
+    for i, name in enumerate(sample_names):
+        if str(name) in exclude_set:
+            seeding_mask[2 * i] = False
+            seeding_mask[2 * i + 1] = False
+            n_excluded += 1
+    H_kept = int(seeding_mask.sum())
+    log.info(
+        "Seeding on %d / %d haplotypes after excluding %d samples",
+        H_kept, n_haps, n_excluded,
+    )
+    if H_kept < 1000:
+        raise SystemExit(
+            f"Only {H_kept} haplotypes remain after excluding {n_excluded} "
+            "samples; minimum 1000 required for seeding.",
+        )
+    return seeding_mask
+
+
 def _get_sample_names(args) -> list[str]:
     if args.vcf:
         import pysam
@@ -201,9 +249,14 @@ def cmd_seed(argv: list[str]) -> None:
 
     seeding_mask = None
     if args.exclude_seeding_samples is not None:
-        from .exclusion import load_exclusion_mask
-        seeding_mask = load_exclusion_mask(
-            args.exclude_seeding_samples, chrom_data.n_haps,
+        if args.seed_method != "recursive":
+            raise SystemExit(
+                "--exclude-seeding-samples requires --seed-method recursive",
+            )
+        seeding_mask = _build_seeding_mask(
+            args.exclude_seeding_samples,
+            _get_sample_names(args),
+            chrom_data.n_haps,
         )
 
     t0 = time.perf_counter()
@@ -420,9 +473,10 @@ def cmd_train(argv: list[str]) -> None:
         from .recursive_seed import recursive_split_seed
         seeding_mask = None
         if args.exclude_seeding_samples is not None:
-            from .exclusion import load_exclusion_mask
-            seeding_mask = load_exclusion_mask(
-                args.exclude_seeding_samples, chrom_data.n_haps,
+            seeding_mask = _build_seeding_mask(
+                args.exclude_seeding_samples,
+                _get_sample_names(args),
+                chrom_data.n_haps,
             )
         leaf_labels, leaf_info = recursive_split_seed(
             chrom_data.geno,
