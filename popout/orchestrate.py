@@ -414,6 +414,12 @@ def _build_parser_train() -> argparse.ArgumentParser:
         "--no-per-hap-T", dest="per_hap_T", action="store_false",
     )
     p.add_argument("--n-T-buckets", type=int, default=20)
+    # Decode (train decodes its own chrom too -- the EM-fitted allele_freq
+    # IS the correct per-site freq for the train chrom; running a separate
+    # infer scatter on the train chrom would refit it with a worse 1-iter
+    # estimate).
+    p.add_argument("--probs", action="store_true")
+    p.add_argument("--write-dense-decode", action="store_true")
     p.add_argument("--ancestry-names", default=None)
     return p
 
@@ -503,6 +509,22 @@ def cmd_train(argv: list[str]) -> None:
             leaf_labels_for_model = np.array(leaf_labels, dtype=np.int32)
         leaf_paths_for_model = np.array([li.path for li in leaf_info])
 
+    # Decode the train chrom in this same task. The EM-fitted allele_freq
+    # IS the right per-site freq for the train chrom; running the infer
+    # scatter on it would refit with a worse 1-iter estimate. Parquet
+    # routing mirrors cmd_infer (temp subdir for --probs, first-class
+    # path for --write-dense-decode).
+    decode_pq = None
+    parquet_is_temp = False
+    if args.write_dense_decode:
+        decode_pq = f"{args.out}.chr{chrom_data.chrom}.decode.parquet"
+    elif args.probs:
+        from pathlib import Path as _Path
+        tmpdir = _Path(f"{args.out}.decode_tmp")
+        tmpdir.mkdir(parents=True, exist_ok=True)
+        decode_pq = str(tmpdir / f"chr{chrom_data.chrom}.decode.parquet")
+        parquet_is_temp = True
+
     result = run_em(
         chrom_data,
         n_ancestries=K_override,
@@ -519,7 +541,8 @@ def cmd_train(argv: list[str]) -> None:
         seed_responsibilities=seed_resp,
         freeze_anchors_iters=args.freeze_anchors_iters,
         em_t_policy=args.em_t_policy,
-        skip_decode=True,
+        write_dense_decode=(args.write_dense_decode or args.probs),
+        decode_parquet_path=decode_pq,
     )
 
     # For GMM no-seed-input path, derive labels/paths from final responsibilities
@@ -560,6 +583,28 @@ def cmd_train(argv: list[str]) -> None:
         result, f"{args.out}.model",
         chrom_data=chrom_data, ancestry_names=ancestry_names,
     )
+
+    # Per-chrom outputs for the train chrom. Same shape as cmd_infer.
+    from .output import write_global_ancestry, write_ancestry_tracts
+    sample_names = _get_sample_names(args)
+    n_samples = len(sample_names)
+    write_global_ancestry(
+        [result], n_samples, sample_names, f"{args.out}.global.tsv",
+    )
+    write_ancestry_tracts(
+        [result], [chrom_data], n_samples, sample_names,
+        f"{args.out}.tracts.tsv.gz",
+        write_posteriors=args.probs or args.write_dense_decode,
+    )
+
+    if parquet_is_temp and decode_pq is not None:
+        from pathlib import Path as _Path
+        _Path(decode_pq).unlink(missing_ok=True)
+        try:
+            _Path(decode_pq).parent.rmdir()
+        except OSError:
+            pass
+        log.info("Removed temp decode parquet at %s", decode_pq)
 
     # Minimal summary.json
     import json

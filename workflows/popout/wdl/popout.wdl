@@ -3,7 +3,9 @@ version 1.0
 ## Run popout on ONE chromosome in one of three modes.
 ##
 ##   mode = "seed"   -> popout seed   (writes .seed.npz)
-##   mode = "train"  -> popout train  (writes .model.npz + .summary.json)
+##   mode = "train"  -> popout train  (writes .model.npz + .summary.json
+##                                      + .global.tsv + .tracts.tsv.gz for
+##                                      the train chrom)
 ##   mode = "infer"  -> popout infer  (writes .global.tsv + .tracts.tsv.gz
 ##                                     + optional .decode.parquet)
 ##
@@ -134,6 +136,13 @@ task popout_task {
       ~{if defined(freeze_anchors_iters) then 'CMD="$CMD --freeze-anchors-iters ~{freeze_anchors_iters}"' else ''}
       ~{if defined(seed_input) then 'CMD="$CMD --seed-input ~{seed_input}"' else ''}
       ~{if defined(ancestry_names) then 'CMD="$CMD --ancestry-names ~{ancestry_names}"' else ''}
+      # mode=train also decodes its own chrom and writes tracts + global.
+      if [ "~{write_probs}" = "true" ]; then
+        CMD="$CMD --probs"
+      fi
+      if [ "~{write_dense_decode}" = "true" ]; then
+        CMD="$CMD --write-dense-decode"
+      fi
     fi
 
     if [ "~{mode}" = "infer" ]; then

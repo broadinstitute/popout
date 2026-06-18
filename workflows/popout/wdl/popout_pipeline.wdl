@@ -116,6 +116,8 @@ workflow popout_pipeline {
       block_emissions            = block_emissions,
       block_size                 = block_size,
       per_hap_T                  = per_hap_T,
+      write_probs                = write_probs,
+      write_dense_decode         = write_dense_decode,
       thin_cm                    = thin_cm,
       maf                        = maf,
       seed                       = seed,
@@ -167,6 +169,10 @@ workflow popout_pipeline {
     File model        = select_first([train.model])
     File model_npz    = select_first([train.model_npz_out])
     File train_summary = select_first([train.summary])
+
+    # Train chrom outputs (train task now decodes its own chrom).
+    File train_global_tsv = select_first([train.global_tsv])
+    File train_tracts     = select_first([train.tracts])
 
     # Stage C: per-chrom outputs from the scatter (one entry per non-train chrom).
     Array[File?] global_tsvs_per_chrom = infer.global_tsv
