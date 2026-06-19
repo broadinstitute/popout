@@ -1003,13 +1003,14 @@ def main() -> int:
         Step(11, "plot_concordance",    ("compare_to_rf",),          step_plot_concordance),
     ]
     # ★ v1.1: Rye (was admixture) concordance is per-cluster optional. It
-    # consumes the FLARE global.tsv directly (named columns); no dependency
-    # on compare_to_rf / labels.json.
+    # consumes the FLARE global.tsv directly (named columns); the
+    # ``to_popout_format`` step is what populates ws.intermediates["global_tsv"],
+    # so depend on it explicitly. No labels.json dependency.
     if args.rye_q:
-        steps.append(Step(6, "compare_to_rye", (), step_compare_to_rye,
+        steps.append(Step(6, "compare_to_rye", ("to_popout_format",), step_compare_to_rye,
                           optional_input_flag="rye_q"))
     if args.self_id:
-        steps.append(Step(10, "self_id", (), step_self_id,
+        steps.append(Step(10, "self_id", ("to_popout_format",), step_self_id,
                           optional_input_flag="self_id"))
 
     # Sort by step number for stable logging.
