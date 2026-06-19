@@ -90,7 +90,7 @@ task validate_cluster {
 
     String run_name                # magicwand run-name prefix
     String? panel_id
-    String schema_version = "5.0.0"   # ★ v5.0.0 (collector fidelity audit)
+    String schema_version = "6.0.0"   # v6.0.0 (concordance unification, FLARE header end-to-end)
 
     # Resource overrides (auto-scaled by anc_vcf size by default).
     Int?     cpu_override
@@ -240,7 +240,7 @@ task collate_cohort {
     File?       collation_config
     File?       previous_cohort_bundle    # cohort bundle to diff against
     String      run_name
-    String      schema_version = "5.0.0"     # ★ v5.0.0 (collector fidelity audit)
+    String      schema_version = "6.0.0"     # v6.0.0 (concordance unification, FLARE header end-to-end)
 
     # MID-handling rule for cohort/confusion_rf.tsv (Phase 6). FLARE's
     # panel has no MID component; RF emits SP6 including MID. Pick:

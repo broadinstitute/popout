@@ -23,28 +23,63 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 class GlobalAncestry:
-    """Per-sample global ancestry proportions."""
+    """Per-sample global ancestry proportions.
 
-    __slots__ = ("sample_names", "proportions", "n_ancestries")
+    ``ancestry_names`` is the column header verbatim from the TSV (sans the
+    leading sample-id column). For tools that emit named columns (FLARE,
+    popout >= v3) this is the ground truth and consumers should index by
+    name. For tools that emit anonymous columns the loader supplies
+    ``["ancestry_0", ..., "ancestry_{K-1}"]`` so the slot is never absent.
+    """
 
-    def __init__(self, sample_names: list[str], proportions: np.ndarray):
+    __slots__ = ("sample_names", "proportions", "ancestry_names", "n_ancestries")
+
+    def __init__(
+        self,
+        sample_names: list[str],
+        proportions: np.ndarray,
+        ancestry_names: list[str] | None = None,
+    ):
         self.sample_names = sample_names
         self.proportions = proportions  # (n_samples, n_ancestries)
         self.n_ancestries = proportions.shape[1]
+        if ancestry_names is None:
+            ancestry_names = [f"ancestry_{i}" for i in range(self.n_ancestries)]
+        if len(ancestry_names) != self.n_ancestries:
+            raise ValueError(
+                f"ancestry_names length {len(ancestry_names)} does not match "
+                f"proportions column count {self.n_ancestries}"
+            )
+        self.ancestry_names = ancestry_names
 
 
 def read_global_tsv(path: str | Path) -> GlobalAncestry:
-    """Read ``{prefix}.global.tsv`` into sample names + numpy array."""
+    """Read ``{prefix}.global.tsv`` into sample names + ancestry names + array.
+
+    The TSV's column header is the tool's authoritative ancestry naming. It
+    is preserved verbatim and exposed via ``GlobalAncestry.ancestry_names``.
+    Never reconstruct ancestry names from a sidecar when the tool wrote them
+    in the header.
+    """
     path = Path(path)
     sample_names: list[str] = []
     rows: list[list[float]] = []
     with open(path) as f:
-        header = f.readline()  # skip header
+        header_line = f.readline().rstrip("\n").split("\t")
+        if len(header_line) < 2:
+            raise ValueError(
+                f"{path}: global.tsv header has fewer than 2 columns: {header_line!r}"
+            )
+        ancestry_names = header_line[1:]
         for line in f:
             parts = line.rstrip("\n").split("\t")
             sample_names.append(parts[0])
             rows.append([float(x) for x in parts[1:]])
-    return GlobalAncestry(sample_names, np.array(rows, dtype=np.float32))
+    return GlobalAncestry(
+        sample_names,
+        np.array(rows, dtype=np.float32),
+        ancestry_names=ancestry_names,
+    )
 
 
 # ---------------------------------------------------------------------------

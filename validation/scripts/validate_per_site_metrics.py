@@ -134,25 +134,6 @@ def load_region_bed(path: Path) -> list[tuple[str, int, int, str]]:
     return out
 
 
-def load_labels_json(path: Path | None) -> dict[int, str]:
-    """Return ancestry index -> display name. Empty dict when labels
-    aren't available (fallback to 'ancestry_<i>' downstream)."""
-    if path is None or not path.exists():
-        return {}
-    raw = json.loads(path.read_text())
-    ptr = raw.get("popout_to_rf_label") or {}
-    if not ptr:
-        return {}
-    mapping = {int(k): v for k, v in ptr.items()}
-    counts: dict[str, int] = {}
-    for v in mapping.values():
-        counts[v] = counts.get(v, 0) + 1
-    out: dict[int, str] = {}
-    for i, lab in mapping.items():
-        out[i] = f"{lab}.{i}" if counts[lab] > 1 else lab
-    return out
-
-
 def read_model_text(path: Path) -> dict:
     """Light reimpl of popout.viz._loaders.read_model_text — kept local
     so this script has no popout dependency."""
@@ -171,17 +152,28 @@ def read_model_text(path: Path) -> dict:
     return result
 
 
-def read_global_tsv(path: Path) -> tuple[list[str], np.ndarray]:
-    """Returns (sample_names, proportions of shape (n_samples, K))."""
+def read_global_tsv(path: Path) -> tuple[list[str], list[str], np.ndarray]:
+    """Read FLARE/popout global.tsv. Returns
+    ``(sample_names, ancestry_names, proportions)`` where
+    ``ancestry_names`` is the column header verbatim from the TSV (sans
+    the leading sample-id column) and ``proportions`` has shape
+    ``(n_samples, K)``. The TSV header is the tool's authoritative
+    naming; do not reconstruct names from a sidecar."""
     sample_names: list[str] = []
     rows: list[list[float]] = []
     with open(path) as f:
-        f.readline()  # header
+        header_line = f.readline().rstrip("\n").split("\t")
+        if len(header_line) < 2:
+            raise ValueError(
+                f"{path}: global.tsv header has fewer than 2 columns: "
+                f"{header_line!r}"
+            )
+        ancestry_names = header_line[1:]
         for line in f:
             parts = line.rstrip("\n").split("\t")
             sample_names.append(parts[0])
             rows.append([float(x) for x in parts[1:]])
-    return sample_names, np.array(rows, dtype=np.float64)
+    return sample_names, ancestry_names, np.array(rows, dtype=np.float64)
 
 
 # ── VCF header probe ──────────────────────────────────────────────────────
@@ -242,10 +234,10 @@ MU_DIFF_THRESHOLD = 0.05
 
 
 def write_mu_vs_global_diff(
-    global_tsv: Path, flare_model: Path, out_dir: Path, anc_names: dict[int, str],
+    global_tsv: Path, flare_model: Path, out_dir: Path, anc_names: list[str],
 ) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
-    _, props = read_global_tsv(global_tsv)
+    _, _, props = read_global_tsv(global_tsv)
     global_mu = props.mean(axis=0)
     model_mu = np.array(read_model_text(flare_model)["mu"], dtype=np.float64)
     diff = np.abs(global_mu - model_mu)
@@ -255,7 +247,7 @@ def write_mu_vs_global_diff(
     for i in range(len(model_mu)):
         per_anc.append({
             "ancestry": i,
-            "name": anc_names.get(i, f"ancestry_{i}"),
+            "name": anc_names[i],
             "global_mu": float(global_mu[i]),
             "model_mu": float(model_mu[i]),
             "abs_diff": float(diff[i]),
@@ -523,10 +515,20 @@ def run_collector(args: argparse.Namespace) -> None:
     print(f"loaded {len(masks)} mask intervals from "
           f"{len(args.region_mask_bed)} BED(s)", flush=True)
 
-    anc_names = load_labels_json(args.labels_json)
+    # FLARE ancestry names come from the global.tsv header, verbatim. No
+    # sidecar lookup. The label name is whatever FLARE's panel VCF
+    # ``##ANCESTRY=`` line carried.
+    _, anc_names, _ = read_global_tsv(args.global_tsv)
+    print(f"FLARE ancestry columns (verbatim from global.tsv header): "
+          f"{anc_names!r}", flush=True)
 
     model_info = read_model_text(args.flare_model)
     K = int(model_info["n_ancestries"])
+    if K != len(anc_names):
+        raise RuntimeError(
+            f"FLARE model K={K} does not match global.tsv header K="
+            f"{len(anc_names)}: header={anc_names!r}"
+        )
     model_T = float(model_info.get("gen_since_admix") or 0.0) or None
     print(f"FLARE K = {K}; model gen_since_admix = {model_T}", flush=True)
 
@@ -669,7 +671,7 @@ def write_structural_outputs(
     samples: list[str],
     bp_per_anc_h1: np.ndarray,
     bp_per_anc_h2: np.ndarray,
-    anc_names: dict[int, str],
+    anc_names: list[str],
     model_T: float | None,
     K: int,
     out_dir: Path,
@@ -705,7 +707,7 @@ def write_structural_outputs(
             implied_T = None
         per_anc.append({
             "ancestry": int(a),
-            "name": anc_names.get(int(a), f"ancestry_{a}"),
+            "name": anc_names[int(a)],
             "n_tracts": n,
             "mean_Mb": mean_Mb,
             "median_Mb": median_Mb,
@@ -766,9 +768,9 @@ def write_structural_outputs(
         f.write("sample_id\thap\tdominant_anc\tn_switches\n")
         for i, sid in enumerate(samples):
             if saw_h1[i]:
-                f.write(f"{sid}\t1\t{anc_names.get(int(dom_h1_idx[i]), f'ancestry_{int(dom_h1_idx[i])}')}\t{int(tract_count_h1[i]) - 1}\n")
+                f.write(f"{sid}\t1\t{anc_names[int(dom_h1_idx[i])]}\t{int(tract_count_h1[i]) - 1}\n")
             if saw_h2[i]:
-                f.write(f"{sid}\t2\t{anc_names.get(int(dom_h2_idx[i]), f'ancestry_{int(dom_h2_idx[i])}')}\t{int(tract_count_h2[i]) - 1}\n")
+                f.write(f"{sid}\t2\t{anc_names[int(dom_h2_idx[i])]}\t{int(tract_count_h2[i]) - 1}\n")
     print(f"  wrote {out_dir / 'switch_rate_per_hap.tsv'}", flush=True)
     print(f"  wrote {out_dir / 'switch_rate_summary.json'}", flush=True)
 
@@ -889,7 +891,7 @@ def write_regional_outputs(
     bp_window_anc: np.ndarray,
     n_samples: int,
     K: int,
-    anc_names: dict[int, str],
+    anc_names: list[str],
     masks: list[tuple[str, int, int, str]],
     fdr_q: float,
     out_dir: Path,
@@ -936,7 +938,7 @@ def write_regional_outputs(
     _, q_arr, _, _ = multipletests(p_arr, alpha=fdr_q, method="fdr_bh")
     for r, q in zip(rows, q_arr):
         r["q"] = float(q)
-        r["ancestry_name"] = anc_names.get(r["ancestry"], f"ancestry {r['ancestry']}")
+        r["ancestry_name"] = anc_names[int(r["ancestry"])]
 
     # ── windows.tsv.gz ──
     cols = ["chrom", "start", "end", "ancestry_name", "mean_anc", "z", "p", "q", "mask_region"]
@@ -978,7 +980,7 @@ def write_regional_outputs(
             }
         per_anc_summary.append({
             "ancestry": int(a),
-            "name": anc_names.get(int(a), f"ancestry {a}"),
+            "name": anc_names[int(a)],
             "n_significant": len(a_sig),
             "peak_window": peak,
         })
@@ -1017,8 +1019,6 @@ def main() -> int:
     p.add_argument("--chrom-sizes", type=Path, required=True)
     p.add_argument("--region-mask-bed", type=Path, action="append", default=[],
                    help="BED of named regions to overlay (repeatable)")
-    p.add_argument("--labels-json", type=Path, default=None,
-                   help="labels.json from compare_to_rf.py for ancestry names (optional)")
     p.add_argument("--window-bp", type=int, default=1_000_000)
     p.add_argument("--step-bp", type=int, default=250_000)
     p.add_argument("--fdr-q", type=float, default=0.05)

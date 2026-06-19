@@ -1,19 +1,33 @@
-{# FLARE vs Rye concordance. #}
+{# FLARE vs {Rye, RF} concordance. #}
 {% from "_macros.j2" import figure %}
 {% set tag = ctx.tag(section.id) %}
+{% set src = data.get("source", "rye") %}
+{% set other = "Rye" if src == "rye" else "RF" %}
+{% set cohort_tsv = "concordance_metrics_rye.tsv" if src == "rye" else "concordance_metrics_rf.tsv" %}
 
-# FLARE vs Rye concordance
+# FLARE vs {{ other }} concordance
 
 **What this is.** For each ancestry, two stats describing how FLARE's
-per-sample global proportion lines up against Rye's per-sample Q value
-for that ancestry. **Pearson r** measures rank co-variation (do they
-move together?). **Lin's CCC** additionally measures absolute
-agreement (do they lie on y=x?). A systematic offset — say FLARE
-consistently calling 10 percentage points higher than Rye — leaves r
-near 1 but tanks CCC. Rye is used instead of the RF superpop hard
-label here because both Rye and FLARE produce soft proportions, so the
-comparison is apples-to-apples; the categorical superpop label would
-penalise FLARE on truly admixed samples mechanically.
+per-sample global proportion lines up against {{ other }}'s per-sample
+proportion for that ancestry. **Pearson r** measures rank co-variation
+(do they move together?). **Lin's CCC** additionally measures absolute
+agreement (do they lie on y=x?). A systematic offset (FLARE
+consistently calling 10 percentage points higher than {{ other }})
+leaves r near 1 but tanks CCC.
+{% if src == "rye" %}
+Rye is used here because both FLARE and Rye emit soft proportions on a
+shared 5-label superpop basis (eur, eas, amr, afr, sas); the comparison
+is apples-to-apples without any categorical-superpop penalty.
+{% else %}
+RF emits soft posteriors on SP6 (afr, amr, eas, eur, mid, sas). The
+per-ancestry r and CCC are computed on the 5-label SP5 intersection;
+MID is RF-only and lives in the confusion section. The acceptance
+thresholds (r >= 0.95 and CCC >= 0.90) are the same as for Rye, but
+expect lower scores: RF is a hard-call classifier whose soft
+probabilities are class-confidence, while FLARE's proportions are
+genome-fractions. The same numbers mean different things, so
+agreement is naturally bounded below 1.
+{% endif %}
 
 **How to read this chart.** Each row is one ancestry, present in the
 cohort. The row is partitioned into three non-overlapping lanes
@@ -24,7 +38,7 @@ cohort. The row is partitioned into three non-overlapping lanes
 - **Cohort bar** (middle): the cohort-pooled, n_samples-weighted
   value, with the printed number to the right.
 - **Sina rain** (below): one dot per `(cluster, chrom)` row that
-  passed the μ-gate (`cluster_mu >= 0.01`). Vertical jitter is
+  passed the mu-gate (`cluster_mu >= 0.01`). Vertical jitter is
   proportional to local KDE density so dense clusters of values
   fan out and sparse tails collapse to a thin line.
 
@@ -32,18 +46,18 @@ The dashed vertical line is the pass threshold (0.95 for r, 0.90 for
 CCC). Rows with `cluster_mu < 0.01` are degenerate and excluded.
 
 {% if chart %}
-{{ figure(path=chart, caption="Per-ancestry Pearson r and Lin's CCC — raincloud + sina rain. Bar = cohort-pooled value, half-violin = KDE, raindrops = per-(cluster, chrom) values.", tag=tag) }}
+{{ figure(path=chart, caption="Per-ancestry Pearson r and Lin's CCC - raincloud + sina rain. Bar = cohort-pooled value, half-violin = KDE, raindrops = per-(cluster, chrom) values.", tag=tag) }}
 {% else %}
-> **MISSING:** `cohort/concordance_metrics.tsv`
+> **MISSING:** `cohort/{{ cohort_tsv }}`
 {% endif %}
 
 {% if data.get("present") %}
 **In this run.**
 
-- Cohort-pooled **Pearson r** per ancestry: {% for anc, v in data.pooled_r.items() %}`{{ anc }}` ({{ "%.3f"|format(v) if v is not none else "—" }}){{ ", " if not loop.last else "." }}{% endfor %}
-- Cohort-pooled **Lin's CCC** per ancestry: {% for anc, v in data.pooled_ccc.items() %}`{{ anc }}` ({{ "%.3f"|format(v) if v is not none else "—" }}){{ ", " if not loop.last else "." }}{% endfor %}
+- Cohort-pooled **Pearson r** per ancestry: {% for anc, v in data.pooled_r.items() %}`{{ anc }}` ({{ "%.3f"|format(v) if v is not none else "-" }}){{ ", " if not loop.last else "." }}{% endfor %}
+- Cohort-pooled **Lin's CCC** per ancestry: {% for anc, v in data.pooled_ccc.items() %}`{{ anc }}` ({{ "%.3f"|format(v) if v is not none else "-" }}){{ ", " if not loop.last else "." }}{% endfor %}
 
 {% if data.top_gap %}
-Largest per-cluster **r - CCC** gap (calibration-drift candidates): {% for lab, v in data.top_gap %}`{{ lab }}` ({{ "%+.3f"|format(v) }}){{ "; " if not loop.last else "." }}{% endfor %} — positive gap = FLARE tracks Rye in rank but is offset in absolute value.
+Largest per-cluster **r - CCC** gap (calibration-drift candidates): {% for lab, v in data.top_gap %}`{{ lab }}` ({{ "%+.3f"|format(v) }}){{ "; " if not loop.last else "." }}{% endfor %} - positive gap = FLARE tracks {{ other }} in rank but is offset in absolute value.
 {% endif %}
 {% endif %}

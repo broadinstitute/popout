@@ -84,6 +84,20 @@ sections:
     chart: concordance_strip
     pair: [flare, rye]
     mid_rule: drop
+    options:
+      source: rye
+
+  - id: flare_vs_rf_concordance
+    template: flare_validation/concordance.j2
+    chart: concordance_strip
+    pair: [flare, rf]
+    target_space: SP6
+    options:
+      source: rf
+    # Same raincloud + sina layout as the Rye concordance section.
+    # Reads cohort/concordance_metrics_rf.tsv (per-ancestry r + CCC on
+    # the SP5 intersection; MID is RF-only and lives in the confusion
+    # section below).
 
   - id: flare_vs_rf_calibration
     template: flare_validation/calibration.j2
@@ -96,9 +110,21 @@ sections:
     chart: confusion_heatmap
     pair: [flare, rf]
     target_space: SP6
+    options:
+      source: rf
     # No mid_rule — the report renders confusion_rf.tsv faithfully,
     # whatever space the bundle delivers it in. Folding MID into EUR
     # is the stats collector's job; tracked in COLLECTOR_FIXES.md.
+
+  - id: flare_vs_rye_confusion
+    template: flare_validation/confusion.j2
+    chart: confusion_heatmap
+    pair: [flare, rye]
+    options:
+      source: rye
+    # Symmetric hard-call confusion FLARE rows x Rye cols.
+    # Reads cohort/confusion_rye.tsv. Rye has no MID column so the
+    # matrix is square on the 5 SP5 labels.
 
   - id: tract_length
     template: flare_validation/tract_length.j2

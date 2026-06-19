@@ -1,37 +1,43 @@
-{# FLARE vs RF cohort confusion matrix — rendered as the bundle delivers it. #}
+{# FLARE vs {RF, Rye} cohort confusion matrix - rendered as the bundle delivers it. #}
 {% from "_macros.j2" import figure %}
 {% set tag = ctx.tag(section.id) %}
+{% set src = data.get("source", "rf") %}
+{% set other = "RF" if src == "rf" else "Rye" %}
+{% set cohort_tsv = "confusion_rf.tsv" if src == "rf" else "confusion_rye.tsv" %}
 
-# FLARE vs RF — cohort confusion matrix
+# FLARE vs {{ other }} - cohort confusion matrix
 
-**What this is.** This page compares two tools that both assign a
-categorical superpop label per sample: the **RF classifier** (the
-argmax of its superpop probability vector) and **FLARE** (the argmax
-of its global ancestry proportion vector). The cohort table sums the
-per-cluster (RF call, FLARE call) counts; each row is the RF call,
-each column the FLARE call. Cells carry the cohort-wide count and the
-row-normalised recall; diagonals are agreement.
+**What this is.** Both tools assign a categorical superpop label per
+sample via argmax over their per-sample proportion vector. The cohort
+table sums the per-cluster (FLARE call, {{ other }} call) counts;
+{% if src == "rf" %}
+rows are RF calls (including MID, which FLARE has no column for) and
+columns are FLARE calls.
+{% else %}
+rows are FLARE calls and columns are Rye calls (no MID on either side
+of this comparison).
+{% endif %}
+Cells carry the cohort-wide count and the row-normalised recall;
+diagonals are agreement.
 
-**How to read this chart.** Bright diagonal + high row-recall = FLARE
-agrees with the RF call cohort-wide for that superpop. A bright
-off-diagonal cell, **outlined in red**, is a systematic disagreement:
-samples the RF classifier put in one label are being placed by FLARE
-in a different label. Compare row-recall (right margin: diag / row
-total) with column-precision (bottom margin: diag / column total). A
-label with high recall but low precision means FLARE over-calls it
-relative to RF.
+**How to read this chart.** Bright diagonal + high row-recall = the two
+tools agree on that superpop cohort-wide. A bright off-diagonal cell,
+**outlined in red**, is a systematic disagreement. Compare row-recall
+(right margin: diag / row total) with column-precision (bottom margin:
+diag / column total). A label with high recall but low precision means
+the column-tool over-calls it relative to the row-tool.
 
 {% if chart %}
 {{ figure(path=chart, caption="Row-normalised recall heatmap; cell label = `recall (n)`; red-outlined cells flag off-diagonal disagreement &gt; 5%.", tag=tag) }}
 {% else %}
-> **MISSING:** `cohort/confusion_rf.tsv`
+> **MISSING:** `cohort/{{ cohort_tsv }}`
 {% endif %}
 
 {% if data.get("present") %}
 **In this run.**
 
 {% if data.worst_recall %}
-- Lowest-recall RF calls: {% for lab, v in data.worst_recall %}`{{ lab }}` ({{ "%.2f"|format(v) }}){{ ", " if not loop.last else "." }}{% endfor %}
+- Lowest-recall row labels: {% for lab, v in data.worst_recall %}`{{ lab }}` ({{ "%.2f"|format(v) }}){{ ", " if not loop.last else "." }}{% endfor %}
 {% endif %}
 {% if data.top_conf %}
 - Top systematic off-diagonal: {% for lab, v in data.top_conf %}{{ lab }} ({{ "%.2f"|format(v) }}){{ ", " if not loop.last else "." }}{% endfor %}

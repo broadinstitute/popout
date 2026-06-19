@@ -505,6 +505,76 @@ if sample_pca is not None:
     print(f"  saved pca_by_rf_label.png (PCA source: {pca_source})")
 
 
+# ── 4b. Per-ancestry concordance (FLARE vs RF) ───────────────────────────
+#
+# Same shape as compare_to_rye.py's concordance_metrics.tsv. Per-ancestry
+# Pearson r + Lin's CCC + MAE quantiles + Jaccard@tau, mu-gated. Operates
+# on the SP5 intersection (the 5 labels both FLARE and RF carry); MID is
+# RF-only so it has no per-ancestry r/CCC row — its story is told by the
+# confusion matrix above. Only emitted when the tool is FLARE (named
+# columns); popout DX components are anonymous and routed through the
+# matching machinery instead.
+
+if TOOL == "FLARE":
+    from pathlib import Path as _Path
+    sys.path.insert(0, str(_Path(__file__).resolve().parent))
+    from concordance import (  # noqa: E402
+        align_by_name as _align_by_name,
+        build_concordance_rows as _build_rows,
+        write_concordance_metrics as _write_metrics,
+        write_concordance_summary as _write_summary,
+        write_full_matrix as _write_full_matrix,
+        write_merged_groups as _write_merged,
+        write_hard_confusion as _write_hard_conf,
+        MU_GATE as _MU_GATE,
+    )
+
+    print("\n=== 4b. Per-ancestry concordance (FLARE vs RF, SP5) ===")
+    # Drop RF's MID column for the per-ancestry r/CCC table; FLARE has no
+    # MID column to correlate against. MID stays in the confusion table.
+    _sp5_idx = [i for i, lab in enumerate(rf_ref_labels) if lab != "mid"]
+    _sp5_labels = [rf_ref_labels[i] for i in _sp5_idx]
+    _rf_sp5 = rf_prob_matrix[:, _sp5_idx]
+
+    _flare_aligned, _rf_aligned, _shared = _align_by_name(
+        popout_mat, list(popout_anc_cols),
+        _rf_sp5, _sp5_labels,
+        basis_order=_sp5_labels,
+    )
+    _rows = _build_rows(_flare_aligned, _rf_aligned, _shared)
+
+    for r in _rows:
+        gate = " (mu<0.01)" if r["cluster_mu"] < _MU_GATE else ""
+        ccc = "NA" if np.isnan(r["ccc"]) else f"{r['ccc']:.3f}"
+        prr = "NA" if np.isnan(r["pearson_r"]) else f"{r['pearson_r']:.3f}"
+        pass_txt = "-" if r["pass"] is None else ("PASS" if r["pass"] else "FAIL")
+        print(f"    {r['ancestry']:>3}{gate:<10}  mu={r['cluster_mu']:.4f}  "
+              f"r={prr}  CCC={ccc}  {pass_txt}")
+
+    _conc_dir = args.out_dir / "concordance"
+    _write_metrics(_rows, _conc_dir / "concordance_metrics_rf.tsv")
+    _write_summary(_rows, _flare_aligned, _rf_aligned, n,
+                   _conc_dir / "concordance_summary_rf.json")
+    _write_full_matrix(
+        _flare_aligned, _rf_aligned, _shared,
+        _conc_dir / "rf_full_matrix.tsv",
+        a_axis_name="flare_ancestry",
+    )
+    _write_merged(_rows, _conc_dir / "rf_merged_groups.tsv")
+    # Confusion on the full RF basis (6 rows with MID) x FLARE columns (5),
+    # keyed by name end to end. The legacy ``confusion_matrix.tsv`` above
+    # is popout-int-indexed and stays for popout DX compatibility.
+    _write_hard_conf(
+        rf_prob_matrix, list(rf_ref_labels),
+        popout_mat, list(popout_anc_cols),
+        _conc_dir / "rf_confusion_matrix.tsv",
+        a_axis_name="rf_primary",
+    )
+    print(f"  wrote concordance_metrics_rf.tsv, concordance_summary_rf.json, "
+          f"rf_full_matrix.tsv, rf_merged_groups.tsv, "
+          f"rf_confusion_matrix.tsv under {_conc_dir}/")
+
+
 # ── 5. Verdict ────────────────────────────────────────────────────────────
 
 print("\n=== 5. Computing Verdict ===")

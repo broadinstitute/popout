@@ -25,7 +25,35 @@ from pathlib import Path
 from typing import Iterable
 
 
-SCHEMA_VERSION = "5.0.0"
+SCHEMA_VERSION = "6.0.0"
+#
+# v6.0.0 — FLARE-vs-{Rye, RF} concordance unification + named-column
+# fidelity sweep.
+#
+#   - FLARE global.tsv is read header-first (named columns); the
+#     ``popout/viz/_loaders.GlobalAncestry`` dataclass now carries
+#     ``ancestry_names`` and downstream FLARE consumers
+#     (compare_to_rye.py, compare_to_rf.py FLARE branch,
+#     validate_per_site_metrics.py, validate_self_id.py) index by name.
+#     No FLARE script consumes ``soft_correlation/labels.json`` for
+#     name resolution anymore; popout DX still does.
+#   - ``validation/scripts/concordance.py`` is the shared per-ancestry
+#     concordance + hard-call confusion module. Both compare_to_rye.py
+#     and compare_to_rf.py (FLARE branch) call into it.
+#   - Per-cluster ``concordance/`` now carries tool-suffixed files:
+#     ``concordance_metrics_rye.tsv`` (was ``concordance_metrics.tsv``)
+#     and the new ``concordance_metrics_rf.tsv``,
+#     ``concordance_summary_rye.json`` / ``_rf.json``,
+#     ``rf_full_matrix.tsv`` / ``rf_merged_groups.tsv`` /
+#     ``rf_confusion_matrix.tsv`` (named-column, on top of the legacy
+#     popout-indexed ``confusion/rf_confusion_matrix.tsv`` which stays
+#     for popout DX).
+#   - Cohort: ``concordance_metrics_rye.tsv`` (renamed from
+#     ``concordance_metrics.tsv``) + new ``concordance_metrics_rf.tsv``
+#     and ``confusion_rye.tsv`` (rye hard-call confusion).
+#   - Reports gain ``flare_vs_rf_concordance`` and
+#     ``flare_vs_rye_confusion`` sections, both reading the new cohort
+#     tables.
 #
 # v5.0.0 — collector fidelity audit (see my_notes/validation/COLLECTOR_AUDIT.md).
 #
@@ -105,9 +133,15 @@ REQUIRED_CLUSTER_FILES: tuple[str, ...] = (
     # confusion/
     "confusion/rf_confusion_matrix.tsv",
     # concordance/
-    "concordance/SUMMARY.md",
-    # NOTE: concordance/{concordance_metrics.tsv, concordance_summary.json,
-    # rye_*} are v1.1 additions gated on rye_q — see OPTIONAL_CLUSTER_FILE_GROUPS.
+    "concordance/SUMMARY_rf.md",
+    "concordance/concordance_metrics_rf.tsv",
+    "concordance/concordance_summary_rf.json",
+    "concordance/rf_full_matrix.tsv",
+    "concordance/rf_merged_groups.tsv",
+    "concordance/rf_confusion_matrix.tsv",
+    # NOTE: concordance/{concordance_metrics_rye.tsv,
+    # concordance_summary_rye.json, rye_*} are gated on rye_q — see
+    # OPTIONAL_CLUSTER_FILE_GROUPS.
     # calibration/
     "calibration/slope_matrix.tsv",
     "calibration/notes.txt",
@@ -139,8 +173,8 @@ OPTIONAL_CLUSTER_FILE_GROUPS: dict[str, tuple[str, ...]] = {
     # When rye_q is provided, the orchestrator runs compare_to_rye.py and
     # emits the concordance metrics + Rye output family.
     "rye_q": (
-        "concordance/concordance_metrics.tsv",
-        "concordance/concordance_summary.json",
+        "concordance/concordance_metrics_rye.tsv",
+        "concordance/concordance_summary_rye.json",
         "concordance/rye_full_matrix.tsv",
         "concordance/rye_merged_groups.tsv",
         "concordance/rye_confusion_matrix.tsv",
@@ -202,6 +236,7 @@ REQUIRED_COHORT_FILES: tuple[str, ...] = (
     "cohort/soft_correlation_rf.tsv",
     "cohort/merged_groups_rf.tsv",
     "cohort/confusion_rf.tsv",
+    "cohort/concordance_metrics_rf.tsv",
     "cohort/calibration_slope.tsv",
     "cohort/tract_length_stats.tsv",
     "cohort/switch_rate_stats.tsv",
@@ -213,9 +248,10 @@ REQUIRED_COHORT_FILES: tuple[str, ...] = (
 
 
 OPTIONAL_COHORT_FILES: tuple[str, ...] = (
-    "cohort/concordance_metrics.tsv",   # ★ v1.1 — present iff any artifact had rye_q
+    "cohort/concordance_metrics_rye.tsv",  # gated on rye_q for any artifact
+    "cohort/confusion_rye.tsv",            # gated on rye_q for any artifact
     "cohort/self_id.tsv",
-    "cohort/fst_matrix.tsv",            # only for popout-source artifacts
+    "cohort/fst_matrix.tsv",               # only for popout-source artifacts
 )
 
 

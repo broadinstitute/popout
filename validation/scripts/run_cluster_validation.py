@@ -220,8 +220,8 @@ def step_per_site_metrics(args, ws: Workspace, log_dir: Path) -> None:
         "--workers",     str(args.max_workers),
         "--out-root",    str(ws.work_root),
     ]
-    if "labels_json" in ws.intermediates:
-        cmd += ["--labels-json", str(ws.intermediates["labels_json"])]
+    # Ancestry names are read from the FLARE global.tsv header; no
+    # labels.json dependency.
     if args.region_masks_dir is not None and args.region_masks_dir.is_dir():
         for bed in sorted(args.region_masks_dir.glob("*.bed")):
             cmd += ["--region-mask-bed", str(bed)]
@@ -359,10 +359,28 @@ def step_compare_to_rf(args, ws: Workspace, log_dir: Path) -> None:
     shutil.move(str(scratch / "soft_correlation.tsv"),      soft / "rf_soft_correlation.tsv")
     shutil.move(str(scratch / "popout_composition.tsv"),    soft / "popout_composition.tsv")
     shutil.move(str(scratch / "confusion_matrix.tsv"),      conf / "rf_confusion_matrix.tsv")
-    shutil.move(str(scratch / "SUMMARY.md"),                conc / "SUMMARY.md")
+    shutil.move(str(scratch / "SUMMARY.md"),                conc / "SUMMARY_rf.md")
     pca_png = scratch / "pca_by_rf_label.png"
     if pca_png.exists():
         shutil.move(str(pca_png), conf / "pca_by_rf_label.png")
+
+    # Per-ancestry concordance artifacts (FLARE branch, by-name on SP5).
+    rf_conc_src = scratch / "concordance"
+    if rf_conc_src.is_dir():
+        for name in ("concordance_metrics_rf.tsv",
+                     "concordance_summary_rf.json",
+                     "rf_full_matrix.tsv",
+                     "rf_merged_groups.tsv",
+                     "rf_confusion_matrix.tsv"):
+            src = rf_conc_src / name
+            if src.exists():
+                # rf_confusion_matrix.tsv from concordance/ is the
+                # named-column version; ``confusion/rf_confusion_matrix.tsv``
+                # above is the legacy popout-indexed version. Both stay so
+                # popout DX and the report can route to whichever they
+                # prefer.
+                dst = conc / name
+                shutil.move(str(src), dst)
 
     ws.intermediates["labels_json"] = soft / "labels.json"
 
@@ -391,14 +409,13 @@ def step_compare_to_rye(args, ws: Workspace, log_dir: Path) -> None:
         [sys.executable, str(SCRIPTS_DIR / "compare_to_rye.py"),
          "--global-tsv", str(ws.intermediates["global_tsv"]),
          "--rye-q", str(args.rye_q),
-         "--labels-json", str(ws.intermediates["labels_json"]),
          "--out-dir", str(scratch)],
         log_dir / "05_compare_to_rye.log", step_name="compare_to_rye",
     )
     _check("compare_to_rye", log_dir / "05_compare_to_rye.log", rc)
 
     conc = ws.subdir("concordance")
-    for name in ("concordance_metrics.tsv", "concordance_summary.json",
+    for name in ("concordance_metrics_rye.tsv", "concordance_summary_rye.json",
                  "rye_full_matrix.tsv", "rye_merged_groups.tsv",
                  "rye_confusion_matrix.tsv", "rye_admixture_comparison.png"):
         src = scratch / name
@@ -410,13 +427,13 @@ def step_compare_to_rye(args, ws: Workspace, log_dir: Path) -> None:
 
 
 def step_self_id(args, ws: Workspace, log_dir: Path) -> None:
-    """Step 6 (optional): validate_self_id.py."""
+    """Step 6 (optional): validate_self_id.py. Reads ancestry names from the
+    FLARE global.tsv header; no labels.json dependency."""
     out = ws.subdir("self_id")
     rc = _run_subprocess(
         [sys.executable, str(SCRIPTS_DIR / "validate_self_id.py"),
          "--global-tsv", str(ws.intermediates["global_tsv"]),
          "--self-id-tsv", str(args.self_id),
-         "--labels-json", str(ws.intermediates["labels_json"]),
          "--out-dir", str(out)],
         log_dir / "06_validate_self_id.log", step_name="self_id",
     )
@@ -979,19 +996,20 @@ def main() -> int:
         Step(2, "to_popout_format",     (),                          step_to_popout_format),
         Step(3, "coverage",             ("to_popout_format",),       step_coverage, nonfatal=True),
         Step(4, "compare_to_rf",        ("to_popout_format", "coverage"), step_compare_to_rf),
-        # per_site_metrics waits for compare_to_rf so labels.json is ready
-        # to feed ancestry names into windows.tsv.gz. compare_to_rf is
-        # cheap relative to the heavy VCF pass.
-        Step(1, "per_site_metrics",     ("to_popout_format", "compare_to_rf"), step_per_site_metrics),
+        # per_site_metrics reads ancestry names from the FLARE global.tsv
+        # header; no dependency on compare_to_rf / labels.json.
+        Step(1, "per_site_metrics",     ("to_popout_format",), step_per_site_metrics),
         Step(7, "render_collector_pngs", ("per_site_metrics",),      step_render_collector_pngs),
         Step(11, "plot_concordance",    ("compare_to_rf",),          step_plot_concordance),
     ]
-    # ★ v1.1: Rye (was admixture) concordance is per-cluster optional.
+    # ★ v1.1: Rye (was admixture) concordance is per-cluster optional. It
+    # consumes the FLARE global.tsv directly (named columns); no dependency
+    # on compare_to_rf / labels.json.
     if args.rye_q:
-        steps.append(Step(6, "compare_to_rye", ("compare_to_rf",), step_compare_to_rye,
+        steps.append(Step(6, "compare_to_rye", (), step_compare_to_rye,
                           optional_input_flag="rye_q"))
     if args.self_id:
-        steps.append(Step(10, "self_id", ("compare_to_rf",), step_self_id,
+        steps.append(Step(10, "self_id", (), step_self_id,
                           optional_input_flag="self_id"))
 
     # Sort by step number for stable logging.

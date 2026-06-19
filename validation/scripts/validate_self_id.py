@@ -15,8 +15,7 @@ Usage:
     python validate_self_id.py \\
         --global-tsv PATH/<prefix>.global.tsv \\
         --self-id-tsv PATH/self_id.tsv \\
-        --out-dir PATH/diagnostics \\
-        [--labels-json PATH/labels.json]
+        --out-dir PATH/diagnostics
 """
 
 from __future__ import annotations
@@ -65,24 +64,10 @@ def load_self_id(path: Path) -> dict[str, str]:
     return out
 
 
-def _ancestry_name(idx: int, labels: dict | None) -> str:
-    if not labels:
-        return f"ancestry_{idx}"
-    raw = {int(k): v for k, v in labels.get("popout_to_rf_label", {}).items()}
-    if not raw:
-        return f"ancestry_{idx}"
-    counts: dict[str, int] = {}
-    for v in raw.values():
-        counts[v] = counts.get(v, 0) + 1
-    base = raw.get(idx, f"ancestry_{idx}")
-    return f"{base}.{idx}" if counts.get(base, 0) > 1 else base
-
-
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--global-tsv", type=Path, required=True)
     p.add_argument("--self-id-tsv", type=Path, required=True)
-    p.add_argument("--labels-json", type=Path, default=None)
     p.add_argument("--out-dir", type=Path, required=True)
     args = p.parse_args()
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -91,15 +76,13 @@ def main() -> None:
         if not path.exists():
             raise FileNotFoundError(path)
 
-    labels = None
-    if args.labels_json is not None and args.labels_json.exists():
-        labels = json.loads(args.labels_json.read_text())
-
     print(f"Loading global TSV from {args.global_tsv}")
     ga = read_global_tsv(args.global_tsv)
     K = ga.n_ancestries
+    ancestry_names = ga.ancestry_names
     sample_idx = {sid: i for i, sid in enumerate(ga.sample_names)}
-    print(f"  {len(ga.sample_names):,} samples, {K} ancestries")
+    print(f"  {len(ga.sample_names):,} samples; ancestry columns "
+          f"(verbatim from header): {ancestry_names!r}")
 
     print(f"Loading self-ID table from {args.self_id_tsv}")
     self_id = load_self_id(args.self_id_tsv)
@@ -132,13 +115,13 @@ def main() -> None:
             idxs = by_class[cls]
             mean_mu = ga.proportions[idxs].mean(axis=0)
             for a in range(K):
-                name = _ancestry_name(a, labels)
+                name = ancestry_names[a]
                 f.write(f"{cls}\t{len(idxs)}\t{a}\t{name}\t{mean_mu[a]:.4f}\n")
             dom = int(np.argmax(mean_mu))
             per_class_summary.append({
                 "self_id": cls,
                 "n": int(len(idxs)),
-                "dominant_ancestry_name": _ancestry_name(dom, labels),
+                "dominant_ancestry_name": ancestry_names[dom],
                 "dominant_mean_mu": float(mean_mu[dom]),
             })
     print(f"  wrote {out_tsv}")

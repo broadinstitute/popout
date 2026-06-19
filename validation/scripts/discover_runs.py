@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Iterable, NoReturn
 
 
-EXPECTED_SCHEMA_VERSION = "5.0.0"
+EXPECTED_SCHEMA_VERSION = "6.0.0"
 
 # Headerless TSV column order. Indexes are referenced verbatim from the WDL
 # scatter body — keep them in sync with workflows/flare/wdl/flare_validate.wdl.

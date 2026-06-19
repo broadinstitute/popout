@@ -230,15 +230,22 @@ def collate_merged_groups_rf(arts: list[ClusterArtifact], out_path: Path) -> Non
         _append_lines(out_path, rows)
 
 
-def collate_concordance_metrics(arts: list[ClusterArtifact], out_path: Path) -> bool:
-    """★ v1.1 (optional, gated on rye_q): concat per-cluster concordance_metrics.tsv."""
+def _collate_concordance_per_tool(
+    arts: list[ClusterArtifact], src_name: str, out_path: Path,
+) -> bool:
+    """Concat per-cluster ``concordance/<src_name>`` into a cohort TSV.
+
+    Used for both Rye (`concordance_metrics_rye.tsv`) and RF
+    (`concordance_metrics_rf.tsv`). Same row shape per the shared
+    `concordance.py` writer.
+    """
     cols = ["cluster_id", "chrom", "ancestry", "cluster_mu", "n_samples",
             "pearson_r", "ccc", "cosine_mean", "mae_mean", "mae_median", "mae_p95",
             "jaccard_at_0.10", "jaccard_at_0.25", "jaccard_at_0.50", "pass"]
     _write_header_once(out_path, "\t".join(cols))
     any_present = False
     for art in arts:
-        src = art.artifact_dir / "concordance" / "concordance_metrics.tsv"
+        src = art.artifact_dir / "concordance" / src_name
         if not src.exists():
             continue
         any_present = True
@@ -250,6 +257,26 @@ def collate_concordance_metrics(arts: list[ClusterArtifact], out_path: Path) -> 
     if not any_present:
         out_path.unlink(missing_ok=True)
     return any_present
+
+
+def collate_concordance_metrics_rye(
+    arts: list[ClusterArtifact], out_path: Path,
+) -> bool:
+    """★ v1.1 (optional, gated on rye_q)."""
+    return _collate_concordance_per_tool(
+        arts, "concordance_metrics_rye.tsv", out_path,
+    )
+
+
+def collate_concordance_metrics_rf(
+    arts: list[ClusterArtifact], out_path: Path,
+) -> bool:
+    """Per-ancestry Pearson r + CCC for FLARE vs RF on the SP5 intersection.
+    Same row shape as Rye; emitted whenever compare_to_rf ran in by_name
+    mode and produced ``concordance/concordance_metrics_rf.tsv``."""
+    return _collate_concordance_per_tool(
+        arts, "concordance_metrics_rf.tsv", out_path,
+    )
 
 
 def _apply_mid_rule(
@@ -325,6 +352,55 @@ def collate_confusion_rf(
             mid_rule=mid_rule,
         )
         _append_lines(out_path, rows)
+
+
+def collate_confusion_rye(
+    arts: list[ClusterArtifact], out_path: Path,
+) -> bool:
+    """Unpivot ``concordance/rye_confusion_matrix.tsv`` into long form:
+    ``(cluster_id, chrom, flare_call, rye_call, n)``. Rye carries no MID
+    column so no ``mid_rule`` is meaningful here. Returns True if any
+    cluster had Rye data.
+
+    The source confusion is FLARE-primary rows x Rye-primary cols (see
+    ``compare_to_rye.py``'s ``write_hard_confusion`` call). We unpivot
+    that orientation faithfully.
+    """
+    _write_header_once(
+        out_path, "cluster_id\tchrom\tflare_call\trye_call\tn",
+    )
+    any_present = False
+    for art in arts:
+        src = art.artifact_dir / "concordance" / "rye_confusion_matrix.tsv"
+        if not src.exists():
+            continue
+        any_present = True
+        with open(src) as f:
+            header = f.readline().rstrip("\n").split("\t")
+            # header[0] = "flare_primary", header[1..-1] = rye label names,
+            # header[-1] = "total".
+            rye_labels = header[1:-1]
+            rows_out: list[str] = []
+            for line in f:
+                if line.startswith("#"):
+                    continue
+                parts = line.rstrip("\n").split("\t")
+                flare_call = parts[0]
+                if flare_call == "total":
+                    continue
+                for j, rye_label in enumerate(rye_labels):
+                    try:
+                        n = int(parts[1 + j])
+                    except (IndexError, ValueError):
+                        n = 0
+                    rows_out.append(
+                        f"{art.cluster_id}\t{art.chrom}\t"
+                        f"{flare_call}\t{rye_label}\t{n}"
+                    )
+            _append_lines(out_path, rows_out)
+    if not any_present:
+        out_path.unlink(missing_ok=True)
+    return any_present
 
 
 def collate_calibration_slope(
@@ -1046,11 +1122,20 @@ def main() -> int:
     collate_soft_correlation_rf(arts,     cohort_dir / "soft_correlation_rf.tsv",
                                 mid_rule=args.mid_rule)
     collate_merged_groups_rf(arts,        cohort_dir / "merged_groups_rf.tsv")
-    # ★ v1.1: Rye concordance metrics (optional, gated on rye_q per cluster).
-    has_rye = collate_concordance_metrics(
-        arts,                              cohort_dir / "concordance_metrics.tsv")
+    # Per-tool concordance (FLARE vs Rye and FLARE vs RF). Same row
+    # shape from the shared concordance.py module. Rye block is optional
+    # (gated on rye_q per cluster); RF block fires whenever
+    # compare_to_rf ran by_name.
+    has_rye = collate_concordance_metrics_rye(
+        arts,                              cohort_dir / "concordance_metrics_rye.tsv")
+    has_rf_conc = collate_concordance_metrics_rf(
+        arts,                              cohort_dir / "concordance_metrics_rf.tsv")
     collate_confusion_rf(arts,            cohort_dir / "confusion_rf.tsv",
                          mid_rule=args.mid_rule)
+    # Symmetric Rye-side hard-call confusion (cluster_id, chrom,
+    # rye_label, flare_call, n). Gated on rye_q.
+    has_rye_conf = collate_confusion_rye(
+        arts,                              cohort_dir / "confusion_rye.tsv")
     collate_calibration_slope(arts,       cohort_dir / "calibration_slope.tsv",
                               mid_rule=args.mid_rule)
     collate_tract_length_stats(arts,      cohort_dir / "tract_length_stats.tsv")
@@ -1099,6 +1184,8 @@ def main() -> int:
     _log(f"wrote {args.out_bundle} ({args.out_bundle.stat().st_size / 1e6:.1f} MB)")
     _log(f"wrote {args.out_summary}")
     _log(f"Rye concordance rows: {'present' if has_rye else 'absent'}; "
+         f"RF concordance rows: {'present' if has_rf_conc else 'absent'}; "
+         f"Rye confusion rows: {'present' if has_rye_conf else 'absent'}; "
          f"self_id rows: {'present' if has_self_id else 'absent'}")
     return 0
 

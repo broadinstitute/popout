@@ -43,10 +43,22 @@ CCC_REF = 0.90
 
 
 def compute(ctx, section=None) -> dict:
-    path = ctx.bundle_dir / "cohort" / "concordance_metrics.tsv"
+    opts = section.options if section is not None else {}
+    # Cohort filename of the per-(cluster, chrom, ancestry) concordance
+    # table. Set per-section in the YAML: ``options.source: rye`` reads
+    # ``concordance_metrics_rye.tsv``; ``options.source: rf`` reads the
+    # FLARE-vs-RF table written by compare_to_rf.py.
+    source = opts.get("source", "rye")
+    if source not in ("rye", "rf"):
+        raise ValueError(
+            f"concordance_strip options.source must be 'rye' or 'rf'; "
+            f"got {source!r}"
+        )
+    filename = f"concordance_metrics_{source}.tsv"
+    path = ctx.bundle_dir / "cohort" / filename
     header, rows = read_tsv(path)
     if not rows:
-        return {"present": False}
+        return {"present": False, "source": source}
     col = {h: i for i, h in enumerate(header)}
     by_anc: dict[str, list[tuple[str, int, float, float, float]]] = {}
     for r in rows:
@@ -69,7 +81,7 @@ def compute(ctx, section=None) -> dict:
             cccv if cccv is not None else float("nan"),
         ))
     if not by_anc:
-        return {"present": False, "all_gated": True}
+        return {"present": False, "all_gated": True, "source": source}
 
     sp5 = list(SP5.members)
     labels = [a for a in sp5 if a in by_anc] + sorted(
@@ -92,6 +104,7 @@ def compute(ctx, section=None) -> dict:
 
     return {
         "present": True,
+        "source": source,
         "by_anc": by_anc,
         "labels": labels,
         "pooled_r": pooled_r,
@@ -149,10 +162,11 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
     ax_legend = fig.add_subplot(gs[2, 0])
     ax_legend.axis("off")
 
+    other = {"rye": "Rye", "rf": "RF"}.get(data.get("source", "rye"), "other tool")
     raincloud_panel(
         ax_r, labels, pooled_r, per_row_r,
         palette=palette, x_lo=x_lo, x_hi=x_hi,
-        title="Pearson r — rank linearity  ·  raincloud + sina rain",
+        title=f"Pearson r vs {other} - rank linearity  ·  raincloud + sina rain",
         xlabel="Pearson r",
         threshold=PEARSON_REF,
         threshold_label=f"pass threshold: {PEARSON_REF:.2f}",
@@ -160,7 +174,7 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
     raincloud_panel(
         ax_c, labels, pooled_ccc, per_row_ccc,
         palette=palette, x_lo=x_lo, x_hi=x_hi,
-        title="Lin's CCC — linearity + calibration  ·  raincloud + sina rain",
+        title=f"Lin's CCC vs {other} - linearity + calibration  ·  raincloud + sina rain",
         xlabel="Lin's CCC",
         threshold=CCC_REF,
         threshold_label=f"pass threshold: {CCC_REF:.2f}",

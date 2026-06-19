@@ -1,18 +1,17 @@
-"""FLARE vs RF cohort confusion matrix — heatmap with recall + precision margins.
+"""FLARE x {RF, Rye} cohort confusion matrix - heatmap with recall + precision margins.
 
-Sums the per-cluster (RF call, FLARE call) counts cohort-wide and
-renders the row-normalised recall heatmap, with explicit recall and
-precision margins.
+Sums the per-cluster (other_call, FLARE call) counts cohort-wide and
+renders the row-normalised recall heatmap with explicit recall and
+precision margins. ``options.source`` (``rf`` or ``rye``) selects the
+cohort file:
 
-**Reporting principle**: this module renders the bundle's
-``cohort/confusion_rf.tsv`` faithfully — no MID folding, no label
-canonicalisation, no subancestry stripping. The bundle is the source
-of truth. Any data-quality fixes (MID handling, retiring the
-postS-introduced ``afr.N`` strings, …) belong in the stats collector
-and are tracked in ``my_notes/validation/COLLECTOR_FIXES.md``.
+  - ``rf``  -> ``cohort/confusion_rf.tsv``  (rows = RF labels incl. MID)
+  - ``rye`` -> ``cohort/confusion_rye.tsv`` (rows = FLARE calls, cols
+              = Rye calls; symmetric, no MID)
 
-Data: ``cohort/confusion_rf.tsv`` with columns (cluster_id, chrom,
-rf_label, flare_call, n).
+**Reporting principle**: render the bundle's cohort table faithfully -
+no MID folding, no label canonicalisation. The bundle is the source
+of truth.
 """
 
 from __future__ import annotations
@@ -27,45 +26,63 @@ from .._helpers import read_tsv, topn
 
 
 def compute(ctx, section=None) -> dict:
-    """Render the cohort-summed RF×FLARE confusion exactly as the bundle
-    presents it. The report applies no transformations of its own — if
-    the bundle's labels need to be canonicalised, that's the stats
-    collector's job (tracked in my_notes/validation/COLLECTOR_FIXES.md).
+    """Render the cohort-summed confusion table for the chosen tool.
+
+    ``options.source`` (``rf`` default for back-compat or ``rye``)
+    selects which cohort file to read and which column names to expect.
     """
-    path = ctx.bundle_dir / "cohort" / "confusion_rf.tsv"
+    opts = section.options if section is not None else {}
+    source = opts.get("source", "rf")
+    if source == "rf":
+        path = ctx.bundle_dir / "cohort" / "confusion_rf.tsv"
+        row_col, col_col = "rf_label", "flare_call"
+        row_axis_name = "RF call (reference)"
+        col_axis_name = "FLARE hard call"
+        title_other = "RF"
+    elif source == "rye":
+        path = ctx.bundle_dir / "cohort" / "confusion_rye.tsv"
+        row_col, col_col = "flare_call", "rye_call"
+        row_axis_name = "FLARE call"
+        col_axis_name = "Rye hard call"
+        title_other = "Rye"
+    else:
+        raise ValueError(
+            f"confusion_heatmap options.source must be 'rf' or 'rye'; "
+            f"got {source!r}"
+        )
     header, rows = read_tsv(path)
     if not rows:
-        return {"present": False}
+        return {"present": False, "source": source}
     col = {h: i for i, h in enumerate(header)}
 
     cell: dict[tuple[str, str], int] = {}
-    rf_labels: list[str] = []
-    flare_calls: list[str] = []
+    row_labels: list[str] = []
+    col_labels: list[str] = []
     for r in rows:
         try:
-            rf = r[col["rf_label"]]
-            fc = r[col["flare_call"]]
+            rv = r[col[row_col]]
+            cv = r[col[col_col]]
             n = int(r[col["n"]])
         except (IndexError, KeyError, ValueError):
             continue
-        cell[(rf, fc)] = cell.get((rf, fc), 0) + n
-        if rf not in rf_labels:
-            rf_labels.append(rf)
-        if fc not in flare_calls:
-            flare_calls.append(fc)
+        cell[(rv, cv)] = cell.get((rv, cv), 0) + n
+        if rv not in row_labels:
+            row_labels.append(rv)
+        if cv not in col_labels:
+            col_labels.append(cv)
 
-    # Sort by SP6 order (canonical), then any extras alphabetically.
-    rf_labels.sort(
+    # Sort by SP6 order (canonical), then any extras at the back.
+    row_labels.sort(
         key=lambda x: SP6.members.index(x) if x in SP6.members else 99
     )
-    flare_calls.sort(
+    col_labels.sort(
         key=lambda x: SP6.members.index(x) if x in SP6.members else 99
     )
 
-    M = np.zeros((len(rf_labels), len(flare_calls)), dtype=float)
-    for i, rf in enumerate(rf_labels):
-        for j, fc in enumerate(flare_calls):
-            M[i, j] = cell.get((rf, fc), 0)
+    M = np.zeros((len(row_labels), len(col_labels)), dtype=float)
+    for i, rv in enumerate(row_labels):
+        for j, cv in enumerate(col_labels):
+            M[i, j] = cell.get((rv, cv), 0)
 
     row_sums = M.sum(axis=1, keepdims=True)
     col_sums = M.sum(axis=0, keepdims=True)
@@ -73,30 +90,38 @@ def compute(ctx, section=None) -> dict:
     precision = np.divide(M, col_sums, out=np.zeros_like(M), where=col_sums > 0)
 
     diag_recall = {
-        rf_labels[i]: recall[i, i]
+        row_labels[i]: recall[i, i]
         for i in range(min(M.shape))
-        if i < len(rf_labels)
+        if i < len(row_labels)
     }
     worst_recall = topn(list(diag_recall.items()), n=3, reverse=False)
     off_pairs: list[tuple[str, float]] = []
-    for i, rf in enumerate(rf_labels):
-        for j, fc in enumerate(flare_calls):
-            if rf == fc:
+    for i, rv in enumerate(row_labels):
+        for j, cv in enumerate(col_labels):
+            if rv == cv:
                 continue
             if recall[i, j] > 0.02:
                 off_pairs.append((
-                    f"RF=`{rf}` -> FLARE=`{fc}` (n={int(M[i, j]):,})",
+                    f"{row_col}=`{rv}` -> {col_col}=`{cv}` (n={int(M[i, j]):,})",
                     recall[i, j],
                 ))
     top_conf = topn(off_pairs, n=3)
 
     return {
         "present": True,
+        "source": source,
         "M": M,
         "recall": recall,
         "precision": precision,
-        "rf_labels": rf_labels,
-        "flare_calls": flare_calls,
+        # Back-compat: existing templates use rf_labels / flare_calls.
+        "rf_labels": row_labels,
+        "flare_calls": col_labels,
+        # Generic names for the renderer + new templates.
+        "row_labels": row_labels,
+        "col_labels": col_labels,
+        "row_axis_name": row_axis_name,
+        "col_axis_name": col_axis_name,
+        "title_other": title_other,
         "diag_recall": diag_recall,
         "worst_recall": worst_recall,
         "top_conf": top_conf,
@@ -113,8 +138,11 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
     M = data["M"]
     recall = data["recall"]
     precision = data["precision"]
-    rf_labels = data["rf_labels"]
-    flare_calls = data["flare_calls"]
+    rf_labels = data["row_labels"]
+    flare_calls = data["col_labels"]
+    row_axis_name = data.get("row_axis_name", "RF call (reference)")
+    col_axis_name = data.get("col_axis_name", "FLARE hard call")
+    title_other = data.get("title_other", "RF")
 
     fig = plt.figure(
         figsize=(max(7.5, 0.85 * len(flare_calls) + 4.5),
@@ -137,7 +165,7 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
     ax.set_xticklabels(flare_calls, rotation=30, ha="right", fontsize=9)
     ax.set_yticks(range(len(rf_labels)))
     ax.set_yticklabels(rf_labels, fontsize=10)
-    ax.set_ylabel("RF call (reference)", fontsize=10)
+    ax.set_ylabel(row_axis_name, fontsize=10)
     for i in range(M.shape[0]):
         for j in range(M.shape[1]):
             n = int(M[i, j])
@@ -183,11 +211,11 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
 
     ax_corner.axis("off")
     fig.colorbar(im, cax=ax_cbar, label="row-normalized recall")
-    title = "Cohort-summed FLARE vs RF confusion matrix"
+    title = f"Cohort-summed FLARE vs {title_other} confusion matrix"
     fig.suptitle(
-        title + "\n(rows = RF argmax superpop  ·  cols = FLARE argmax  ·  "
+        title + f"\n(rows = {row_axis_name}  ·  cols = {col_axis_name}  ·  "
                 "diagonals = correct  ·  red-bordered cells = systematic confusion > 5%)",
         fontsize=11,
     )
-    ax.set_xlabel("FLARE hard call", fontsize=10)
+    ax.set_xlabel(col_axis_name, fontsize=10)
     return fig
