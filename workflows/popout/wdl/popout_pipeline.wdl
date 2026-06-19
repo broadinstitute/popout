@@ -31,6 +31,14 @@ workflow popout_pipeline {
     # outputs are directly comparable to main_v10.
     String train_chromosome = "chr1"
 
+    # ---- Pre-trained model passthrough ----
+    # Skip the multi-hour train step when supplied. Useful when the
+    # train task succeeded in a prior submission but a later WDL change
+    # invalidated Cromwell's call-cache. Scatter will then run infer
+    # over ALL chromosomes (including train_chromosome) since the
+    # supplied model carries no train-time decode.
+    File? pretrained_model_npz
+
     String output_prefix = "popout"
 
     # ---- Seeding (used by stage B) ----
@@ -88,7 +96,10 @@ workflow popout_pipeline {
 
   # =========================================================================
   # Stage B: train the model on a single chromosome.
+  # Skipped when pretrained_model_npz is supplied; the workflow then
+  # behaves as an infer-only scatter.
   # =========================================================================
+  if (!defined(pretrained_model_npz)) {
   call popout_wf.popout as train {
     input:
       mode                       = "train",
@@ -130,13 +141,19 @@ workflow popout_pipeline {
       disk_size_gb               = disk_size_gb,
       docker_image               = docker_image
   }
+  } # close: if (!defined(pretrained_model_npz))
+
+  # Select the effective model: caller-supplied or freshly trained.
+  File effective_model_npz = select_first([pretrained_model_npz, train.model_npz_out])
 
   # =========================================================================
-  # Stage C: infer on the other chromosomes using the trained model.
-  # Scatter mirrors flare_pipeline.wdl: skip the model_chr_idx slot.
+  # Stage C: infer on the other chromosomes using the (trained or supplied)
+  # model. Skip the train_chromosome slot ONLY in the fresh-train case
+  # (where train decoded that chrom in-task). When pretrained, infer
+  # every chrom because the supplied model carries no train-time decode.
   # =========================================================================
   scatter (ci in range(length(chromosomes))) {
-    if (ci != train_idx) {
+    if (ci != train_idx || defined(pretrained_model_npz)) {
       call popout_wf.popout as infer {
         input:
           mode                = "infer",
@@ -146,7 +163,7 @@ workflow popout_pipeline {
           genetic_map         = genetic_maps[ci],
           chromosome          = chromosomes[ci],
           output_prefix       = output_prefix + "." + chromosomes[ci] + ".infer",
-          model_npz           = train.model_npz_out,
+          model_npz           = effective_model_npz,
           write_probs         = write_probs,
           write_dense_decode  = write_dense_decode,
           thin_cm             = thin_cm,
@@ -165,14 +182,15 @@ workflow popout_pipeline {
   }
 
   output {
-    # Stage B
-    File model        = select_first([train.model])
-    File model_npz    = select_first([train.model_npz_out])
-    File train_summary = select_first([train.summary])
-
-    # Train chrom outputs (train task now decodes its own chrom).
-    File train_global_tsv = select_first([train.global_tsv])
-    File train_tracts     = select_first([train.tracts])
+    # Stage B outputs are present only when train ran (i.e. no
+    # pretrained_model_npz supplied). When pretrained, these are None
+    # and the train-chrom outputs live at index train_idx of the
+    # per-chrom arrays below.
+    File? model         = train.model
+    File model_npz     = effective_model_npz
+    File? train_summary = train.summary
+    File? train_global_tsv = train.global_tsv
+    File? train_tracts     = train.tracts
 
     # Stage C: per-chrom outputs from the scatter (one entry per non-train chrom).
     Array[File?] global_tsvs_per_chrom = infer.global_tsv
