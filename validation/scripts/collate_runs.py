@@ -850,7 +850,7 @@ def build_qc_dashboard(arts: list[ClusterArtifact], thresholds: dict) -> dict:
         any_r_pass_ccc_fail = False
         any_present = False
         for g in group:
-            cm = g.artifact_dir / "concordance" / "concordance_metrics.tsv"
+            cm = g.artifact_dir / "concordance" / "concordance_metrics_rye.tsv"
             if not cm.exists():
                 continue
             with open(cm) as f:

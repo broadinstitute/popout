@@ -15,8 +15,8 @@ component-to-label leakage candidates. Cells with ``max_cal > 1``
 (hatched) usually mean the reference panel under-represents that
 ancestry.
 
-Data: ``cohort/calibration_slope.tsv`` plus ``cohort/concordance_metrics.tsv``
-(for the per-(cluster, ancestry) μ used to weight pooling).
+Data: ``cohort/calibration_slope.tsv`` plus ``cohort/concordance_metrics_rf.tsv``
+(for the per-(cluster, ancestry) FLARE-side cluster_mu used to weight pooling).
 
 Reporting principle: rendered faithfully. Label names propagate from
 the bundle without canonicalisation.
@@ -39,10 +39,17 @@ from .._helpers import (
 
 
 def _cluster_mu_map(bundle_dir) -> dict[tuple[str, str, str], float]:
-    """(cluster_id, chrom, ancestry) -> cluster_mu, from concordance_metrics.tsv."""
-    path = bundle_dir / "cohort" / "concordance_metrics.tsv"
-    header, rows = read_tsv(path)
+    """(cluster_id, chrom, ancestry) -> cluster_mu, from
+    concordance_metrics_rf.tsv. cluster_mu is FLARE-side (mean of the
+    FLARE column for that ancestry on that cluster x chrom); it is
+    tool-independent so reading from the RF table or the Rye table is
+    equivalent. v6 prefers RF because it is a required cohort artifact
+    while Rye is gated on rye_q."""
+    path = bundle_dir / "cohort" / "concordance_metrics_rf.tsv"
     out: dict[tuple[str, str, str], float] = {}
+    if not path.exists():
+        return out
+    header, rows = read_tsv(path)
     if not rows:
         return out
     col = {h: i for i, h in enumerate(header)}

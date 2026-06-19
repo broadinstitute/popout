@@ -715,10 +715,10 @@ def _write_tier1_metrics(ws: Workspace, manifest: dict) -> None:
     add("flare_validate.peak_rss_gb", round(manifest["peak_rss_gb"], 2))
     add("flare_validate.cpu_wall_ratio", round(manifest["cpu_wall_ratio"], 3))
 
-    # ★ v1.1: Rye concordance metrics from concordance/concordance_summary.json
-    # + concordance/concordance_metrics.tsv. NA when rye_q not provided.
-    conc_summary = ws.work_root / "concordance" / "concordance_summary.json"
-    conc_metrics = ws.work_root / "concordance" / "concordance_metrics.tsv"
+    # ★ v1.1: Rye concordance metrics from concordance/concordance_summary_rye.json
+    # + concordance/concordance_metrics_rye.tsv. NA when rye_q not provided.
+    conc_summary = ws.work_root / "concordance" / "concordance_summary_rye.json"
+    conc_metrics = ws.work_root / "concordance" / "concordance_metrics_rye.tsv"
     global_ccc = None
     ccc_by_label: dict[str, float | None] = {lab: None for lab in ("afr", "amr", "eas", "eur", "sas")}
     if conc_summary.exists():
