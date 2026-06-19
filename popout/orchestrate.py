@@ -730,9 +730,19 @@ def cmd_infer(argv: list[str]) -> None:
         leaf_paths=trained.leaf_paths,
     )
 
-    # One EM iteration to refine allele_freq for this chrom's sites
+    # One EM iteration to refine allele_freq for this chrom's sites.
+    #
+    # Pad the device-residency check by an extra 12 GB beyond the global
+    # _HEADROOM_BYTES (12 GB): the forward-backward streaming scratch at
+    # K~20 / T~17k needs more than the global headroom anticipates, and
+    # we OOM'd at chr6 (T=17k, geno=18.5 GB: "fits" globally but FB then
+    # blows up). main_v10 / low_block_16 only ever ran on chr1 where geno
+    # is too large to fit anyway, so the global guard was never stressed
+    # in this regime. Keep the global guard untouched (six months of
+    # other call sites depend on it); just be more conservative here.
     from ._device import fits_on_device
-    if fits_on_device(chrom_data.geno.nbytes):
+    _FB_SCRATCH_PAD = 12 * 1024**3
+    if fits_on_device(chrom_data.geno.nbytes + _FB_SCRATCH_PAD):
         geno = jnp.array(chrom_data.geno)
     else:
         geno = chrom_data.geno
