@@ -2,7 +2,7 @@
 
 Sums the per-cluster (other_call, FLARE call) counts cohort-wide and
 renders the row-normalised recall heatmap with explicit recall and
-precision margins. ``options.source`` (``rf`` or ``rye``) selects the
+precision margins. Section-level ``source: rf|rye`` selects the
 cohort file:
 
   - ``rf``  -> ``cohort/confusion_rf.tsv``  (rows = RF labels incl. MID)
@@ -28,7 +28,7 @@ from .._helpers import read_tsv, topn
 def compute(ctx, section=None) -> dict:
     """Render the cohort-summed confusion table for the chosen tool.
 
-    ``options.source`` (``rf`` default for back-compat or ``rye``)
+    Section-level ``source: rf|rye`` (default ``rf`` for back-compat)
     selects which cohort file to read and which column names to expect.
     """
     opts = section.options if section is not None else {}

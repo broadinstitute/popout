@@ -45,13 +45,14 @@ CCC_REF = 0.90
 def compute(ctx, section=None) -> dict:
     opts = section.options if section is not None else {}
     # Cohort filename of the per-(cluster, chrom, ancestry) concordance
-    # table. Set per-section in the YAML: ``options.source: rye`` reads
-    # ``concordance_metrics_rye.tsv``; ``options.source: rf`` reads the
-    # FLARE-vs-RF table written by compare_to_rf.py.
+    # table. Set per-section in the YAML at the section's top level
+    # (NOT under a nested ``options:`` block — see config.SectionSpec):
+    # ``source: rye`` -> ``concordance_metrics_rye.tsv``;
+    # ``source: rf``  -> ``concordance_metrics_rf.tsv``.
     source = opts.get("source", "rye")
     if source not in ("rye", "rf"):
         raise ValueError(
-            f"concordance_strip options.source must be 'rye' or 'rf'; "
+            f"concordance_strip section 'source' must be 'rye' or 'rf'; "
             f"got {source!r}"
         )
     filename = f"concordance_metrics_{source}.tsv"
