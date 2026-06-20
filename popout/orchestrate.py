@@ -730,22 +730,23 @@ def cmd_infer(argv: list[str]) -> None:
         leaf_paths=trained.leaf_paths,
     )
 
-    # One EM iteration to refine allele_freq for this chrom's sites.
+    # One EM iteration + decode for this chrom.
     #
-    # Pad the device-residency check by an extra 12 GB beyond the global
-    # _HEADROOM_BYTES (12 GB): the forward-backward streaming scratch at
-    # K~20 / T~17k needs more than the global headroom anticipates, and
-    # we OOM'd at chr6 (T=17k, geno=18.5 GB: "fits" globally but FB then
-    # blows up). main_v10 / low_block_16 only ever ran on chr1 where geno
-    # is too large to fit anyway, so the global guard was never stressed
-    # in this regime. Keep the global guard untouched (six months of
-    # other call sites depend on it); just be more conservative here.
-    from ._device import fits_on_device
-    _FB_SCRATCH_PAD = 12 * 1024**3
-    if fits_on_device(chrom_data.geno.nbytes + _FB_SCRATCH_PAD):
-        geno = jnp.array(chrom_data.geno)
-    else:
-        geno = chrom_data.geno
+    # Force host-resident geno. We tried two tiers of fits_on_device
+    # padding (12 then 24 GB extra) and both fell over in the medium-T
+    # regime (chr5/6: T~17-18k, geno=18-19 GB). The pattern:
+    #   - on-device works for tiny chroms (chr22 T~6k) but OOMs in
+    #     decode for medium chroms because _streaming_decode's gamma
+    #     intermediates plus a device-resident geno blow the budget.
+    #   - production main_v10 / low_block_16 only ever ran chr1
+    #     (T=25k, geno=27 GB > device budget), which was always
+    #     host-resident, so there's ZERO production evidence that
+    #     on-device infer ever worked at biobank scale.
+    # Forcing host-resident matches what production actually ran. The
+    # forward_backward streaming code path was designed for this and
+    # batches geno transfers per shard. Small synthetic tests pay a
+    # negligible cost.
+    geno = chrom_data.geno
     d_morgan_j = jnp.array(chrom_data.genetic_distances)
     chrom_batch = _auto_batch_size(
         chrom_data.n_sites, K, args.batch_size, H=chrom_data.n_haps,
