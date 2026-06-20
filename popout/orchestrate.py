@@ -665,12 +665,7 @@ def cmd_infer(argv: list[str]) -> None:
     import jax.numpy as jnp
     from dataclasses import replace
 
-    from .datatypes import AncestryModel, AncestryResult
-    from .em import (
-        _auto_batch_size, decode_chromosome, init_model_soft,
-        forward_backward_em, forward_backward_bucketed_em,
-        update_allele_freq_from_stats,
-    )
+    from .datatypes import AncestryResult
     from .output import (
         read_model, write_global_ancestry, write_ancestry_tracts,
     )
@@ -713,70 +708,31 @@ def cmd_infer(argv: list[str]) -> None:
         resp[excluded, :] = 1.0 / K
     resp_j = jnp.array(resp)
 
-    # Compute this chrom's allele_freq from leaf_labels weighted GEMM
-    chrom_model = init_model_soft(
-        chrom_data.geno, resp_j, K, trained.gen_since_admix,
-        window_refine=False,
+    # Detect the training-time emission/T modes from the loaded model. The
+    # trained model carries block_data / bucket_assignments when those
+    # modes were used; their PRESENCE on the loaded NPZ is the source of
+    # truth. We rebuild block_data fresh for THIS chrom's sites (the
+    # trained block_data was sized to the train chrom), but reuse the
+    # training block_size and per-hap-T config.
+    use_block_em = trained.block_data is not None
+    train_block_size = (
+        trained.block_data.block_size if use_block_em else 8
     )
-    chrom_model = replace(
-        chrom_model,
-        mu=trained.mu,
-        gen_since_admix=trained.gen_since_admix,
-        gen_per_hap=trained.gen_per_hap,
-        bucket_centers=trained.bucket_centers,
-        bucket_assignments=trained.bucket_assignments,
-        seed_method=trained.seed_method,
-        leaf_labels=trained.leaf_labels,
-        leaf_paths=trained.leaf_paths,
+    train_per_hap_T = trained.bucket_assignments is not None
+    log.info(
+        "Inference modes: block_emissions=%s (block_size=%d), per_hap_T=%s",
+        use_block_em, train_block_size, train_per_hap_T,
     )
 
-    # One EM iteration + decode for this chrom.
+    # Decode parquet routing.
     #
-    # Force host-resident geno. We tried two tiers of fits_on_device
-    # padding (12 then 24 GB extra) and both fell over in the medium-T
-    # regime (chr5/6: T~17-18k, geno=18-19 GB). The pattern:
-    #   - on-device works for tiny chroms (chr22 T~6k) but OOMs in
-    #     decode for medium chroms because _streaming_decode's gamma
-    #     intermediates plus a device-resident geno blow the budget.
-    #   - production main_v10 / low_block_16 only ever ran chr1
-    #     (T=25k, geno=27 GB > device budget), which was always
-    #     host-resident, so there's ZERO production evidence that
-    #     on-device infer ever worked at biobank scale.
-    # Forcing host-resident matches what production actually ran. The
-    # forward_backward streaming code path was designed for this and
-    # batches geno transfers per shard. Small synthetic tests pay a
-    # negligible cost.
-    geno = chrom_data.geno
-    d_morgan_j = jnp.array(chrom_data.genetic_distances)
-    chrom_batch = _auto_batch_size(
-        chrom_data.n_sites, K, args.batch_size, H=chrom_data.n_haps,
-    )
-
-    if chrom_model.bucket_assignments is not None:
-        em_stats = forward_backward_bucketed_em(
-            geno, chrom_model, d_morgan_j, chrom_batch,
-        )
-    else:
-        em_stats = forward_backward_em(
-            geno, chrom_model, d_morgan_j, chrom_batch,
-        )
-    new_freq = update_allele_freq_from_stats(em_stats)
-    chrom_model = replace(chrom_model, allele_freq=new_freq)
-
-    # Decode.
-    #
-    # Three modes for the dense decode parquet:
     #   --write-dense-decode : parquet written at <out>.chr<N>.decode.parquet
     #                          (first-class WDL output, glob-visible).
-    #   --probs only         : parquet still needed to stream the
-    #                          mean_posterior column into tracts.tsv.gz,
-    #                          but written under <out>.decode_tmp/ so the
-    #                          WDL glob does NOT match and the file is
-    #                          deleted after tracts are written. Mean-
-    #                          posterior is added to tracts at near-zero
-    #                          delocalization cost.
-    #   neither              : no parquet written; tracts have no
-    #                          mean_posterior column.
+    #   --probs only         : parquet written under <out>.decode_tmp/
+    #                          so the WDL glob does NOT match, deleted
+    #                          after tract write. mean_posterior streamed
+    #                          into tracts.tsv.gz at near-zero cost.
+    #   neither              : no parquet; tracts have no mean_posterior.
     decode_pq = None
     parquet_is_temp = False
     if args.write_dense_decode:
@@ -787,14 +743,51 @@ def cmd_infer(argv: list[str]) -> None:
         tmpdir.mkdir(parents=True, exist_ok=True)
         decode_pq = str(tmpdir / f"chr{chrom_data.chrom}.decode.parquet")
         parquet_is_temp = True
-    decode = decode_chromosome(
-        chrom_data, chrom_model, batch_size=chrom_batch,
+
+    # One EM iteration + decode via run_em. Passing seed_responsibilities
+    # built from the trained leaf_labels bypasses run_em's own seeding
+    # stage. With use_block_emissions=True the function pack_blocks() on
+    # this chrom's geno and init_pattern_freq() on the per-chrom
+    # allele_freq, so FB and decode both run via the block code paths
+    # (workspace O(H, n_blocks, max_patterns, A) instead of single-site
+    # O(H, T, A) which OOMs at biobank scale).
+    #
+    # em_t_policy='hold' freezes T (we don't refit at infer time).
+    # freeze_anchors_iters=0 disables anchor-freeze blending (only matters
+    # over multiple iters anyway).
+    from .em import run_em
+    result = run_em(
+        chrom_data,
+        n_ancestries=K,
+        n_em_iter=1,
+        gen_since_admix=trained.gen_since_admix,
+        batch_size=args.batch_size,
+        rng_seed=args.seed,
+        seed_responsibilities=resp_j,
+        use_block_emissions=use_block_em,
+        block_size=train_block_size,
+        per_hap_T=train_per_hap_T,
+        em_t_policy="hold",
+        freeze_anchors_iters=0,
         write_dense_decode=(args.write_dense_decode or args.probs),
         decode_parquet_path=decode_pq,
     )
+
+    # Use the trained mu (more reliable than 1-iter refit). allele_freq
+    # is the per-chrom-refit value from run_em. Attach the trained
+    # seeding identity so the result.model is consistent with the
+    # trained model identity downstream.
+    result_model = replace(
+        result.model,
+        mu=trained.mu,
+        seed_method=trained.seed_method,
+        leaf_labels=trained.leaf_labels,
+        leaf_paths=trained.leaf_paths,
+    )
     result = AncestryResult(
-        calls=decode.calls, model=chrom_model, chrom=chrom_data.chrom,
-        decode=decode,
+        calls=result.calls, model=result_model, chrom=result.chrom,
+        decode=result.decode, posteriors=result.posteriors,
+        spectral=result.spectral,
     )
 
     # Outputs
