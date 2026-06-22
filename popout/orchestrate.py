@@ -756,6 +756,12 @@ def cmd_infer(argv: list[str]) -> None:
     # freeze_anchors_iters=0 disables anchor-freeze blending (only matters
     # over multiple iters anyway).
     from .em import run_em
+    # force_host_geno=True: the block-aware E-step in run_em batches
+    # host→device per chunk anyway, and fits_on_device cannot see the
+    # JAX preallocated pool. On large chroms (chr3: 21.7 GB int8 geno)
+    # the lazy `jnp.array(geno_np)` transfer triggered by the first
+    # slice of a "device-resident" geno OOMs the device. Keep geno on
+    # host throughout infer; the E-step transfers per chunk.
     result = run_em(
         chrom_data,
         n_ancestries=K,
@@ -771,6 +777,7 @@ def cmd_infer(argv: list[str]) -> None:
         freeze_anchors_iters=0,
         write_dense_decode=(args.write_dense_decode or args.probs),
         decode_parquet_path=decode_pq,
+        force_host_geno=True,
     )
 
     # Use the trained mu (more reliable than 1-iter refit). allele_freq

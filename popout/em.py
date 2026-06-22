@@ -389,7 +389,8 @@ def init_model_soft(
         weighted_counts += resp[start:end].T @ batch_geno
         # Force per-iteration sync so XLA cannot fuse all batches into one
         # graph and try to materialize every float32 batch_geno transient
-        # simultaneously. See chr3 OOM at H=1.07M, T=20261.
+        # simultaneously. Matters in the host-resident-geno path where each
+        # batch is a 1.6 GB H→D transfer.
         weighted_counts.block_until_ready()
     totals = resp.sum(axis=0)[:, None]       # (A, 1)
     freq = (weighted_counts + 0.5) / (totals + 1.0)
@@ -438,6 +439,7 @@ def run_em(
     write_dense_decode: bool = False,
     decode_parquet_path: Optional[str] = None,
     skip_decode: bool = False,
+    force_host_geno: bool = False,
 ) -> AncestryResult:
     """Self-bootstrapping EM for one chromosome.
 
@@ -493,15 +495,21 @@ def run_em(
     log.info("  batch_size = %d (T=%d, A=%d, H=%d)",
              batch_size, chrom_data.n_sites, n_anc, chrom_data.n_haps)
 
-    # Transfer to device
+    # Transfer to device, unless the caller forces host-resident. The
+    # fits_on_device budget snapshot does NOT account for JAX's preallocated
+    # workspace pool, so a "fits" verdict can still OOM when geno is large
+    # (chr3 at H=1.07M, T=20261 → 21.7 GB int8). Callers that know they
+    # don't need geno on device (e.g. block-emissions inference, which
+    # batches host→device per chunk in the E-step) should set
+    # force_host_geno=True.
     from ._device import fits_on_device
-    if fits_on_device(geno_np.nbytes):
+    if not force_host_geno and fits_on_device(geno_np.nbytes):
         geno = jnp.array(geno_np)
         log.info("  geno %.1f GB → device-resident", geno_np.nbytes / 1e9)
     else:
         geno = geno_np
         log.info(
-            "  geno %.1f GB > device budget → host-resident, batched transfers",
+            "  geno %.1f GB → host-resident, batched transfers",
             geno_np.nbytes / 1e9,
         )
     d_morgan_j = jnp.array(d_morgan)
