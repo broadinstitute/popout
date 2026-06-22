@@ -387,6 +387,10 @@ def init_model_soft(
         end = min(start + _INIT_BATCH, H)
         batch_geno = jnp.asarray(geno[start:end]).astype(jnp.float32)
         weighted_counts += resp[start:end].T @ batch_geno
+        # Force per-iteration sync so XLA cannot fuse all batches into one
+        # graph and try to materialize every float32 batch_geno transient
+        # simultaneously. See chr3 OOM at H=1.07M, T=20261.
+        weighted_counts.block_until_ready()
     totals = resp.sum(axis=0)[:, None]       # (A, 1)
     freq = (weighted_counts + 0.5) / (totals + 1.0)
     freq = jnp.clip(freq, 1e-4, 1.0 - 1e-4)
