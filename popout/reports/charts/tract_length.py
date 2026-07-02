@@ -24,6 +24,7 @@ import numpy as np
 from popout.labelspace.registry import SP6
 
 from .._helpers import (
+    cluster_styles,
     n_weighted_mean,
     raincloud_panel,
     read_tsv,
@@ -42,10 +43,13 @@ def compute(ctx, section=None) -> dict:
         return {"present": False}
     col = {h: i for i, h in enumerate(header)}
 
-    by_anc: dict[str, list[tuple[str, int, float, float | None, float | None]]] = {}
+    by_anc: dict[str, list[tuple[str, str, int, float, float | None, float | None]]] = {}
+    cluster_ids_seen: set[str] = set()
     for r in rows:
         try:
-            cc = f"{r[col['cluster_id']]}·{r[col['chrom']]}"
+            cid = r[col["cluster_id"]]
+            chrom = r[col["chrom"]]
+            cc = f"{cid}·{chrom}"
             name = r[col["ancestry_name"]]
             n_tracts = int(float(r[col["n_tracts"]]))
             mean_mb = to_float(r[col["mean_Mb"]])
@@ -56,8 +60,9 @@ def compute(ctx, section=None) -> dict:
         if mean_mb is None or mean_mb <= 0:
             continue
         by_anc.setdefault(name, []).append(
-            (cc, n_tracts, mean_mb, implied_t, model_t)
+            (cid, cc, n_tracts, mean_mb, implied_t, model_t)
         )
+        cluster_ids_seen.add(cid)
     if not by_anc:
         return {"present": False}
 
@@ -72,9 +77,9 @@ def compute(ctx, section=None) -> dict:
     model_ref_mb: dict[str, float] = {}
     for anc in labels:
         items = by_anc[anc]
-        pooled_mb[anc] = n_weighted_mean([(n, mb) for _, n, mb, _, _ in items])
-        pooled_n[anc] = sum(n for _, n, _, _, _ in items)
-        models = [t for _, _, _, _, t in items if t is not None and t > 0]
+        pooled_mb[anc] = n_weighted_mean([(n, mb) for _, _, n, mb, _, _ in items])
+        pooled_n[anc] = sum(n for _, _, n, _, _, _ in items)
+        models = [t for _, _, _, _, _, t in items if t is not None and t > 0]
         if models:
             med_t = sorted(models)[len(models) // 2]
             model_ref_mb[anc] = 100.0 / (med_t * K_PANEL)
@@ -98,6 +103,7 @@ def compute(ctx, section=None) -> dict:
         "pooled_n": pooled_n,
         "model_ref_mb": model_ref_mb,
         "top_dev": top_dev,
+        "cluster_styles": cluster_styles(cluster_ids_seen),
     }
 
 
@@ -112,8 +118,12 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
     by_anc = data["by_anc"]
     pooled_mb = data["pooled_mb"]
     model_ref_mb = data["model_ref_mb"]
+    cstyles: dict[str, dict[str, str]] = data.get("cluster_styles", {})
 
-    per_row = {anc: [mb for _, _, mb, _, _ in by_anc[anc]] for anc in labels}
+    per_row = {anc: [mb for _, _, _, mb, _, _ in by_anc[anc]] for anc in labels}
+    per_row_clusters = {
+        anc: [cid for cid, _, _, _, _, _ in by_anc[anc]] for anc in labels
+    }
 
     all_x = [v for vals in per_row.values() for v in vals if v > 0]
     all_x += [v for v in pooled_mb.values() if v is not None and v > 0]
@@ -128,14 +138,25 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
     x_hi = 10 ** math.ceil(math.log10(max(all_x)))
 
     n_anc = len(labels)
+    n_clusters = len(cstyles)
+    cluster_rows = (n_clusters + 7) // 8 if n_clusters else 0
+    cluster_legend_h = 0.30 + 0.18 * cluster_rows if cstyles else 0.0
     chart_h = max(3.0, 0.95 * n_anc + 0.7)
-    fig = plt.figure(figsize=(11.0, chart_h + 0.6))
+    fig = plt.figure(figsize=(11.0, chart_h + 0.6 + cluster_legend_h))
+    height_ratios = [chart_h, 0.45]
+    if cstyles:
+        height_ratios.append(cluster_legend_h)
     gs = fig.add_gridspec(
-        nrows=2, ncols=1, height_ratios=[chart_h, 0.45], hspace=0.4,
+        nrows=len(height_ratios), ncols=1,
+        height_ratios=height_ratios, hspace=0.4,
     )
     ax = fig.add_subplot(gs[0, 0])
     ax_legend = fig.add_subplot(gs[1, 0])
     ax_legend.axis("off")
+    ax_clusters = None
+    if cstyles:
+        ax_clusters = fig.add_subplot(gs[2, 0])
+        ax_clusters.axis("off")
 
     raincloud_panel(
         ax, labels, pooled_mb, per_row,
@@ -144,6 +165,8 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
         xlabel="mean tract length (Mb, log scale)",
         log=True,
         pooled_fmt="{:.2f} Mb",
+        clusters_by_label=per_row_clusters,
+        cluster_style_map=cstyles or None,
     )
 
     for i, anc in enumerate(labels):
@@ -165,8 +188,21 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
         [bar_proxy, violin_proxy, rain_proxy, model_proxy],
         ["bar = cohort-pooled (n_tracts-weighted)",
          "half-violin = log-space KDE of per-(cluster, chrom) means",
-         "raindrop = one (cluster, chrom) mean",
-         f"◇ model expectation = 100 / (median model_T_gen × K={K_PANEL})"],
+         "raindrop = one (cluster, chrom) mean, by cluster (color + shape)",
+         f"open diamond = model expectation = 100 / (median model_T_gen x K={K_PANEL})"],
         loc="center", ncol=4, fontsize=8.5, frameon=False,
     )
+    if ax_clusters is not None:
+        cluster_handles = [
+            plt.scatter([], [], s=44, color=style["color"],
+                        marker=style["marker"],
+                        edgecolor="white", linewidth=0.4)
+            for style in cstyles.values()
+        ]
+        ax_clusters.legend(
+            cluster_handles, list(cstyles.keys()),
+            loc="center", ncol=min(n_clusters, 8),
+            fontsize=8, frameon=False, title="cluster",
+            title_fontsize=9, columnspacing=1.0, handletextpad=0.4,
+        )
     return fig

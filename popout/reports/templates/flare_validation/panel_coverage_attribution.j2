@@ -1,0 +1,31 @@
+{# Per-chrom drift: panel-coverage attribution + corroborating FLARE-Rye residual. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Per-chromosome drift: panel-coverage attribution
+
+**Attribution.** A controlled per-probe ΔLAI experiment on 300 AoU
+individuals (60 per superpopulation) attributes the per-chromosome step
+to reference-panel coverage geometry, not cohort composition. Holding
+the panel fixed and varying cohort composition (mu_afr from 0.076 to
+0.679 across three cohorts) produces no per-sample chr2 ΔLAI on the same
+individuals. Holding the cohort fixed and relabeling half the afr panel
+donors away from afr (no haplotype changes, labels only) moves the same
+individuals' chr2 afr posterior by a median of 0.468. The figure below
+shows the corroborating signal on the unmodified production cohort:
+per-chromosome FLARE-minus-Rye residuals, faceted by Rye-dominant
+ancestry. The afr facet has a wider residual spread than any other on
+every chromosome and a negative median throughout; the eur facet has a
+positive median throughout with roughly one-fifth the spread of afr. The
+convergent reading across the two directions of the residual is that
+FLARE leaks afr-mass onto neighboring panels at apply time, an effect
+the panel experiment makes acute by relabeling. This validation cycle
+documents the drift but applies no remediation; the panel-augmentation
+workstream is tracked separately.
+
+{% if chart %}
+{{ figure(path=chart, caption="Per-chromosome FLARE-minus-Rye residuals on the AoU v9 production cohort, faceted by Rye-dominant ancestry. The chr1 box on each facet is the training-stage chromosome; the remaining 21 are the apply-stage. Inset stats give the chr1 and chr2..22 medians and IQRs of the residual within each facet.", tag=tag) }}
+{% else %}
+> **NOTE:** Rye Q file not supplied to the report builder
+> (``--rye-q``); corroborating figure omitted.
+{% endif %}

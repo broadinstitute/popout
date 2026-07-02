@@ -44,6 +44,11 @@ sections:
     chart: cohort_composition
     pair: [flare]
 
+  - id: cluster_composition
+    template: flare_validation/cluster_composition.j2
+    chart: cluster_composition
+    pair: [flare]
+
   - id: cohort_structure_pair_census
     template: flare_validation/cohort_structure_pair_census.j2
     chart: cohort_structure_pair_census
@@ -59,20 +64,14 @@ sections:
     chart: ccc_chrom_drift
     pair: [flare]
 
-  - id: ccc_chrom_stdev
-    template: flare_validation/ccc_chrom_stdev.j2
-    chart: ccc_chrom_stdev
-    pair: [flare]
-
-  - id: ccc_pair_mad
-    template: flare_validation/ccc_pair_mad.j2
-    chart: ccc_pair_mad
-    pair: [flare]
-
-  - id: ccc_dose_response
-    template: flare_validation/ccc_dose_response.j2
-    chart: ccc_dose_response
-    pair: [flare]
+  - id: panel_coverage_attribution
+    template: flare_validation/panel_coverage_attribution.j2
+    chart: panel_coverage_attribution
+    pair: [flare, rye]
+    # Reads cohort/cohort_global.tsv directly (v6 named columns) plus
+    # an external Rye Q TSV passed to build_flare_validation_report.py
+    # via --rye-q. The section's prose stands on its own when --rye-q
+    # is omitted; the figure is then skipped with a note.
 
   - id: admixture
     template: flare_validation/admixture.j2

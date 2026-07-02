@@ -26,6 +26,7 @@ import matplotlib.pyplot as plt
 from popout.labelspace.registry import SP5
 
 from .._helpers import (
+    cluster_styles,
     n_weighted_mean,
     raincloud_panel,
     read_tsv,
@@ -102,9 +103,11 @@ def compute(ctx, section=None) -> dict:
 
     members = list(SP5.members)
     strata_rows: list[dict] = []
+    cluster_ids_seen: set[str] = set()
     for lab in members:
         cell_means: list[tuple[int, float]] = []
         per_row_means: list[float] = []
+        per_row_clusters: list[str] = []
         all_switches: list[int] = []
         for (cid, chrom, dom), switches in per_cell.items():
             if dom != lab or not switches:
@@ -112,12 +115,14 @@ def compute(ctx, section=None) -> dict:
             cell_mean = sum(switches) / len(switches)
             cell_means.append((len(switches), cell_mean))
             per_row_means.append(cell_mean)
+            per_row_clusters.append(cid)
+            cluster_ids_seen.add(cid)
             all_switches.extend(switches)
         if not all_switches:
             strata_rows.append({
                 "label": lab, "n_hap": 0, "n_cells": 0,
                 "min": None, "median": None, "mean": None,
-                "p99": None, "max": None, "means": [],
+                "p99": None, "max": None, "means": [], "clusters": [],
             })
             continue
         all_switches.sort()
@@ -135,6 +140,7 @@ def compute(ctx, section=None) -> dict:
             "p99": int(all_switches[p99_idx]),
             "max": int(all_switches[-1]),
             "means": per_row_means,
+            "clusters": per_row_clusters,
         })
 
     aggregate = _read_cohort_aggregate(ctx.bundle_dir)
@@ -146,6 +152,7 @@ def compute(ctx, section=None) -> dict:
         "strata_rows": strata_rows,
         "n_haplotypes_total": sum(r["n_hap"] for r in strata_rows),
         "n_unstratified_haplotypes": n_unstratified,
+        "cluster_styles": cluster_styles(cluster_ids_seen),
         **aggregate,
     }
 
@@ -169,21 +176,34 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
     labels = [r["label"] for r in strata]
     pooled = {r["label"]: r["mean"] for r in strata}
     per_row = {r["label"]: r["means"] for r in strata}
+    per_row_clusters = {r["label"]: r.get("clusters", []) for r in strata}
+    cstyles: dict[str, dict[str, str]] = data.get("cluster_styles", {})
 
     all_x = [m for vals in per_row.values() for m in vals]
     all_x += [v for v in pooled.values() if v is not None]
     x_hi = (max(all_x) if all_x else 1.0) * 1.05
     x_lo = 0.0
 
+    n_clusters = len(cstyles)
+    cluster_rows = (n_clusters + 7) // 8 if n_clusters else 0
+    cluster_legend_h = 0.30 + 0.18 * cluster_rows if cstyles else 0.0
     n = len(strata)
     chart_h = max(3.0, 0.95 * n + 0.7)
-    fig = plt.figure(figsize=(10.5, chart_h + 0.6))
+    fig = plt.figure(figsize=(10.5, chart_h + 0.6 + cluster_legend_h))
+    height_ratios = [chart_h, 0.45]
+    if cstyles:
+        height_ratios.append(cluster_legend_h)
     gs = fig.add_gridspec(
-        nrows=2, ncols=1, height_ratios=[chart_h, 0.45], hspace=0.4,
+        nrows=len(height_ratios), ncols=1,
+        height_ratios=height_ratios, hspace=0.4,
     )
     ax = fig.add_subplot(gs[0, 0])
     ax_legend = fig.add_subplot(gs[1, 0])
     ax_legend.axis("off")
+    ax_clusters = None
+    if cstyles:
+        ax_clusters = fig.add_subplot(gs[2, 0])
+        ax_clusters.axis("off")
 
     raincloud_panel(
         ax, labels, pooled, per_row,
@@ -192,6 +212,8 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
                "raincloud + sina rain"),
         xlabel="ancestry switches per haplotype",
         pooled_fmt="{:.1f}",
+        clusters_by_label=per_row_clusters,
+        cluster_style_map=cstyles or None,
     )
 
     bar_proxy = plt.Rectangle((0, 0), 1, 0.6, color="#888")
@@ -202,7 +224,20 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
         [bar_proxy, violin_proxy, rain_proxy],
         ["bar = stratum mean (n_haplotypes-weighted)",
          "half-violin = KDE of per-(cluster, chrom) cell means",
-         "raindrop = one (cluster, chrom, dominant_anc) cell mean"],
+         "raindrop = one (cluster, chrom, dominant_anc) cell, by cluster (color + shape)"],
         loc="center", ncol=3, fontsize=9, frameon=False,
     )
+    if ax_clusters is not None:
+        cluster_handles = [
+            plt.scatter([], [], s=44, color=style["color"],
+                        marker=style["marker"],
+                        edgecolor="white", linewidth=0.4)
+            for style in cstyles.values()
+        ]
+        ax_clusters.legend(
+            cluster_handles, list(cstyles.keys()),
+            loc="center", ncol=min(n_clusters, 8),
+            fontsize=8, frameon=False, title="cluster",
+            title_fontsize=9, columnspacing=1.0, handletextpad=0.4,
+        )
     return fig

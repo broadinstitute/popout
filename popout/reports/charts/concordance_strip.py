@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt
 from popout.labelspace.registry import SP5
 
 from .._helpers import (
+    cluster_styles,
     n_weighted_mean,
     raincloud_panel,
     read_tsv,
@@ -61,10 +62,13 @@ def compute(ctx, section=None) -> dict:
     if not rows:
         return {"present": False, "source": source}
     col = {h: i for i, h in enumerate(header)}
-    by_anc: dict[str, list[tuple[str, int, float, float, float]]] = {}
+    by_anc: dict[str, list[tuple[str, str, int, float, float, float]]] = {}
+    cluster_ids_seen: set[str] = set()
     for r in rows:
         try:
-            cc = f"{r[col['cluster_id']]}·{r[col['chrom']]}"
+            cid = r[col["cluster_id"]]
+            chrom = r[col["chrom"]]
+            cc = f"{cid}·{chrom}"
             anc = r[col["ancestry"]]
             mu = to_float(r[col["cluster_mu"]])
             n = int(float(r[col["n_samples"]]))
@@ -77,10 +81,11 @@ def compute(ctx, section=None) -> dict:
         if pr is None and cccv is None:
             continue
         by_anc.setdefault(anc, []).append((
-            cc, n, mu,
+            cid, cc, n, mu,
             pr if pr is not None else float("nan"),
             cccv if cccv is not None else float("nan"),
         ))
+        cluster_ids_seen.add(cid)
     if not by_anc:
         return {"present": False, "all_gated": True, "source": source}
 
@@ -93,15 +98,21 @@ def compute(ctx, section=None) -> dict:
     pooled_ccc: dict[str, float | None] = {}
     for anc in labels:
         items = by_anc[anc]
-        pooled_r[anc] = n_weighted_mean([(n, pr) for _, n, _, pr, _ in items])
-        pooled_ccc[anc] = n_weighted_mean([(n, cc) for _, n, _, _, cc in items])
+        pooled_r[anc] = n_weighted_mean(
+            [(n, pr) for _, _, n, _, pr, _ in items]
+        )
+        pooled_ccc[anc] = n_weighted_mean(
+            [(n, cc) for _, _, n, _, _, cc in items]
+        )
 
     gaps: list[tuple[str, float]] = []
     for anc, items in by_anc.items():
-        for cc, _n, _mu, pr, cccv in items:
+        for _cid, cc, _n, _mu, pr, cccv in items:
             if pr == pr and cccv == cccv:
                 gaps.append((f"{cc}·{anc}", pr - cccv))
     top_gap = topn(gaps, n=3)
+
+    cstyles = cluster_styles(cluster_ids_seen)
 
     return {
         "present": True,
@@ -113,6 +124,7 @@ def compute(ctx, section=None) -> dict:
         "top_gap": top_gap,
         "pearson_ref": PEARSON_REF,
         "ccc_ref": CCC_REF,
+        "cluster_styles": cstyles,
     }
 
 
@@ -135,33 +147,56 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
     by_anc = data["by_anc"]
     pooled_r = data["pooled_r"]
     pooled_ccc = data["pooled_ccc"]
+    cstyles: dict[str, dict[str, str]] = data.get("cluster_styles", {})
     n_anc = len(labels)
 
-    per_row_r = {anc: [pr for _, _, _, pr, _ in by_anc[anc] if pr == pr]
-                 for anc in labels}
-    per_row_ccc = {anc: [cc for _, _, _, _, cc in by_anc[anc] if cc == cc]
-                   for anc in labels}
+    # Per-row value lists for the two panels (Pearson r above, Lin's CCC
+    # below). Aligned cluster_id lists let raincloud_panel color each
+    # raindrop by cluster.
+    per_row_r: dict[str, list[float]] = {}
+    per_row_r_clusters: dict[str, list[str]] = {}
+    per_row_ccc: dict[str, list[float]] = {}
+    per_row_ccc_clusters: dict[str, list[str]] = {}
+    for anc in labels:
+        items = by_anc[anc]
+        per_row_r[anc] = [pr for _cid, _cc, _n, _mu, pr, _ in items]
+        per_row_r_clusters[anc] = [cid for cid, _cc, _n, _mu, _pr, _ in items]
+        per_row_ccc[anc] = [ccc for _cid, _cc, _n, _mu, _pr, ccc in items]
+        per_row_ccc_clusters[anc] = [cid for cid, _cc, _n, _mu, _pr, _ in items]
 
-    all_r = [v for vals in per_row_r.values() for v in vals] + [
+    all_r = [v for vals in per_row_r.values() for v in vals if v == v] + [
         v for v in pooled_r.values() if v is not None
     ]
-    all_c = [v for vals in per_row_ccc.values() for v in vals] + [
+    all_c = [v for vals in per_row_ccc.values() for v in vals if v == v] + [
         v for v in pooled_ccc.values() if v is not None
     ]
     x_lo = max(0.0, min([*all_r, *all_c, 0.90]) - 0.05)
     x_hi = 1.02
 
+    n_clusters = len(cstyles)
+    # Two rows of cluster swatches at <=8 per row; size the strip to fit.
+    cluster_rows = (n_clusters + 7) // 8 if n_clusters else 0
+    cluster_legend_h = 0.30 + 0.18 * cluster_rows if cstyles else 0.0
     chart_h = max(2.6, 0.95 * n_anc + 0.7)
-    fig = plt.figure(figsize=(10.0, 2 * chart_h + 0.9))
+    fig = plt.figure(
+        figsize=(10.0, 2 * chart_h + 0.9 + cluster_legend_h),
+    )
+    height_ratios = [chart_h, chart_h, 0.45]
+    if cstyles:
+        height_ratios.append(cluster_legend_h)
     gs = fig.add_gridspec(
-        nrows=3, ncols=1,
-        height_ratios=[chart_h, chart_h, 0.45],
+        nrows=len(height_ratios), ncols=1,
+        height_ratios=height_ratios,
         hspace=0.35,
     )
     ax_r = fig.add_subplot(gs[0, 0])
     ax_c = fig.add_subplot(gs[1, 0], sharex=ax_r)
     ax_legend = fig.add_subplot(gs[2, 0])
     ax_legend.axis("off")
+    ax_clusters = None
+    if cstyles:
+        ax_clusters = fig.add_subplot(gs[3, 0])
+        ax_clusters.axis("off")
 
     other = {"rye": "Rye", "rf": "RF"}.get(data.get("source", "rye"), "other tool")
     raincloud_panel(
@@ -171,6 +206,8 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
         xlabel="Pearson r",
         threshold=PEARSON_REF,
         threshold_label=f"pass threshold: {PEARSON_REF:.2f}",
+        clusters_by_label=per_row_r_clusters,
+        cluster_style_map=cstyles or None,
     )
     raincloud_panel(
         ax_c, labels, pooled_ccc, per_row_ccc,
@@ -179,6 +216,8 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
         xlabel="Lin's CCC",
         threshold=CCC_REF,
         threshold_label=f"pass threshold: {CCC_REF:.2f}",
+        clusters_by_label=per_row_ccc_clusters,
+        cluster_style_map=cstyles or None,
     )
 
     bar_proxy = plt.Rectangle((0, 0), 1, 0.6, color="#888")
@@ -189,7 +228,21 @@ def render(data: dict, *, palette: dict[str, str]) -> plt.Figure:
         [bar_proxy, violin_proxy, rain_proxy],
         ["bar = cohort-pooled (n-weighted)",
          "half-violin = KDE of per-(cluster, chrom) values",
-         "raindrop = one (cluster, chrom) value (sina jitter)"],
+         "raindrop = one (cluster, chrom) value, by cluster (color + shape)"],
         loc="center", ncol=3, fontsize=9, frameon=False,
     )
+
+    if ax_clusters is not None:
+        cluster_handles = [
+            plt.scatter([], [], s=44, color=style["color"],
+                        marker=style["marker"],
+                        edgecolor="white", linewidth=0.4)
+            for style in cstyles.values()
+        ]
+        ax_clusters.legend(
+            cluster_handles, list(cstyles.keys()),
+            loc="center", ncol=min(n_clusters, 8),
+            fontsize=8, frameon=False, title="cluster",
+            title_fontsize=9, columnspacing=1.0, handletextpad=0.4,
+        )
     return fig

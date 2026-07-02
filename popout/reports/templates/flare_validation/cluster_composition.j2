@@ -1,0 +1,28 @@
+{# Per-cluster FLARE primary-ancestry decomposition. #}
+{% from "_macros.j2" import figure %}
+{% set tag = ctx.tag(section.id) %}
+
+# Per-cluster ancestry composition
+
+**What this is.** One stacked horizontal bar per ``cluster_id``. Bar
+segments are sample counts under FLARE's primary ancestry (argmax over
+the per-sample proportion vector at chr1, where every sample appears
+exactly once). Clusters are sorted by total sample count, largest at
+the top. The cohort-pooled view is in the previous section; this
+section shows where each cluster sits relative to that pool.
+
+{% if chart %}
+{{ figure(path=chart, caption="Per-cluster sample counts decomposed by FLARE primary ancestry on chr1. Color = SP5/SP6 superpop, n = total samples in the cluster.", tag=tag) }}
+{% else %}
+> **MISSING:** ``cohort/cohort_global.tsv``
+{% endif %}
+
+{% if data.get("present") and data.cluster_summary %}
+**Top-1 / top-2 breakdown.**
+
+| cluster | n | top-1 | top-1 % | top-2 | top-2 % |
+|---|---:|---|---:|---|---:|
+{% for r in data.cluster_summary %}
+| `{{ r.cluster }}` | {{ "{:,}".format(r.n) }} | `{{ r.top1 }}` | {{ "%.1f"|format(100 * r.top1_frac) }}% | {% if r.top2 %}`{{ r.top2 }}`{% else %}-{% endif %} | {{ "%.1f"|format(100 * r.top2_frac) }}% |
+{% endfor %}
+{% endif %}

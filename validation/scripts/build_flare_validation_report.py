@@ -54,6 +54,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                    help="YAML report manifest")
     p.add_argument("--keep-md", action="store_true",
                    help="keep the intermediate .md document next to the PDF")
+    p.add_argument("--rye-q", type=Path, default=None,
+                   help="external Rye Q TSV (per-sample SP5 proportions). "
+                        "Required by the panel_coverage_attribution section; "
+                        "other sections render without it.")
     return p.parse_args(argv)
 
 
@@ -91,6 +95,7 @@ def main(argv: list[str] | None = None) -> int:
     ctx = ReportContext(
         bundle=bundle, bundle_dir=bundle_dir,
         config=cfg, estimates={}, assets_dir=assets_dir,
+        rye_q=args.rye_q,
     )
     md = render_report(ctx)
     md_path.write_text(md)

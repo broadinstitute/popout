@@ -55,6 +55,11 @@ class ReportContext:
     config: ReportConfig
     estimates: dict[str, Estimate]
     assets_dir: Path
+    # External Rye Q TSV path for charts that need per-sample Rye
+    # proportions (panel_coverage_attribution). The bundle does not
+    # carry per-sample Rye values, only the summary tables compare_to_rye
+    # writes; downstream chart code degrades gracefully when this is None.
+    rye_q: Path | None = None
     palette: dict[str, str] = dataclasses.field(
         default_factory=lambda: dict(_LABEL_COLOR)
     )

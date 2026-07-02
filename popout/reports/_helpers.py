@@ -170,6 +170,52 @@ def _kde_1d(values: np.ndarray, x_grid: np.ndarray, bw: float) -> np.ndarray:
     )
 
 
+# Filled marker shapes used to disambiguate clusters that happen to land
+# on perceptually-close colors. Cycled at a different period than the
+# golden-ratio hue increment so two clusters with similar colors get
+# different shapes by construction.
+_CLUSTER_MARKERS: tuple[str, ...] = ("o", "s", "D", "^", "*", "P", "v")
+
+
+def cluster_palette(cluster_ids: Iterable[str]) -> dict[str, str]:
+    """Deterministic ``cluster_id -> hex`` map. Kept for callers that only
+    need the color channel. ``cluster_styles`` returns the same hex plus
+    a per-cluster marker shape; prefer it when the rendering surface
+    benefits from a second visual channel.
+    """
+    return {cid: style["color"]
+            for cid, style in cluster_styles(cluster_ids).items()}
+
+
+def cluster_styles(
+    cluster_ids: Iterable[str],
+) -> dict[str, dict[str, str]]:
+    """Deterministic ``cluster_id -> {'color': hex, 'marker': str}`` map.
+
+    Color: golden-ratio hue spacing at fixed lightness/saturation,
+    started in a warm range so the swatches stay clear of the Paul Tol
+    SP5 ancestry palette. Marker: cycle through a curated list of
+    filled shapes (``o, s, D, ^, *, P, v``). Color cycles fast and
+    marker cycles slowly relative to it, so two clusters with similar
+    colors are guaranteed to differ in marker shape.
+
+    Input order is sorted so two charts that see the same cluster set
+    assign the same (color, marker) pair regardless of discovery order.
+    """
+    import colorsys
+    golden = 0.6180339887498949
+    h = 0.07  # warm orange-yellow start
+    out: dict[str, dict[str, str]] = {}
+    for i, cid in enumerate(sorted({c for c in cluster_ids if c})):
+        r, g, b = colorsys.hls_to_rgb(h, 0.55, 0.55)
+        out[cid] = {
+            "color": f"#{int(r * 255):02x}{int(g * 255):02x}{int(b * 255):02x}",
+            "marker": _CLUSTER_MARKERS[i % len(_CLUSTER_MARKERS)],
+        }
+        h = (h + golden) % 1.0
+    return out
+
+
 def raincloud_panel(
     ax,
     labels: list[str],
@@ -188,6 +234,9 @@ def raincloud_panel(
     bw: float | None = None,
     seed: int = 0xCAFE,
     pooled_marker: bool = True,
+    clusters_by_label: dict | None = None,
+    cluster_palette_map: dict[str, str] | None = None,
+    cluster_style_map: dict[str, dict[str, str]] | None = None,
 ) -> None:
     """Draw a K2 raincloud + sina rain panel on ``ax``.
 
@@ -208,6 +257,18 @@ def raincloud_panel(
       pooled_fmt: format string for the pooled value annotation.
       log: True → KDE in log10 space (used by tract length).
       bw: KDE bandwidth; default is span * 0.012 (or 0.18 in log space).
+      clusters_by_label: optional ``{label: list[str]}`` aligned to
+        ``values_by_label`` — when provided alongside a cluster style
+        map, raindrops are coloured (and shaped, if a style map is
+        supplied) by cluster identity instead of by row ancestry. KDE
+        and pooled bar stay row-coloured.
+      cluster_palette_map: ``{cluster_id: hex}`` (see ``cluster_palette``).
+        Used for color only.
+      cluster_style_map: ``{cluster_id: {'color': hex, 'marker': str}}``
+        (see ``cluster_styles``). Takes precedence over
+        ``cluster_palette_map`` and gives each cluster its own marker
+        shape, which is the readable choice when there are enough
+        clusters that color alone risks muddy pairs.
     """
     n = len(labels)
     rng_master = np.random.default_rng(seed)
@@ -264,8 +325,52 @@ def raincloud_panel(
         rng = np.random.default_rng(int(rng_master.integers(0, 2 ** 31 - 1)))
         jitter = rng.uniform(-1, 1, size=raw.size) * dens_norm * rain_half
         ys = i + rain_cy + jitter
-        ax.scatter(raw, ys, s=14, color=color, edgecolor="white",
-                   linewidth=0.4, alpha=0.85, zorder=5)
+        # Per-drop colors and (optionally) shapes when cluster context
+        # is threaded through. The aligned cluster_ids list must match
+        # the order of the unfiltered values; values_by_label[lab] may
+        # have NaN entries that get filtered for ``raw`` but the
+        # alignment with clusters_by_label must survive that filter.
+        drop_colors: list[str] | None = None
+        drop_markers: list[str] | None = None
+        if clusters_by_label is not None:
+            raw_full = list(values_by_label.get(lab, []))
+            cids_full = list(clusters_by_label.get(lab, []))
+            if len(cids_full) == len(raw_full):
+                kept = [
+                    (v, cid) for v, cid in zip(raw_full, cids_full)
+                    if v == v
+                ]
+                if cluster_style_map is not None:
+                    drop_colors = [
+                        cluster_style_map.get(cid, {}).get("color", color)
+                        for _v, cid in kept
+                    ]
+                    drop_markers = [
+                        cluster_style_map.get(cid, {}).get("marker", "o")
+                        for _v, cid in kept
+                    ]
+                elif cluster_palette_map is not None:
+                    drop_colors = [
+                        cluster_palette_map.get(cid, color)
+                        for _v, cid in kept
+                    ]
+
+        if drop_markers is not None:
+            # matplotlib's scatter accepts a single marker per call, so
+            # group points by shape and emit one call per group.
+            by_marker: dict[str, tuple[list, list, list]] = {}
+            for v, y, c, m in zip(raw, ys, drop_colors, drop_markers):
+                b = by_marker.setdefault(m, ([], [], []))
+                b[0].append(v); b[1].append(y); b[2].append(c)
+            for m, (xs, yvs, cs) in by_marker.items():
+                ax.scatter(xs, yvs, s=18, c=cs, marker=m,
+                           edgecolor="white", linewidth=0.4,
+                           alpha=0.85, zorder=5)
+        else:
+            single_colors = drop_colors if drop_colors is not None else [color]
+            ax.scatter(raw, ys, s=14, c=single_colors,
+                       edgecolor="white", linewidth=0.4,
+                       alpha=0.85, zorder=5)
 
     if threshold is not None:
         ax.axvline(threshold, color="#666", linestyle="--", linewidth=0.9,
