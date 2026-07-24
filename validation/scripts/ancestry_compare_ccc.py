@@ -112,7 +112,8 @@ def main() -> None:
     ap.add_argument("--name-a", type=str, default="A")
     ap.add_argument("--name-b", type=str, default="B")
     ap.add_argument("--out", type=Path, default=Path("ancestry_compare_ccc.png"))
-    ap.add_argument("--n-plot", type=int, default=10000)
+    ap.add_argument("--n-plot", type=int, default=None,
+                    help="max samples to plot (default: all)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -161,10 +162,14 @@ def main() -> None:
         print(f"  {lab}: {per_ccc[lab]:.4f}")
     print(f"  overall (flattened): {overall:.4f}")
 
-    n = min(args.n_plot, len(common))
-    rng = np.random.default_rng(args.seed)
-    idx = rng.choice(len(common), size=n, replace=False)
-    Ap, Bp = A[idx], B[idx]
+    if args.n_plot is None or args.n_plot >= len(common):
+        n = len(common)
+        Ap, Bp = A, B
+    else:
+        n = args.n_plot
+        rng = np.random.default_rng(args.seed)
+        idx = rng.choice(len(common), size=n, replace=False)
+        Ap, Bp = A[idx], B[idx]
 
     k = len(labels)
     ncols = 3
