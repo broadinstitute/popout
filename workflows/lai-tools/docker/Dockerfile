@@ -90,3 +90,8 @@ RUN pip3 install --break-system-packages --no-cache-dir --no-deps /tmp/popout-sr
 # Both fetched/staged by push.sh outside this build.
 COPY --from=validation data/grch38.chrom.sizes /opt/grch38.chrom.sizes
 COPY --from=region_masks . /opt/region_masks/
+
+# ── FLARE cleanup / finalize scripts ────────────────────────────────────
+# Consumed by workflows/flare/wdl/flare_cleanup.wdl and flare_finalize.wdl
+# at /opt/flare/scripts/. Same layout convention as /opt/validation.
+COPY --from=flare_scripts . /opt/flare/scripts/

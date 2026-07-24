@@ -37,6 +37,14 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /workflows/flare/wdl/flare_validate.wdl
     topic: Per-cluster FLARE validation (scatter diagnostics + cohort collation, versioned artifact bundle)
+  - name: flare-cleanup
+    subclass: WDL
+    primaryDescriptorPath: /workflows/flare/wdl/flare_cleanup.wdl
+    topic: Bookkeeping-first sample removal from per-cluster FLARE outputs before the chromosome-level merge
+  - name: flare-finalize
+    subclass: WDL
+    primaryDescriptorPath: /workflows/flare/wdl/flare_finalize.wdl
+    topic: Chromosome-level cross-cluster merge of FLARE outputs (anc VCFs + global TSVs)
   - name: gpu-probe
     subclass: WDL
     primaryDescriptorPath: /workflows/gpu_probe/wdl/gpu_probe.wdl

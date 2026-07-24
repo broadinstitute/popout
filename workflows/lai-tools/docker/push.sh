@@ -20,6 +20,12 @@ if [ ! -d "$VALIDATION_DIR" ]; then
     exit 1
 fi
 
+FLARE_SCRIPTS_DIR="$REPO_ROOT/workflows/flare/scripts"
+if [ ! -d "$FLARE_SCRIPTS_DIR" ]; then
+    echo "flare scripts dir not found at $FLARE_SCRIPTS_DIR" >&2
+    exit 1
+fi
+
 # Pin to a specific bcftools tag (rather than :latest) so lai-tools image
 # rebuilds are reproducible. Override via BCFTOOLS_TAG when bumping bcftools.
 BCFTOOLS_TAG="${BCFTOOLS_TAG:-latest}"
@@ -88,18 +94,20 @@ echo "Staged popout source size: $(du -sh "$POPOUT_STAGED" | cut -f1)"
 # cwd, so spell out the full path for each tree.
 SCRIPTS_SHA=$(cd "$REPO_ROOT" && git rev-parse --short HEAD:workflows/lai-tools/scripts 2>/dev/null || echo "x")
 VAL_SHA=$(cd "$REPO_ROOT" && git rev-parse --short HEAD:validation 2>/dev/null || echo "x")
+FLARE_SCRIPTS_SHA=$(cd "$REPO_ROOT" && git rev-parse --short HEAD:workflows/flare/scripts 2>/dev/null || echo "x")
 POPOUT_SHA=$(cd "$POPOUT_DIR" && git rev-parse --short HEAD 2>/dev/null || echo "x")
 
 REPO="us-docker.pkg.dev/broad-dsde-methods/popout/lai-tools"
-TAG="s${SCRIPTS_SHA}-v${VAL_SHA}-p${POPOUT_SHA}-bcftools-${BCFTOOLS_TAG}"
+TAG="s${SCRIPTS_SHA}-v${VAL_SHA}-f${FLARE_SCRIPTS_SHA}-p${POPOUT_SHA}-bcftools-${BCFTOOLS_TAG}"
 
 echo "Build inputs:"
-echo "  context      = $CONTEXT"
-echo "  validation   = $VALIDATION_DIR"
-echo "  popout       = $POPOUT_DIR"
-echo "  region_masks = $REGION_MASKS_STAGED"
-echo "  bcftools     = $BCFTOOLS_IMAGE"
-echo "  image tag    = ${REPO}:${TAG}"
+echo "  context        = $CONTEXT"
+echo "  validation     = $VALIDATION_DIR"
+echo "  flare_scripts  = $FLARE_SCRIPTS_DIR"
+echo "  popout         = $POPOUT_DIR"
+echo "  region_masks   = $REGION_MASKS_STAGED"
+echo "  bcftools       = $BCFTOOLS_IMAGE"
+echo "  image tag      = ${REPO}:${TAG}"
 
 docker buildx build \
     -f "$SCRIPT_DIR/Dockerfile" \
@@ -108,6 +116,7 @@ docker buildx build \
     --platform linux/amd64 \
     --build-arg "BCFTOOLS_IMAGE=${BCFTOOLS_IMAGE}" \
     --build-context "validation=${VALIDATION_DIR}" \
+    --build-context "flare_scripts=${FLARE_SCRIPTS_DIR}" \
     --build-context "popout=${POPOUT_STAGED}" \
     --build-context "region_masks=${REGION_MASKS_STAGED}" \
     --push \

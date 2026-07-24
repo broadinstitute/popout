@@ -10,6 +10,7 @@ notebooks/
 run.sh
 scripts/
 !workflows/lai-tools/scripts/
+!workflows/flare/scripts/
 !validation/scripts/
 !validation/popout_dx/scripts/
 !validation/data/
