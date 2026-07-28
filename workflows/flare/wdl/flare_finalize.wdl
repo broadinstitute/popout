@@ -188,20 +188,21 @@ workflow flare_finalize {
     # Per-chrom cluster input arrays. In manifest mode, read_lines the
     # preflight-emitted list file for this chrom and let Cromwell coerce
     # Array[String] URIs to Array[File]. In direct mode, index the caller-
-    # supplied Array[Array[File]] directly.
+    # supplied Array[Array[File]] directly. Each branch lives behind its
+    # own guard so the inactive branch is never evaluated — select_first
+    # on an undefined Array[Array[File]]? throws even when the other
+    # branch would satisfy it.
     if (defined(manifest_tsv)) {
       Array[File] anc_from_manifest    = read_lines(select_first([preflight_finalize.anc_lists])[i])
       Array[File] global_from_manifest = read_lines(select_first([preflight_finalize.global_lists])[i])
     }
+    if (!defined(manifest_tsv)) {
+      Array[File] anc_from_direct    = select_first([anc_vcfs_by_chrom])[i]
+      Array[File] global_from_direct = select_first([global_ancs_by_chrom])[i]
+    }
 
-    Array[File] anc_this_chrom    = select_first([
-      anc_from_manifest,
-      select_first([anc_vcfs_by_chrom])[i]
-    ])
-    Array[File] global_this_chrom = select_first([
-      global_from_manifest,
-      select_first([global_ancs_by_chrom])[i]
-    ])
+    Array[File] anc_this_chrom    = select_first([anc_from_manifest,    anc_from_direct])
+    Array[File] global_this_chrom = select_first([global_from_manifest, global_from_direct])
 
     call merge_wf.bcftools_merge as merge_anc {
       input:
