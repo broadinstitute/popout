@@ -10,10 +10,13 @@ version 1.0
 ## consumes the same schema). See workflows/flare/scripts/plan_cleanup.py
 ## for the exact contract.
 ##
-## The workflow emits a "cleaned" manifest whose anc_vcf / global_anc URIs
-## for affected clusters point at the cleaned artifacts under
-## <cleaned_prefix>/<cluster_id>/; unaffected rows pass through unchanged.
-## Hand that manifest to flare_finalize.wdl to perform the per-chrom merge.
+## The workflow emits the cleaned artifacts as Array[File] workflow outputs;
+## Cromwell/Terra delocalize them to a submission-specific prefix that this
+## WDL cannot predict. Assembly of a cleaned manifest for flare_finalize
+## happens post-hoc via workflows/flare/scripts/emit_cleaned_manifest.py:
+## point it at a text file listing the cleaned URIs (from a Terra data
+## table export or a `gcloud storage ls`) plus the original manifest, and
+## it joins by basename to produce the finalize input.
 ##
 ## WDL-surface justification (CLAUDE.md): separate workflow rather than a
 ## mode of flare_pipeline.wdl because the pipeline cannot be invoked
@@ -223,43 +226,6 @@ task cleanup_pair {
   }
 }
 
-task emit_manifest {
-  input {
-    File   manifest_tsv                # original, user-supplied
-    File   affected_clusters_tsv       # from preflight
-    String cleaned_prefix              # gs:// URI prefix cleanup delocalizes to
-
-    String docker_image
-    Int    cpu          = 1
-    String memory       = "2 GB"
-    Int    disk_size_gb = 10
-    String disk_type    = "HDD"
-    Int    preemptible  = 1
-  }
-
-  command <<<
-    set -euo pipefail
-    mkdir -p out
-    python3 /opt/flare/scripts/emit_cleaned_manifest.py \
-      --manifest-in       ~{manifest_tsv} \
-      --manifest-out      out/cleaned.manifest.tsv \
-      --affected-clusters ~{affected_clusters_tsv} \
-      --cleaned-prefix    "~{cleaned_prefix}"
-  >>>
-
-  output {
-    File cleaned_manifest_tsv = "out/cleaned.manifest.tsv"
-  }
-
-  runtime {
-    docker:      docker_image
-    cpu:         cpu
-    memory:      memory
-    disks:       "local-disk ~{disk_size_gb} ~{disk_type}"
-    preemptible: preemptible
-  }
-}
-
 workflow flare_cleanup {
   input {
     # Manifest TSV (same schema as validation/make_flare_validate_config.py):
@@ -275,15 +241,6 @@ workflow flare_cleanup {
 
     # Research IDs to drop. One per line; '#' comments allowed.
     File          drop_samples
-
-    # GCS URI prefix under which flare_cleanup's outputs will be
-    # delocalized as <cleaned_prefix>/<cluster_id>/<basename>. The
-    # emitted cleaned manifest rewrites affected rows to point here.
-    # This does NOT trigger any transfer inside the WDL; Cromwell's
-    # delocalization writes to whatever gs:// path the runtime dictates.
-    # The value is embedded verbatim in the cleaned manifest, so it must
-    # match wherever your Cromwell config actually delocalizes.
-    String        cleaned_prefix
 
     String?       wandb_api_key
     String        docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/lai-tools:latest"
@@ -318,17 +275,7 @@ workflow flare_cleanup {
     }
   }
 
-  # --- Emit the cleaned manifest --------------------------------------
-  call emit_manifest {
-    input:
-      manifest_tsv          = manifest_tsv,
-      affected_clusters_tsv = preflight.affected_clusters_tsv,
-      cleaned_prefix        = cleaned_prefix,
-      docker_image          = docker_image
-  }
-
   output {
-    File        cleaned_manifest_tsv    = emit_manifest.cleaned_manifest_tsv
     File        cleanup_audit_tsv       = preflight.audit_tsv
     File        affected_clusters_tsv   = preflight.affected_clusters_tsv
     File        stats_json              = preflight.stats_json
