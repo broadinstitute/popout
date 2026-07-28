@@ -22,10 +22,14 @@ Emit:
                                 scatter
   - stats.json               summary counters for W&B / manifest audit
 
+The drop list is a single cohort-wide source of truth; per-cluster
+intersections are computed here. Samples present in zero clusters are
+NOPs — they were already excluded upstream (QC, consent, sub-cohort scope)
+and are recorded in cleanup_audit.tsv with in_cluster=N. They are counted
+under num_drop_ids but not under num_drops_matched in stats.json, so any
+divergence is visible without failing the run.
+
 Hard-fails:
-  - drop-list sample present in ZERO clusters (drift between drop list and
-    the cohort partitioning; a caller silently ignoring it would corrupt the
-    delivery)
   - manifest references a cluster_id for which no sample-list was supplied
   - a supplied sample-list has no matching cluster_id in the manifest (would
     be dead weight; likely operator error)
@@ -145,7 +149,7 @@ def main() -> int:
 
     # Preserve drop-list input order in the audit.
     audit_path = args.out_dir / "cleanup_audit.tsv"
-    orphans: list[str] = []
+    n_orphans = 0
     with open(audit_path, "w") as fh:
         w = csv.writer(fh, delimiter="\t", lineterminator="\n")
         w.writerow(["sample_id", "in_cluster", "cluster_ids"])
@@ -153,15 +157,7 @@ def main() -> int:
             locs = sorted(sample_locations.get(sid, set()))
             w.writerow([sid, "Y" if locs else "N", ",".join(locs)])
             if not locs:
-                orphans.append(sid)
-
-    if orphans:
-        raise SystemExit(
-            f"drop-list contains {len(orphans)} sample(s) not present in any "
-            f"cluster: {orphans[:10]}{'...' if len(orphans) > 10 else ''}\n"
-            "either the drop list is out of sync with the cohort partitioning "
-            "or a sample-list is missing; refusing to proceed"
-        )
+                n_orphans += 1
 
     affected = sorted(per_cluster_drops.keys())
     with open(args.out_dir / "affected_clusters.tsv", "w") as fh:
@@ -189,7 +185,8 @@ def main() -> int:
         "num_clusters_total":     len(per_cluster),
         "num_clusters_affected":  len(affected),
         "num_drop_ids":           len(drops),
-        "num_drops_matched":      len(drops) - len(orphans),
+        "num_drops_matched":      len(drops) - n_orphans,
+        "num_drops_orphaned":     n_orphans,
         "num_manifest_rows":      len(rows),
         "num_affected_rows":      sum(1 for r in rows if r["cluster_id"] in affected_set),
     }
