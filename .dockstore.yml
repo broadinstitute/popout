@@ -53,6 +53,10 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /workflows/lai-tools/wdl/throughput_probe.wdl
     topic: Layered throughput diagnostic for gs:// VCF streaming (curl/gcloud/htslib/bcftools, streaming vs local)
+  - name: sha256-manifest
+    subclass: WDL
+    primaryDescriptorPath: /workflows/lai-tools/wdl/sha256_manifest.wdl
+    topic: SHA-256 of a single file; Terra-scatter one workflow per data-table row to populate a hash column
   - name: popout
     subclass: WDL
     primaryDescriptorPath: /workflows/popout/wdl/popout.wdl
