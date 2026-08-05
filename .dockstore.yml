@@ -25,6 +25,10 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /workflows/bcftools/wdl/bcftools_view.wdl
     topic: General-purpose bcftools view wrapper for region/sample/filter subsetting (scatter for per-chrom chunking)
+  - name: bcftools-bcf-to-vcf
+    subclass: WDL
+    primaryDescriptorPath: /workflows/bcftools/wdl/bcftools_bcf_to_vcf.wdl
+    topic: Convert a phased BCF to bgzipped VCF (+ tabix), sized for input + output on local disk
   - name: flare
     subclass: WDL
     primaryDescriptorPath: /workflows/flare/wdl/flare.wdl
