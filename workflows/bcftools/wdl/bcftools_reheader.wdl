@@ -41,12 +41,15 @@ task bcftools_reheader_task {
     String   docker_image = "us-docker.pkg.dev/broad-dsde-methods/popout/bcftools:latest"
   }
 
-  Float in_gb     = size(vcf, "GB")
-  Int   auto_disk = ceil(in_gb * 2.5) + 20
-
+  # Literal defaults, mirroring bcftools_view.wdl:86-91: size()-driven
+  # auto-scaling fires in the input-evaluation phase before the file's
+  # metadata is available in every Cromwell environment (observed on
+  # Terra), so it's not safe here. 200 GB covers biobank-scale chr1
+  # (~50 GB input + ~50 GB output + slack). Override for smaller chroms
+  # if disk cost matters.
   Int    cpu          = select_first([cpu_override, 2])
   String memory       = select_first([memory_override, "4 GB"])
-  Int    disk_size_gb = select_first([disk_size_gb_override, auto_disk])
+  Int    disk_size_gb = select_first([disk_size_gb_override, 200])
 
   String stem      = basename(vcf, ".vcf.gz")
   String out_vcf   = "~{stem}.vcf.gz"
