@@ -25,6 +25,10 @@ workflows:
     subclass: WDL
     primaryDescriptorPath: /workflows/bcftools/wdl/bcftools_view.wdl
     topic: General-purpose bcftools view wrapper for region/sample/filter subsetting (scatter for per-chrom chunking)
+  - name: bcftools-reheader
+    subclass: WDL
+    primaryDescriptorPath: /workflows/bcftools/wdl/bcftools_reheader.wdl
+    topic: Inject ##KEY header lines lifted verbatim from a source VCF into a target VCF (fixes merge-time header drops like ##ANCESTRY)
   - name: bcftools-bcf-to-vcf
     subclass: WDL
     primaryDescriptorPath: /workflows/bcftools/wdl/bcftools_bcf_to_vcf.wdl

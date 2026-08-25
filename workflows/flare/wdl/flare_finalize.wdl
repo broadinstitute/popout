@@ -25,7 +25,8 @@ version 1.0
 ## flare_pipeline.wdl's Stage D handles only VCFs — global TSV concat has no
 ## counterpart there. User explicitly OK'd the addition.
 
-import "../../bcftools/wdl/bcftools_merge.wdl" as merge_wf
+import "../../bcftools/wdl/bcftools_merge.wdl"    as merge_wf
+import "../../bcftools/wdl/bcftools_reheader.wdl" as rh_wf
 
 task preflight_finalize {
   input {
@@ -213,6 +214,16 @@ workflow flare_finalize {
         wandb_api_key = wandb_api_key
     }
 
+    # bcftools merge drops custom ##KEY=… lines (##ANCESTRY chief among
+    # them). Any cluster VCF at this chrom carries the FLARE ANCESTRY
+    # declaration verbatim; use the first as the source-of-truth donor.
+    call rh_wf.bcftools_reheader as reheader_anc {
+      input:
+        vcf               = merge_anc.merged_vcf,
+        source_header_vcf = anc_this_chrom[0],
+        header_keys       = ["ANCESTRY"]
+    }
+
     call concat_global {
       input:
         cluster_global_ancs = global_this_chrom,
@@ -224,8 +235,8 @@ workflow flare_finalize {
 
   output {
     Array[String] chromosomes_out        = chroms_resolved
-    Array[File]   chrom_anc_vcfs         = merge_anc.merged_vcf
-    Array[File?]  chrom_anc_vcf_indices  = merge_anc.merged_index
+    Array[File]   chrom_anc_vcfs         = reheader_anc.reheadered_vcf
+    Array[File]   chrom_anc_vcf_indices  = reheader_anc.reheadered_index_tbi
     Array[File]   chrom_global_anc       = concat_global.merged_global_anc
 
     File?         preflight_stats_json   = preflight_finalize.stats_json
