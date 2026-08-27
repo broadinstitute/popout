@@ -39,18 +39,17 @@ from pathlib import Path
 from typing import Iterable, NoReturn
 
 
-EXPECTED_SCHEMA_VERSION = "6.0.0"
+EXPECTED_SCHEMA_VERSION = "7.0.0"
 
 # Headerless TSV column order. Indexes are referenced verbatim from the WDL
 # scatter body — keep them in sync with workflows/flare/wdl/flare_validate.wdl.
 #
-# Column-order invariant: the last two columns are the required-non-empty
-# cohort singletons (rf_ancestry, chrom_sizes). Cromwell's read_tsv() uses
-# Scala split("\t") which drops TRAILING empty fields — when a row's tail
-# is all empty (e.g. self_id, popout_secondary_*, ref_panel all unset), the
-# resulting Array[String] is shorter than TSV_COLUMNS and row[N] access
-# blows up. Putting two required-non-empty columns last guarantees the
-# array always has len(TSV_COLUMNS) entries.
+# v7 note: the trailing "required-non-empty" invariant (see history) does
+# not apply to the gutted extractor pipeline, which only reads row[0..2]
+# (cluster_id, chrom, anc_vcf) — all three are always non-empty, so row
+# access never runs off the end of the array even if Cromwell strips the
+# empty tail. The full 15-column TSV is still emitted for anything that
+# still consumes the wider schema.
 TSV_COLUMNS: tuple[str, ...] = (
     "cluster_id",               # 0
     "chrom",                    # 1
@@ -69,18 +68,25 @@ TSV_COLUMNS: tuple[str, ...] = (
     "chrom_sizes",              # 14 cohort singleton — required non-empty (anchors the tail)
 )
 
-# Per-cluster_run fields the manifest-mode config must carry. Optional fields
-# may be absent or empty-string; required ones must be non-empty.
+# Per-cluster_run fields the manifest-mode config must carry. v7 gutted
+# the validation pipeline down to a single tract-events extractor, which
+# only needs cluster_id / chrom / anc_vcf. The other fields (global_anc,
+# flare_model, flare_log, input_vcf, flare_qc_tsv) remain accepted for
+# forward-compat with existing configs but are no longer required, and if
+# absent from the config they land as empty strings in the manifest TSV.
 REQUIRED_CLUSTER_RUN_FIELDS: tuple[str, ...] = (
-    "cluster_id", "chrom",
-    "anc_vcf", "global_anc", "flare_model", "flare_log",
-    "input_vcf",
+    "cluster_id", "chrom", "anc_vcf",
 )
-OPTIONAL_CLUSTER_RUN_FIELDS: tuple[str, ...] = ("flare_qc_tsv",)
+OPTIONAL_CLUSTER_RUN_FIELDS: tuple[str, ...] = (
+    "global_anc", "flare_model", "flare_log", "input_vcf", "flare_qc_tsv",
+)
 
-# Required top-level shared keys. May be empty-string (means "not provided").
-SHARED_REQUIRED_NONEMPTY: tuple[str, ...] = ("rf_ancestry", "chrom_sizes")
+# v7 collapses the shared block to fully optional. The old v6 pipeline
+# required rf_ancestry + chrom_sizes for the compare_to_rf / regional
+# steps, both of which have been retired.
+SHARED_REQUIRED_NONEMPTY: tuple[str, ...] = ()
 SHARED_OPTIONAL: tuple[str, ...] = (
+    "rf_ancestry", "chrom_sizes",
     "rye_q", "self_id",
     "popout_secondary_global", "popout_secondary_labels",
     "ref_panel",
@@ -213,13 +219,13 @@ def discover_from_manifest(cfg: dict) -> list[dict]:
             "cluster_id":              cr["cluster_id"],
             "chrom":                   cr["chrom"],
             "anc_vcf":                 cr["anc_vcf"],
-            "global_anc":              cr["global_anc"],
-            "flare_model":             cr["flare_model"],
-            "flare_log":               cr["flare_log"],
+            "global_anc":              cr.get("global_anc", "") or "",
+            "flare_model":             cr.get("flare_model", "") or "",
+            "flare_log":               cr.get("flare_log", "") or "",
             "flare_qc_tsv":            cr.get("flare_qc_tsv", "") or "",
-            "input_vcf":               cr["input_vcf"],
-            "rf_ancestry":             shared["rf_ancestry"],
-            "chrom_sizes":             shared["chrom_sizes"],
+            "input_vcf":               cr.get("input_vcf", "") or "",
+            "rf_ancestry":             shared.get("rf_ancestry", "") or "",
+            "chrom_sizes":             shared.get("chrom_sizes", "") or "",
             "rye_q":                   shared.get("rye_q", "") or "",
             "self_id":                 shared.get("self_id", "") or "",
             "popout_secondary_global": shared.get("popout_secondary_global", "") or "",

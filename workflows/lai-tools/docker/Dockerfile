@@ -16,10 +16,11 @@ ENTRYPOINT []
 #   numpy, scipy, statsmodels, matplotlib  — required by the FLARE validation
 #       diagnostic scripts (compare_to_rf, validate_regional, plot_concordance, etc.)
 #   pandas     — popout transitive dep (read_tracts uses it indirectly)
+#   pyarrow    — v7 extract_tract_events / collate_tract_bundle parquet I/O
 # --break-system-packages is required on Ubuntu 24.04 (PEP 668 marks the
 # system Python as externally managed).
 RUN pip3 install --break-system-packages --no-cache-dir \
-        pysam numpy scipy statsmodels matplotlib pandas
+        pysam numpy scipy statsmodels matplotlib pandas pyarrow
 
 # Diagnostic tools for throughput_probe.sh:
 #   tabix     — htslib's raw region-streamer (apt-installed, links against
