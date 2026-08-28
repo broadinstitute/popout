@@ -67,14 +67,25 @@ def _partition_by_chrom(
     stem: str,
     out_root: Path,
     shard_idx: int,
+    cluster_id: str,
 ) -> dict[str, int]:
     """Split shard's ``<stem>.parquet`` into per-chrom files under
     ``<out_root>/<stem>/chrom=<c>/part_<i>.parquet``. Return per-chrom row
-    counts."""
+    counts.
+
+    Adds a ``cluster_id`` column to every row. ``sample_idx`` is a
+    per-shard index; without ``cluster_id`` the (sample_idx, chrom) key
+    is not unique across the cohort, so downstream joins to
+    ``samples.parquet`` need the pair (cluster_id, sample_idx).
+    """
     src = shard_dir / f"{stem}.parquet"
     if not src.exists():
         sys.exit(f"FATAL: shard {shard_dir} missing {src.name}")
     table = pq.read_table(src)
+    n = table.num_rows
+    table = table.append_column(
+        "cluster_id", pa.array([cluster_id] * n, type=pa.string())
+    )
     chroms = table["chrom"].to_pylist()
     per_chrom: dict[str, list[int]] = defaultdict(list)
     for i, c in enumerate(chroms):
@@ -108,7 +119,14 @@ def main() -> None:
     per_sample_totals_frames: list[pa.Table] = []
     samples_frames: list[pa.Table] = []
     per_shard_row_counts: dict[str, dict[str, int]] = defaultdict(dict)
-    canonical_panel: str | None = None
+    # Cluster-level panel identity (must be byte-equal across shards):
+    #   panel_names, K, panel_source_raw, reference_build.
+    # Shard-local (per-VCF-header) fields that legitimately differ:
+    #   chrom_lengths — union across shards; conflicting lengths for the
+    #   same chrom are a hard fail.
+    canonical_identity: dict | None = None
+    canonical_source_shard: str | None = None
+    merged_chrom_lengths: dict[str, int] = {}
     provenance_lines: list[str] = []
     all_chroms: set[str] = set()
     all_sample_ids: set[str] = set()
@@ -132,31 +150,65 @@ def main() -> None:
                 )
             shard_dir = candidates[0].parent
 
-            # Panel byte-identity.
-            panel_text = (shard_dir / "panel.json").read_text()
-            if canonical_panel is None:
-                canonical_panel = panel_text
-                (args.out_dir / "panel.json").write_text(panel_text)
-            elif panel_text != canonical_panel:
+            # Panel identity check + chrom_lengths union.
+            panel_obj = json.loads((shard_dir / "panel.json").read_text())
+            identity = {
+                "panel_source_raw": panel_obj["panel_source_raw"],
+                "panel_source_body": panel_obj["panel_source_body"],
+                "panel_names": panel_obj["panel_names"],
+                "K": panel_obj["K"],
+                "reference_build": panel_obj["reference_build"],
+            }
+            if canonical_identity is None:
+                canonical_identity = identity
+                canonical_source_shard = tarball.name
+            elif identity != canonical_identity:
                 sys.exit(
-                    f"FATAL: shard {tarball} panel.json differs from "
-                    "canonical. A cohort cannot span two panel orderings."
+                    f"FATAL: shard {tarball.name} panel identity differs "
+                    f"from canonical ({canonical_source_shard}). "
+                    f"A cohort cannot span two panel orderings.\n"
+                    f"  canonical: {canonical_identity}\n"
+                    f"  this shard: {identity}"
                 )
+            for c, ln in panel_obj.get("chrom_lengths", {}).items():
+                prior = merged_chrom_lengths.get(c)
+                if prior is None:
+                    merged_chrom_lengths[c] = int(ln)
+                elif int(prior) != int(ln):
+                    sys.exit(
+                        f"FATAL: shard {tarball.name} disagrees on "
+                        f"chrom_lengths[{c!r}]: {ln} vs canonical {prior}"
+                    )
 
-            # Partition tracts / transitions / site_positions by chrom.
+            # Read samples first so we can extract cluster_id (constant
+            # per shard) before partitioning the other artefacts.
+            samp = pq.read_table(shard_dir / "samples.parquet")
+            samples_frames.append(samp)
+            all_sample_ids.update(samp["sample_id"].to_pylist())
+            shard_cluster_ids = set(samp["cluster_id"].to_pylist())
+            if len(shard_cluster_ids) != 1:
+                sys.exit(
+                    f"FATAL: shard {tarball.name} samples.parquet spans "
+                    f"multiple cluster_ids: {shard_cluster_ids}"
+                )
+            shard_cluster_id = next(iter(shard_cluster_ids))
+
+            # Partition tracts / transitions / site_positions by chrom,
+            # tagging every row with cluster_id.
             for stem in _HIVE_PARTITIONED:
                 counts = _partition_by_chrom(
-                    shard_dir, stem, args.out_dir, idx
+                    shard_dir, stem, args.out_dir, idx, shard_cluster_id
                 )
                 per_shard_row_counts[stem][tarball.name] = sum(counts.values())
                 all_chroms.update(counts.keys())
 
-            # Concat targets: per_sample_totals + samples.
+            # per_sample_totals: add cluster_id + concat.
             pst = pq.read_table(shard_dir / "per_sample_totals.parquet")
+            pst = pst.append_column(
+                "cluster_id",
+                pa.array([shard_cluster_id] * pst.num_rows, type=pa.string()),
+            )
             per_sample_totals_frames.append(pst)
-            samp = pq.read_table(shard_dir / "samples.parquet")
-            samples_frames.append(samp)
-            all_sample_ids.update(samp["sample_id"].to_pylist())
 
             # Provenance.
             prov = json.loads((shard_dir / "provenance.json").read_text())
@@ -176,6 +228,17 @@ def main() -> None:
         compression="zstd",
     )
 
+    # Canonical panel.json: identity fields + merged chrom_lengths union.
+    if canonical_identity is None:
+        sys.exit("FATAL: no shards produced a canonical panel")
+    canonical_panel_obj = dict(canonical_identity)
+    canonical_panel_obj["chrom_lengths"] = dict(
+        sorted(merged_chrom_lengths.items())
+    )
+    (args.out_dir / "panel.json").write_text(
+        json.dumps(canonical_panel_obj, indent=2)
+    )
+
     # Provenance jsonl + manifest.
     (args.out_dir / "provenance.jsonl").write_text(
         "\n".join(provenance_lines) + "\n"
@@ -190,7 +253,7 @@ def main() -> None:
         "n_samples": len(all_sample_ids),
         "chroms": sorted(all_chroms),
         "row_counts": per_stem_totals,
-        "panel": json.loads(canonical_panel or "{}"),
+        "panel": canonical_panel_obj,
     }
     (args.out_dir / "cohort_manifest.json").write_text(
         json.dumps(manifest, indent=2)
